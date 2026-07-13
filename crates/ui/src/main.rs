@@ -4,6 +4,7 @@
 //! 라이브러리가 필요하다(런타임 바인딩 방식).
 
 mod app;
+mod autosave;
 mod fonts;
 mod toolbar;
 mod viewer_panel;

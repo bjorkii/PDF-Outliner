@@ -93,6 +93,15 @@ pub struct PdfViewerApp {
     /// 다른 문서를 열려고 했는데 현재 북마크에 저장 안 된 변경사항이 있어 확인을 기다리는 중.
     pub pending_open_path: Option<PathBuf>,
 
+    /// 시작 시 감지된, 이전 세션이 비정상 종료돼 복구 가능한 자동저장 스냅샷이 있으면
+    /// 여기 담겨 사용자에게 복구 여부를 물어보는 대화상자로 이어진다(`autosave` 모듈).
+    pub pending_recovery: Option<crate::autosave::RecoverableSession>,
+
+    /// 저장 안 된 북마크 변경사항이 있는 채로 창을 닫으려(Cmd+Q, 창 닫기 버튼 등) 해서
+    /// 종료를 일단 취소하고 확인창을 띄운 상태 — 다른 문서를 열 때의 저장 확인과 동일한
+    /// 관례(`show_unsaved_changes_dialog`)를 종료 시에도 적용한다.
+    pub quit_confirmation_pending: bool,
+
     /// 이전 실행 종료 시점에 열려있던 파일 경로(eframe Storage에서 복원). `main.rs`가
     /// 시작 시 CLI 인자가 없으면 이 값으로 자동으로 연 뒤 소비(take)한다.
     pub last_opened_file: Option<PathBuf>,
@@ -119,6 +128,10 @@ impl PdfViewerApp {
             .and_then(|s| s.get_string(LAST_OPENED_FILE_KEY))
             .map(PathBuf::from);
 
+        // 이번 세션이 자동저장 파일을 건드리기 전에 먼저 확인해야 이전 세션의 흔적을
+        // 덮어쓰지 않는다.
+        let pending_recovery = crate::autosave::check_for_crash_recovery();
+
         Self {
             current_file: None,
             current_page: 1,
@@ -142,6 +155,8 @@ impl PdfViewerApp {
             render_target_width: None,
             image_rect: None,
             pending_open_path: None,
+            pending_recovery,
+            quit_confirmation_pending: false,
             last_opened_file,
             last_window_title: None,
             status_message,
@@ -208,6 +223,48 @@ impl PdfViewerApp {
 
     pub fn cancel_pending_open(&mut self) {
         self.pending_open_path = None;
+    }
+
+    /// 크래시 복구 대화상자에서 "복구"를 선택했을 때: 그 세션에서 열려있던 문서를 열고,
+    /// PDF 자체 outline 대신 자동저장에 남아있던(저장되지 않았던) 북마크 트리로 덮어쓴다.
+    /// 아직 PDF에 저장된 건 아니므로 dirty로 표시해 사용자가 "저장"을 눌러야 확정된다.
+    pub fn accept_recovery(&mut self) {
+        let Some(session) = self.pending_recovery.take() else {
+            return;
+        };
+        self.request_open_file(session.file_path);
+        self.bookmarks = session.bookmarks;
+        self.bookmarks_dirty = true;
+    }
+
+    /// "무시"를 선택했을 때: 복구하지 않고, 다음 실행에도 다시 묻지 않도록 자동저장 흔적을
+    /// 즉시 정상 종료 상태로 표시해둔다.
+    pub fn dismiss_recovery(&mut self) {
+        if let Some(session) = self.pending_recovery.take() {
+            crate::autosave::record(Some(&session.file_path), &[], false);
+        }
+    }
+
+    /// 종료 확인창에서 "저장"을 선택했을 때: 저장에 성공하면 취소해뒀던 종료를 다시
+    /// 요청해 실제로 창을 닫는다. 실패하면(에러는 save_bookmarks_to_pdf가 status_message에
+    /// 남김) 확인창을 그대로 띄운 채로 둬 사용자가 다시 시도하거나 취소할 수 있게 한다.
+    pub fn confirm_save_then_quit(&mut self, ctx: &egui::Context) {
+        if self.save_bookmarks_to_pdf() {
+            self.quit_confirmation_pending = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// "저장하지 않음"을 선택했을 때: 편집을 버리고 그대로 종료를 재요청한다.
+    pub fn discard_and_quit(&mut self, ctx: &egui::Context) {
+        self.bookmarks_dirty = false;
+        self.quit_confirmation_pending = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// "취소"를 선택했을 때: 종료 자체를 그만두고 앱을 계속 쓴다.
+    pub fn cancel_quit(&mut self) {
+        self.quit_confirmation_pending = false;
     }
 
     /// 현재 문서에 북마크 트리를 저장한다(PDF 자체의 outline을 갱신).
@@ -570,6 +627,18 @@ impl PdfViewerApp {
         }
     }
 
+    /// 저장 안 된 북마크 변경사항이 있는 채로 창을 닫으려 하면(닫기 버튼, Cmd+Q 등)
+    /// 일단 종료 자체를 취소하고 확인창을 띄운다. eframe 문서에 명시된 관례대로
+    /// `close_requested()`가 참인 프레임에 `ViewportCommand::CancelClose`를 보내지
+    /// 않으면 이번 프레임이 끝난 뒤 그대로 종료돼버리므로, 반드시 같은 프레임 안에서
+    /// 응답해야 한다. 변경사항이 없으면 아무것도 안 해서 정상적으로 닫히게 둔다.
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) && self.bookmarks_dirty {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.quit_confirmation_pending = true;
+        }
+    }
+
     /// OS 파일 탐색기에서 PDF를 창으로 드래그 앤 드롭했을 때 처리.
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped_path = ctx.input(|i| {
@@ -659,11 +728,81 @@ fn show_unsaved_changes_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
         });
 }
 
+/// "이전 세션이 비정상 종료된 것으로 보입니다" 복구 확인창. 시작 시
+/// `autosave::check_for_crash_recovery()`로 감지된 게 있을 때만(`pending_recovery`가
+/// `Some`일 때) 뜬다.
+fn show_crash_recovery_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
+    let Some(session) = &app.pending_recovery else {
+        return;
+    };
+
+    let file_name = session
+        .file_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| session.file_path.to_string_lossy().to_string());
+    let saved_at = session
+        .saved_at
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d %H:%M:%S");
+
+    egui::Window::new("이전 세션 복구")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label("이전 실행이 비정상 종료된 것으로 보입니다.");
+            ui.label(format!("문서: {file_name}"));
+            ui.label(format!("마지막 자동저장: {saved_at}"));
+            ui.label("저장되지 않았던 북마크 편집을 복구하시겠습니까?");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("복구").clicked() {
+                    app.accept_recovery();
+                }
+                if ui.button("무시").clicked() {
+                    app.dismiss_recovery();
+                }
+            });
+        });
+}
+
+/// "저장하시겠습니까?" 종료 확인창. 저장 안 된 북마크 변경사항이 있는 채로 앱을
+/// 종료하려 했을 때만(`quit_confirmation_pending`) 뜬다 — 새 문서를 열 때의
+/// `show_unsaved_changes_dialog`와 같은 문구/구성.
+fn show_quit_confirmation_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
+    if !app.quit_confirmation_pending {
+        return;
+    }
+
+    egui::Window::new("변경사항 저장")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label("앱을 종료하면 기존 북마크 변경사항이 유실됩니다.");
+            ui.label("기존 내용을 저장하시겠습니까?");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("저장").clicked() {
+                    app.confirm_save_then_quit(ctx);
+                }
+                if ui.button("저장하지 않음").clicked() {
+                    app.discard_and_quit(ctx);
+                }
+                if ui.button("취소").clicked() {
+                    app.cancel_quit();
+                }
+            });
+        });
+}
+
 impl eframe::App for PdfViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_window_title(ctx);
         self.handle_page_navigation_keys(ctx);
         self.handle_dropped_files(ctx);
+        self.handle_close_request(ctx);
 
         crate::toolbar::show(ctx, self);
         crate::sidebar::show(ctx, self);
@@ -677,15 +816,32 @@ impl eframe::App for PdfViewerApp {
         // 옮기면, 문서 교체가 일어나도 그 프레임의 viewer_panel::show는 이미 None이 된
         // page_texture를 보고 그냥 아무 것도 안 그리게 되어 안전하다.
         show_unsaved_changes_dialog(ctx, self);
+        show_crash_recovery_dialog(ctx, self);
+        show_quit_confirmation_dialog(ctx, self);
         crate::viewer_panel::show(ctx, self);
     }
 
-    /// eframe이 주기적으로/종료 시 호출 — 다음 실행 때 마지막으로 열었던 파일을
-    /// 자동으로 열기 위해 경로만 저장한다(북마크 내용 자체는 PDF에 저장하는 게 원칙이라
-    /// 여기 별도로 안 담음).
+    /// eframe이 주기적으로(`auto_save_interval`)/종료 시 호출.
+    /// - 마지막으로 열었던 파일 경로는 항상 저장(다음 실행 자동 재오픈용).
+    /// - 저장되지 않은 북마크 편집이 있으면 크래시 복구용 자동저장 스냅샷도 갱신한다
+    ///   (`autosave` 모듈 — PDF 자체 저장과는 별개).
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         if let Some(path) = &self.current_file {
             storage.set_string(LAST_OPENED_FILE_KEY, path.to_string_lossy().to_string());
         }
+        crate::autosave::record(self.current_file.as_deref(), &self.bookmarks, self.bookmarks_dirty);
+    }
+
+    /// eframe이 `save()` 직후, 정상 종료 시 딱 한 번 호출 — 저장되지 않은 편집이 남아
+    /// 있었더라도(사용자가 "저장 안 함"을 선택했거나 그냥 종료한 경우 포함) 이건 크래시가
+    /// 아니라 정상 종료이므로 `clean_exit: true`로 명시해 다음 실행에 복구 프롬프트가
+    /// 뜨지 않게 한다.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        crate::autosave::record(self.current_file.as_deref(), &self.bookmarks, false);
+    }
+
+    /// 크래시 복구 자동저장 주기 — 사용자 요청대로 1분.
+    fn auto_save_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(60)
     }
 }

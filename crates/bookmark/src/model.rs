@@ -47,7 +47,9 @@ pub struct BookmarkRow {
 }
 
 /// UI(사이드바 트리)/import 파싱 결과용 재귀 트리 노드.
-#[derive(Debug, Clone, PartialEq)]
+/// Serialize/Deserialize는 크래시 복구용 자동저장 스냅샷(`crates/ui/src/autosave.rs`)에
+/// 그대로 JSON 직렬화하기 위해 필요하다.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BookmarkNode {
     pub id: Uuid,
     pub title: String,
