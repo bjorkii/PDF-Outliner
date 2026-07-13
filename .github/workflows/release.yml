@@ -1,0 +1,103 @@
+name: Release
+
+# 서명/공증 없는 배포 패키지 자동 생성 (pdf_viewer_spec.md §5).
+# macOS는 ad-hoc 코드서명만 적용(Apple Silicon 실행에 기술적으로 필요, 유료 Developer ID 아님).
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch: {}
+
+env:
+  # bblanchon/pdfium-binaries 릴리스 태그. 업데이트 시 이 값만 바꾸면 됨.
+  PDFIUM_TAG_ENCODED: chromium%2F7947
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            pdfium_asset: pdfium-mac-arm64.tgz
+          - target: x86_64-apple-darwin
+            pdfium_asset: pdfium-mac-x64.tgz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Download pdfium
+        run: |
+          curl -L -o pdfium.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG_ENCODED}/${{ matrix.pdfium_asset }}"
+          mkdir -p pdfium_extracted
+          tar xzf pdfium.tgz -C pdfium_extracted
+
+      - name: Locate pdfium dylib
+        id: pdfium
+        run: |
+          path="$(find pdfium_extracted -name 'libpdfium.dylib' -print -quit)"
+          if [ -z "$path" ]; then
+            echo "libpdfium.dylib not found in extracted archive" >&2
+            exit 1
+          fi
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        run: ./scripts/package-macos.sh ${{ matrix.target }} "${{ steps.pdfium.outputs.path }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.target }}
+          path: dist/*.zip
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download pdfium
+        shell: bash
+        run: |
+          curl -L -o pdfium.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG_ENCODED}/pdfium-win-x64.tgz"
+          mkdir -p pdfium_extracted
+          tar xzf pdfium.tgz -C pdfium_extracted
+
+      - name: Locate pdfium dll
+        id: pdfium
+        shell: bash
+        run: |
+          path="$(find pdfium_extracted -name 'pdfium.dll' -print -quit)"
+          if [ -z "$path" ]; then
+            echo "pdfium.dll not found in extracted archive" >&2
+            exit 1
+          fi
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -PdfiumDllPath "${{ steps.pdfium.outputs.path }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/*.zip
+
+  release:
+    needs: [build-macos, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.zip
+          generate_release_notes: true

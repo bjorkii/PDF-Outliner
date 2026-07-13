@@ -21,7 +21,7 @@ cargo build --workspace   # rustc/cargo는 ~/.zshrc에 이미 PATH 잡혀있음
 cargo test --workspace    # 전부 통과해야 정상 (bookmark 13, import_export 3+2, pdf_outline_writer 6, ui 4+3 등)
 ./target/debug/pdf_viewer [선택: 열 pdf 경로]
 ```
-pdfium dylib은 Homebrew `ocrmypdf` 종속성 경로를 하드코딩 폴백으로 씀(`crates/ui/src/app.rs`의 `create_engine()`) — `PDFIUM_DYLIB_PATH` 환경변수로 override 가능. 경로: `/opt/homebrew/Cellar/ocrmypdf/17.8.0/libexec/lib/python3.14/site-packages/pypdfium2_raw/libpdfium.dylib`
+pdfium dylib 탐색 순서(`crates/ui/src/app.rs`의 `create_engine()`, 2026-07-13 배포 대응으로 순서 변경): (1) 실행 파일 기준 배포 번들 경로(macOS `../Frameworks/libpdfium.dylib`, Windows 같은 디렉토리 `pdfium.dll`) → (2) `PDFIUM_DYLIB_PATH` 환경변수 → (3) 이 머신 전용 Homebrew `ocrmypdf` 종속성 경로 하드코딩 폴백: `/opt/homebrew/Cellar/ocrmypdf/17.8.0/libexec/lib/python3.14/site-packages/pypdfium2_raw/libpdfium.dylib`. 배포 패키징은 §5 참고.
 
 **git**: 2026-07-13에 프로젝트 루트에 `git init` 완료(그 전엔 git repo 아니었음), 첫 커밋 존재. `target/`은 `.gitignore` 처리됨(6GB+). 앞으로 변경할 때마다 `git add . && git commit`으로 스냅샷 남길 것 — 이제 `git log`/`git diff`로 이력 추적 가능.
 
@@ -209,19 +209,25 @@ CSV/Excel 컬럼 순서 동일, 헤더는 한글, CSV는 UTF-8 BOM 적용(§2).
 
 ---
 
-## 5. 배포 (비전문가 대상, 전부 미착수)
+## 5. 배포 (비전문가 대상)
+
+**2026-07-13: 서명/공증 없는 배포 파이프라인 구축 완료(사용자가 유료 Developer ID/코드서명 없이 진행하기로 결정 — 우클릭→열기로 우회 가능함을 확인 후).**
 
 ### macOS
-- `.app` 빌드: `cargo-bundle`/`cargo-packager`, `.pkg`화: `pkgbuild`/`productbuild`
-- **Apple Developer ID 서명 + notarization 필수** — 없으면 Gatekeeper 차단. 연 $99
+- `.app` 번들: 직접 작성한 `scripts/package-macos.sh`가 `cargo build --release --target <triple>`로 빌드 후 수동으로 `Contents/{MacOS,Frameworks}` 구조 + `Info.plist` 생성(cargo-bundle/cargo-packager 미사용 — 의존성 추가 없이 셸 스크립트로 충분).
+- **ad-hoc 코드서명 적용**(`codesign --sign -`, 무료, 계정 불필요) — Apple Silicon은 서명이 전혀 없는 바이너리는 아예 실행이 안 되기 때문에 기술적으로 필수. 유료 Developer ID 서명·notarization은 미적용 → 다른 기기에서 실행 시 Gatekeeper가 "확인되지 않은 개발자" 경고를 띄우며, 사용자는 우클릭→열기(또는 시스템 설정에서 "그래도 열기")로 우회해야 함. App Store/불특정 다수 배포에는 부적합, 소수 배포용.
+- `.pkg`화(`pkgbuild`/`productbuild`)는 미착수 — zip 배포로 충분하다고 판단.
 
 ### Windows
-- `.msi`: `cargo-wix`/`cargo-packager`
-- **코드서명 인증서(가능하면 EV) 강력 권장** — 없으면 SmartScreen 경고로 이탈 다수
+- exe + `pdfium.dll`을 `scripts/package-windows.ps1`이 zip으로 묶음. `.msi`(`cargo-wix`/`cargo-packager`)는 미착수(우선순위 낮음, zip으로 충분).
+- **코드서명 없음** → SmartScreen 경고 뜸(사용자가 감수하기로 함).
 
 ### 공통
-- PDFium 동적 라이브러리를 설치 패키지 안에 동봉(별도 다운로드 요구 금지)
-- CI: GitHub Actions matrix (`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-pc-windows-msvc`)
+- PDFium 동적 라이브러리를 패키지 안에 동봉 완료: CI가 `bblanchon/pdfium-binaries`(태그는 `.github/workflows/release.yml`의 `PDFIUM_TAG_ENCODED`로 고정)에서 플랫폼별 바이너리를 받아 각 패키징 스크립트에 전달.
+- `crates/ui/src/app.rs`의 `create_engine()`이 실행 파일 기준 상대경로(macOS: `../Frameworks/libpdfium.dylib`, Windows: 같은 디렉토리의 `pdfium.dll`)를 최우선으로 탐색하도록 수정 — 기존 이 머신 전용 Homebrew 하드코딩 경로는 개발 편의용 최후 폴백으로만 남김.
+- CI: `.github/workflows/release.yml` — GitHub Actions matrix(`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-pc-windows-msvc`), `v*.*.*` 태그 push 또는 수동 실행(`workflow_dispatch`)으로 트리거, 3개 zip을 GitHub Release에 자동 첨부.
+- 로컬 검증: 이 머신(arm64 mac)에서 `scripts/package-macos.sh aarch64-apple-darwin <pdfium dylib>`로 만든 `.app`을 실제로 실행해 358페이지 샘플 PDF 렌더링 + 북마크 사이드바까지 정상 동작 확인함(2026-07-13). x86_64 mac/Windows 빌드는 이 머신에서 직접 실행 검증 불가 — CI 실행 후 사용자가 실기 확인 필요.
+- 앱 아이콘(.icns/.ico) 미동봉 — 기본 아이콘으로 빌드됨(범위 밖, 필요 시 추후 추가).
 
 ## 5-1. 개발 환경 요구사항
 
@@ -252,10 +258,11 @@ CSV/Excel 컬럼 순서 동일, 헤더는 한글, CSV는 UTF-8 BOM 적용(§2).
 
 ### 남은 작업 (우선순위 낮음, 전부 미착수)
 - [ ] SQLite 스키마/마이그레이션 — 북마크 저장은 이제 PDF 자체 outline이 1차 수단이라 우선순위 낮음(CSV/Excel처럼 보조·백업 용도로만 필요할 수도). 크래시 복구 용도로도 검토했으나 데이터 모델이 "열린 문서 하나짜리 트리 스냅샷"뿐이라 관계형 쿼리가 필요 없어 기각 — JSON 자동저장으로 대체(§4)
-- [ ] CI/서명/패키징 파이프라인 (§5)
-- [ ] 배포용 pdfium dylib을 앱 번들에 정식 동봉(현재는 개발 편의상 Homebrew 종속 경로 하드코딩 — §0 참고)
+- [ ] 유료 Apple Developer ID 서명 + notarization, Windows 코드서명 인증서 (§5 — 사용자가 현재는 의도적으로 미적용 결정)
+- [ ] macOS `.pkg`화, Windows `.msi`화 (§5 — 현재는 zip 배포로 충분하다고 판단)
 - [ ] 진짜로 시각적으로 기울어진 스캔 텍스트 샘플로 하이라이트 정확도 검증(§3)
 - [ ] Excel 행 수동 재배열 후 import 시 계층 깨짐 방지 UX (§4)
+- [ ] GitHub 저장소 연결 + 첫 릴리스 태그 push(§5 — CI workflow 자체는 완성, 저장소 연결은 사용자 액션 대기 중)
 
 ---
 

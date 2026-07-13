@@ -838,17 +838,30 @@ impl PdfViewerApp {
 }
 
 /// pdfium 동적 라이브러리를 찾아 엔진을 초기화한다.
-/// 정식 배포판에서는 앱 번들 내 동봉 경로 하나만 시도하면 되지만, 개발 중에는 이 머신에
-/// Homebrew(ocrmypdf 의존성)로 이미 설치된 libpdfium.dylib를 재사용해 실제 렌더링을 검증한다.
+/// 우선순위: (1) 실행 파일 기준 배포 번들 동봉 경로 → (2) PDFIUM_DYLIB_PATH 환경변수(개발용 오버라이드)
+/// → (3) 이 머신에 Homebrew(ocrmypdf 의존성)로 이미 설치된 libpdfium.dylib(개발 편의 폴백).
 fn create_engine() -> Option<PdfEngine> {
-    let candidates: Vec<PathBuf> = std::env::var("PDFIUM_DYLIB_PATH")
-        .ok()
-        .map(PathBuf::from)
-        .into_iter()
-        .chain([
-            PathBuf::from("/opt/homebrew/Cellar/ocrmypdf/17.8.0/libexec/lib/python3.14/site-packages/pypdfium2_raw/libpdfium.dylib"),
-        ])
-        .collect();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // 배포 번들 레이아웃: macOS는 `PDF Outliner.app/Contents/MacOS/pdf_viewer` 기준
+    // `../Frameworks/libpdfium.dylib`, Windows/Linux는 실행 파일과 같은 디렉토리.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            if cfg!(target_os = "macos") {
+                candidates.push(exe_dir.join("../Frameworks/libpdfium.dylib"));
+            } else if cfg!(target_os = "windows") {
+                candidates.push(exe_dir.join("pdfium.dll"));
+            } else {
+                candidates.push(exe_dir.join("libpdfium.so"));
+            }
+        }
+    }
+
+    candidates.extend(std::env::var("PDFIUM_DYLIB_PATH").ok().map(PathBuf::from));
+
+    candidates.push(PathBuf::from(
+        "/opt/homebrew/Cellar/ocrmypdf/17.8.0/libexec/lib/python3.14/site-packages/pypdfium2_raw/libpdfium.dylib",
+    ));
 
     for candidate in candidates {
         if let Ok(engine) = PdfEngine::new_with_library_path(&candidate) {
