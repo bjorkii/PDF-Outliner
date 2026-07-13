@@ -1,0 +1,12 @@
+[package]
+name = "bookmark"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+uuid.workspace = true
+serde.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]

@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pdf_engine",
+    "crates/bookmark",
+    "crates/import_export",
+    "crates/pdf_outline_writer",
+    "crates/ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["PDF Viewer Project"]
+
+# 워크스페이스 전역 공통 의존성 버전 고정 (크레이트 간 버전 불일치 방지)
+[workspace.dependencies]
+uuid = { version = "1", features = ["v4", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Release 빌드 최적화 (Sumatra급 체감 속도 목표 - 바이너리 크기/실행속도)
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
