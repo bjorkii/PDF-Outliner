@@ -125,6 +125,15 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                         }
                     }
 
+                    // Enter — 선택된 항목의 페이지를 뷰어에 표시. 클릭으로 처음 선택했을 때는
+                    // 곧바로 페이지가 넘어가지만, 화살표 키로 선택을 옮긴 뒤에는 페이지가 안
+                    // 따라와서 다시 확인하고 싶을 때 이 키만으로도 이동할 수 있게 한다.
+                    if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if let Some(page) = find_page(&app.bookmarks, selected) {
+                            outcome.jump_page = Some(page);
+                        }
+                    }
+
                     let mut visible = Vec::new();
                     flatten_visible(&app.bookmarks, &drag_state.collapsed, &mut visible);
                     if let Some(pos) = visible.iter().position(|id| *id == selected) {
@@ -207,24 +216,34 @@ fn render_nodes(
 
         let row_response = ui.horizontal(|ui| {
             // 접기/펼치기 화살표(자식 있는 노드만). 없는 노드는 자리만 맞춰서 정렬을 맞춘다.
-            // 폭을 반드시 add_sized로 고정해야 한다 — Button은 프레임 유무/텍스트 크기에 따라
-            // 실제 폭이 미묘하게 달라져서, 자식 있는 행과 없는 행의 라벨 시작 x좌표가
-            // 안 맞는(자식 있는 쪽이 왼쪽으로 살짝 밀리는) 정렬 어긋남이 있었다.
+            // add_sized(Button)로 폭을 고정해봤지만 여전히 자식 있는 행이 없는 행보다 더
+            // 들여쓰기되는 정렬 어긋남이 있었다 — egui의 centered_and_justified 레이아웃은
+            // 버튼의 "요청한" 크기가 아니라 내부 콘텐츠가 실제로 차지한 min_rect 크기만큼만
+            // 부모 커서를 전진시키기 때문에(egui ui.rs의 allocate_new_ui_dyn 참고), 작은
+            // 아이콘 글리프 하나만 든 Button의 실제 폭이 18.0과 미묘하게 달라지면 그만큼
+            // 어긋난다. allocate_exact_size로 폭을 직접 못박고 그 rect 안에 글리프만
+            // 수동으로 그리면 두 경우가 항상 정확히 같은 폭을 차지한다.
             let toggle_size = egui::vec2(18.0, ui.spacing().interact_size.y);
+            let (toggle_rect, toggle_response) = ui.allocate_exact_size(
+                toggle_size,
+                if has_children { Sense::click() } else { Sense::hover() },
+            );
             if has_children {
                 let icon = if is_collapsed { ">" } else { "v" };
-                if ui
-                    .add_sized(toggle_size, egui::Button::new(icon).small().frame(false))
-                    .clicked()
-                {
+                ui.painter().text(
+                    toggle_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    icon,
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    ui.visuals().text_color(),
+                );
+                if toggle_response.clicked() {
                     if is_collapsed {
                         drag_state.collapsed.remove(&node.id);
                     } else {
                         drag_state.collapsed.insert(node.id);
                     }
                 }
-            } else {
-                ui.add_space(toggle_size.x);
             }
 
             if is_editing {
@@ -392,6 +411,18 @@ fn find_title(nodes: &[BookmarkNode], id: Uuid) -> Option<String> {
         }
         if let Some(title) = find_title(&n.children, id) {
             return Some(title);
+        }
+    }
+    None
+}
+
+fn find_page(nodes: &[BookmarkNode], id: Uuid) -> Option<u32> {
+    for n in nodes {
+        if n.id == id {
+            return Some(n.page);
+        }
+        if let Some(page) = find_page(&n.children, id) {
+            return Some(page);
         }
     }
     None

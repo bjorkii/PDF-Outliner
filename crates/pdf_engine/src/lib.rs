@@ -5,6 +5,7 @@
 //! (macOS: libpdfium.dylib, Windows: pdfium.dll)를 앱 번들 안에서 찾아 로드한다.
 //! 따라서 이 크레이트 자체의 컴파일에는 실제 pdfium 라이브러리가 필요 없다.
 
+pub mod links;
 pub mod outline;
 pub mod selection;
 pub mod skew;

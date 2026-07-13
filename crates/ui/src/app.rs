@@ -65,6 +65,13 @@ pub struct PdfViewerApp {
     /// sidebar.rs가 담당하는 DragState가 필요해서 여기서는 플래그만 세운다.
     pub request_add_bookmark: bool,
 
+    /// 웹브라우저 뒤로/앞으로가기(Cmd+[/Cmd+])처럼 페이지 이동 히스토리를 순회하기 위한
+    /// 스택. `go_to_page`로 페이지가 바뀔 때마다(북마크 클릭, 링크 클릭, 방향키, 페이지
+    /// 번호 입력 등 경로 무관) 현재 페이지가 back 스택에 쌓이고 forward 스택은 비워진다.
+    /// 문서를 새로 열면 둘 다 초기화한다(다른 문서의 페이지 번호는 의미가 없으므로).
+    pub page_back_history: Vec<u32>,
+    pub page_forward_history: Vec<u32>,
+
     /// 텍스트 선택 상태: 좌표가 아니라 인덱스로 관리 (pdf_engine::selection 설계 참고)
     pub selection: Option<pdf_engine::selection::TextSelectionRange>,
     pub selection_drag_start_index: Option<i32>,
@@ -124,6 +131,8 @@ impl PdfViewerApp {
             bookmark_undo_stack: VecDeque::new(),
             bookmark_redo_stack: VecDeque::new(),
             request_add_bookmark: false,
+            page_back_history: Vec::new(),
+            page_forward_history: Vec::new(),
             selection: None,
             selection_drag_start_index: None,
             engine,
@@ -163,6 +172,8 @@ impl PdfViewerApp {
                 self.bookmarks_dirty = false;
                 self.selected_bookmark = None;
                 self.bookmark_undo_stack.clear();
+                self.page_back_history.clear();
+                self.page_forward_history.clear();
                 self.document = Some(document);
                 self.current_file = Some(path);
                 self.page_texture = None;
@@ -438,7 +449,44 @@ impl PdfViewerApp {
         }
     }
 
+    /// 문서 내 링크가 가리키는 외부 URI를 시스템 기본 브라우저로 연다.
+    pub fn open_external_link(&mut self, url: &str) {
+        if let Err(err) = open::that(url) {
+            self.status_message = Some(format!("링크 열기 실패: {err}"));
+        }
+    }
+
+    /// 페이지 이동. 실제 페이지가 바뀌는 경우 현재 페이지를 뒤로가기 히스토리에 쌓고
+    /// 앞으로가기 히스토리는 비운다(표준 브라우저 히스토리 관례 — 새로 이동하면 그 시점
+    /// 이후의 "앞으로" 기록은 더 이상 의미가 없음). 히스토리 자체를 순회하는
+    /// `navigate_back`/`navigate_forward`는 이 함수가 아니라 `set_current_page`를 직접
+    /// 써서 순회 중에 히스토리가 다시 쌓이는 걸 방지한다.
     pub fn go_to_page(&mut self, page: u32) {
+        let clamped = page.clamp(1, self.total_pages.max(1));
+        if clamped != self.current_page {
+            self.page_back_history.push(self.current_page);
+            self.page_forward_history.clear();
+        }
+        self.set_current_page(clamped);
+    }
+
+    /// Cmd+[ — 웹브라우저 뒤로가기. 히스토리가 비어있으면 아무 일도 안 한다.
+    pub fn navigate_back(&mut self) {
+        if let Some(prev) = self.page_back_history.pop() {
+            self.page_forward_history.push(self.current_page);
+            self.set_current_page(prev);
+        }
+    }
+
+    /// Cmd+] — 웹브라우저 앞으로가기. 히스토리가 비어있으면 아무 일도 안 한다.
+    pub fn navigate_forward(&mut self) {
+        if let Some(next) = self.page_forward_history.pop() {
+            self.page_back_history.push(self.current_page);
+            self.set_current_page(next);
+        }
+    }
+
+    fn set_current_page(&mut self, page: u32) {
         let clamped = page.clamp(1, self.total_pages.max(1));
         self.current_page = clamped;
         self.page_number_input = clamped.to_string();
@@ -483,6 +531,17 @@ impl PdfViewerApp {
             // sidebar.rs가 담당(편집 포커스 이동까지 이어져야 해서) — 여기선 요청만 세운다.
             if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::B)) {
                 self.request_add_bookmark = true;
+            }
+
+            // Cmd+[ / Cmd+] — 웹브라우저 뒤로/앞으로가기처럼 페이지 이동 히스토리를
+            // 순회한다(북마크 클릭, 문서 내 링크 클릭, 방향키, 페이지 번호 입력 등으로
+            // 쌓인 히스토리 — go_to_page 참고). 사이드바 선택 여부와 무관하게 항상
+            // 동작한다(Cmd+Z/Cmd+B와 같은 스코프).
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::OpenBracket)) {
+                self.navigate_back();
+            }
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::CloseBracket)) {
+                self.navigate_forward();
             }
 
             // Delete/Backspace — 선택된 북마크 삭제. 사이드바 텍스트 편집 중엔

@@ -1,6 +1,7 @@
 use crate::app::PdfViewerApp;
 use crate::toolbar::handle_scroll_zoom;
 use egui::Sense;
+use pdf_engine::links::LinkTarget;
 use pdf_engine::selection::TextSelectionRange;
 use pdfium_render::prelude::*;
 
@@ -59,11 +60,15 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
         let image_rect =
             egui::Rect::from_center_size(rect.center() + app.viewport.pan_offset, tex_size);
 
-        // 마우스가 문자 위에 있으면 텍스트 커서(I-beam)로 바꿔 선택 가능함을 알려준다.
+        // 마우스가 링크 위에 있으면 손가락(Pointer) 커서, 문자 위에 있으면 텍스트
+        // 커서(I-beam)로 바꿔 각각 클릭/선택 가능함을 알려준다. 링크가 텍스트 위에 겹쳐
+        // 있는 경우가 흔하므로(예: 밑줄 그어진 하이퍼링크) 링크를 먼저 확인한다.
         // interact_pointer_pos()는 버튼이 눌려있을 때만 값이 있어 호버만으로는 커서가
         // 안 바뀌는 문제가 있었다 — hover_pos()는 버튼 상태와 무관하게 항상 갱신된다.
         if let Some(pos) = response.hover_pos() {
-            if char_index_at_screen_pos(app, pos, image_rect, target_width).is_some() {
+            if link_target_at_screen_pos(app, pos, image_rect, target_width).is_some() {
+                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+            } else if char_index_at_screen_pos(app, pos, image_rect, target_width).is_some() {
                 ctx.set_cursor_icon(egui::CursorIcon::Text);
             }
         }
@@ -84,6 +89,17 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
         // 페이지 이동으로 돌아온다(선택된 북마크가 있는 동안은 화살표가 트리 탐색용).
         if response.clicked() {
             app.selected_bookmark = None;
+
+            // 클릭한 위치가 문서 내 링크(주석)라면 그 대상으로 이동/열기한다 — 문서 내
+            // 다른 페이지를 가리키면 뷰어에서 바로 이동, 외부 URI(웹 링크 등)면 시스템
+            // 기본 브라우저로 연다.
+            if let Some(pos) = response.interact_pointer_pos() {
+                match link_target_at_screen_pos(app, pos, image_rect, target_width) {
+                    Some(LinkTarget::Page(page)) => app.go_to_page(page),
+                    Some(LinkTarget::Uri(url)) => app.open_external_link(&url),
+                    None => {}
+                }
+            }
         }
 
         // 확대 시 drag 탐색: 텍스트 선택 드래그가 아닐 때만 pan으로 처리.
@@ -129,6 +145,33 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
         // macOS 트랙패드 핀치 제스처는 eframe 기본 추상화 밖 -> raw winit
         // WindowEvent::PinchGesture 후킹이 필요 (별도 platform integration 모듈에서 처리 예정)
     });
+}
+
+/// 화면 좌표(스크린 픽셀) → 렌더링에 쓰인 PdfRenderConfig 기준 비트맵 픽셀 → PDF 포인트 →
+/// 그 위치의 링크(있다면). char_index_at_screen_pos와 동일한 변환 과정을 거치므로
+/// 화면에 보이는 링크 영역과 클릭 판정이 어긋나지 않는다.
+fn link_target_at_screen_pos(
+    app: &PdfViewerApp,
+    screen_pos: egui::Pos2,
+    image_rect: egui::Rect,
+    target_width: i32,
+) -> Option<LinkTarget> {
+    if !image_rect.contains(screen_pos) {
+        return None;
+    }
+    let document = app.document.as_ref()?;
+    let page = document
+        .pages()
+        .get((app.current_page - 1) as PdfPageIndex)
+        .ok()?;
+
+    let config = PdfRenderConfig::new().set_target_width(target_width);
+    let scale = image_rect.width() / target_width as f32;
+    let pixel_x = ((screen_pos.x - image_rect.left()) / scale) as i32;
+    let pixel_y = ((screen_pos.y - image_rect.top()) / scale) as i32;
+
+    let (x, y) = page.pixels_to_points(pixel_x, pixel_y, &config).ok()?;
+    pdf_engine::links::link_target_at_point(&page, x, y)
 }
 
 /// 화면 좌표(스크린 픽셀) → 렌더링에 쓰인 PdfRenderConfig 기준 비트맵 픽셀 → PDF 포인트 →
