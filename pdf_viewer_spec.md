@@ -227,7 +227,7 @@ CSV/Excel 컬럼 순서 동일, 헤더는 한글, CSV는 UTF-8 BOM 적용(§2).
 - `crates/ui/src/app.rs`의 `create_engine()`이 실행 파일 기준 상대경로(macOS: `../Frameworks/libpdfium.dylib`, Windows: 같은 디렉토리의 `pdfium.dll`)를 최우선으로 탐색하도록 수정 — 기존 이 머신 전용 Homebrew 하드코딩 경로는 개발 편의용 최후 폴백으로만 남김.
 - CI: `.github/workflows/release.yml` — GitHub Actions matrix(`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-pc-windows-msvc`), `v*.*.*` 태그 push 또는 수동 실행(`workflow_dispatch`)으로 트리거, 3개 zip을 GitHub Release에 자동 첨부.
 - 로컬 검증: 이 머신(arm64 mac)에서 `scripts/package-macos.sh aarch64-apple-darwin <pdfium dylib>`로 만든 `.app`을 실제로 실행해 358페이지 샘플 PDF 렌더링 + 북마크 사이드바까지 정상 동작 확인함(2026-07-13). x86_64 mac/Windows 빌드는 이 머신에서 직접 실행 검증 불가 — CI 실행 후 사용자가 실기 확인 필요.
-- 앱 아이콘(.icns/.ico) 미동봉 — 기본 아이콘으로 빌드됨(범위 밖, 필요 시 추후 추가).
+- **앱 아이콘 완료(2026-07-14)**: `assets/icon/icon.svg`(핑크 그라데이션 배경 + 흰 문서 + 책갈피 리본, Inkscape로 1024×1024 PNG 래스터화 후 `sips`+`iconutil`로 `.icns`, Pillow로 `.ico` 생성) → macOS는 `scripts/package-macos.sh`가 `.icns`를 번들에 넣고 `Info.plist`의 `CFBundleIconFile`로 연결, Windows는 `crates/ui/build.rs`(`winres` 크레이트, `[target.'cfg(windows)'.build-dependencies]`)가 컴파일 시 exe에 `.ico`를 리소스로 심음. macOS는 Finder에서 실기 확인됨 — Windows는 실물 PC 확보 전이라 exe 아이콘 표시 여부 미확인.
 
 ## 5-1. 개발 환경 요구사항
 

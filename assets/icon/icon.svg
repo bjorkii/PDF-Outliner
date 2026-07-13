@@ -1,0 +1,42 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF7EB6"/>
+      <stop offset="100%" stop-color="#C21E6D"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E4E9F2"/>
+      <stop offset="100%" stop-color="#C9D2E0"/>
+    </linearGradient>
+    <linearGradient id="ribbon" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFC24B"/>
+      <stop offset="100%" stop-color="#F09A2E"/>
+    </linearGradient>
+  </defs>
+
+  <!-- macOS-style rounded-square background -->
+  <rect x="0" y="0" width="1024" height="1024" rx="220" ry="220" fill="url(#bg)"/>
+
+  <!-- Bookmark ribbon: forked tail tucks behind the document, notch stays visible above the page edge -->
+  <path d="M 566 140 L 626 140 L 626 280 L 596 225 L 566 280 Z" fill="url(#ribbon)"/>
+
+  <!-- Document page with folded top-right corner -->
+  <path d="M 282 260
+           L 672 260
+           L 742 330
+           L 742 852
+           Q 742 868 726 868
+           L 298 868
+           Q 282 868 282 852
+           Z" fill="#FFFFFF"/>
+  <path d="M 672 260 L 742 330 L 672 330 Z" fill="url(#fold)"/>
+
+  <!-- Outline / bookmark tree lines inside the document -->
+  <rect x="326" y="408" width="300" height="26" rx="13" fill="#2B4C7E"/>
+  <rect x="366" y="466" width="220" height="22" rx="11" fill="#7C93B8"/>
+  <rect x="366" y="510" width="260" height="22" rx="11" fill="#7C93B8"/>
+  <rect x="326" y="568" width="280" height="26" rx="13" fill="#2B4C7E"/>
+  <rect x="366" y="626" width="200" height="22" rx="11" fill="#7C93B8"/>
+  <rect x="366" y="670" width="240" height="22" rx="11" fill="#7C93B8"/>
+  <rect x="326" y="728" width="260" height="26" rx="13" fill="#2B4C7E"/>
+</svg>

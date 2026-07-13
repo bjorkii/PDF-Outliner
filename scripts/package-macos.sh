@@ -37,10 +37,11 @@ cargo build --release --target "$TARGET" -p ui
 DIST_DIR="$REPO_ROOT/dist"
 APP_DIR="$DIST_DIR/PDF Outliner.app"
 rm -rf "$APP_DIR"
-mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Frameworks"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Frameworks" "$APP_DIR/Contents/Resources"
 
 cp "target/$TARGET/release/PDF-Outliner" "$APP_DIR/Contents/MacOS/PDF-Outliner"
 cp "$PDFIUM_DYLIB" "$APP_DIR/Contents/Frameworks/libpdfium.dylib"
+cp "assets/icon/icon.icns" "$APP_DIR/Contents/Resources/icon.icns"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -59,6 +60,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <string>$VERSION</string>
     <key>CFBundleExecutable</key>
     <string>PDF-Outliner</string>
+    <key>CFBundleIconFile</key>
+    <string>icon.icns</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
