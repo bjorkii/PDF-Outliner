@@ -1,3 +1,10 @@
 /target
 .DS_Store
 .claude/settings.local.json
+
+# 테스트 결과물(소스 아님) 및 사용자가 수동 GUI 테스트로 계속 내용을 바꾸는 "살아있는" 파일.
+# 자동화 테스트(cargo test)가 필요로 하는 pdf-samples/의 나머지 PDF는 그대로 추적함 —
+# 전체를 지우면 fresh checkout에서 테스트가 깨짐(pdf_viewer_spec.md §0, §7 참고).
+pdf-samples/bookmarks.csv
+pdf-samples/bookmarks.xlsx
+pdf-samples/embeddedoutline.pdf
