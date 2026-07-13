@@ -129,6 +129,11 @@ pub struct PdfViewerApp {
     /// 마지막으로 창에 실제로 적용한 제목. 매 프레임 같은 값을 다시 보내지 않기 위한 캐시.
     last_window_title: Option<String>,
 
+    /// 직전 프레임에 키보드 포커스를 가졌던 위젯 id. 텍스트 필드 A→B "직행" 포커스 전환을
+    /// 감지해 한글 IME 조합 잔여물을 정리하기 위한 것(`guard_ime_across_focus_change`,
+    /// §7 "한글 IME" 참고 — 포크한 winit의 discardMarkedText 패치와 한 세트).
+    prev_focused_widget: Option<egui::Id>,
+
     pub status_message: Option<String>,
 }
 
@@ -186,6 +191,7 @@ impl PdfViewerApp {
             quit_confirmation_pending: false,
             last_opened_file,
             last_window_title: None,
+            prev_focused_widget: None,
             status_message,
         }
     }
@@ -817,6 +823,34 @@ impl PdfViewerApp {
     }
 
     /// 창 헤더에 "PDF Outliner - 파일명" 형식으로 현재 파일명을 보여준다.
+    /// 한글 IME 자소 유출 워크어라운드(macOS 전용, §7 "한글 IME" 참고).
+    ///
+    /// 텍스트 위젯 A에서 B로 포커스가 "직행"으로 넘어가면 egui-winit은 IME allowed 값을
+    /// 계속 true로 유지해(`ime.is_some()`이 한 프레임도 false가 안 됨) winit이 OS 입력기의
+    /// 조합 상태를 정리할 기회가 없고, A에서 조합 중이던 마지막 자소가 B의 첫 입력에 섞여
+    /// 나온다. 모든 위젯을 그린 뒤(포커스 확정 후) A→B 전환이 감지되면 같은 프레임 안에서
+    /// `IMEAllowed(false)`→`(true)`를 연속으로 보내 조합만 버린다 — 두 명령이 연달아
+    /// 처리되므로 이전 v2 워크어라운드와 달리 "IME 꺼진 프레임"이 생기지 않는다.
+    ///
+    /// 전제: `set_ime_allowed(false)`가 OS input context의 `discardMarkedText()`까지
+    /// 불러줘야 실제로 정리된다 — 순정 winit 0.30.13은 자기 내부 버퍼만 비우기 때문에
+    /// 워크스페이스 `Cargo.toml`의 `[patch.crates-io]`로 포크한 winit을 쓴다.
+    /// B가 텍스트 위젯이 아니면(ime 출력 None) egui-winit이 어차피 allowed를 false로
+    /// 내리면서(패치 덕에 discard 포함) 정리되므로 여기선 건드리지 않는다.
+    fn guard_ime_across_focus_change(&mut self, ctx: &egui::Context) {
+        let focused = ctx.memory(|m| m.focused());
+        if cfg!(target_os = "macos") {
+            let ime_active = ctx.output_mut(|o| o.ime.is_some());
+            if let (Some(prev), Some(cur)) = (self.prev_focused_widget, focused) {
+                if prev != cur && ime_active {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(true));
+                }
+            }
+        }
+        self.prev_focused_widget = focused;
+    }
+
     /// last_window_title로 값이 안 바뀌었으면 매 프레임 viewport 명령을 안 보내게 막는다.
     fn update_window_title(&mut self, ctx: &egui::Context) {
         let title = match &self.current_file {
@@ -1013,6 +1047,9 @@ impl eframe::App for PdfViewerApp {
         show_quit_confirmation_dialog(ctx, self);
         show_search_no_results_dialog(ctx, self);
         crate::viewer_panel::show(ctx, self);
+
+        // 모든 위젯을 그린 뒤에 호출해야 이번 프레임에 확정된 포커스/IME 출력을 본다.
+        self.guard_ime_across_focus_change(ctx);
     }
 
     /// eframe이 주기적으로(`auto_save_interval`)/종료 시 호출.
