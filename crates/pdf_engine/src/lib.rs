@@ -7,6 +7,7 @@
 
 pub mod links;
 pub mod outline;
+pub mod search;
 pub mod selection;
 pub mod skew;
 

@@ -139,6 +139,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
         );
 
         draw_selection_highlight(ui, app, image_rect, target_width);
+        draw_search_highlight(ui, app, image_rect, target_width);
 
         app.image_rect = Some(image_rect);
 
@@ -252,6 +253,75 @@ fn draw_selection_highlight(
                 egui::Color32::from_rgba_unmultiplied(80, 150, 255, 90),
                 egui::Stroke::NONE,
             ));
+        }
+    }
+}
+
+/// 검색 결과에 bounding box를 그린다. 텍스트 선택 하이라이트와 달리 문자별 quad를 우리가
+/// 계산하지 않고, pdfium이 이미 계산해 둔 병합된 사각형(`SearchMatch::rects`,
+/// `pdf_engine::search` 참고)을 그대로 화면 좌표로 변환만 해서 쓴다 — 검색 결과 강조는
+/// 스큐 보정이 필요 없는 일반적인 사각형 하이라이트라 이 편이 더 간단하고 정확하다.
+///
+/// 현재 페이지에 있는 모든 일치 항목을 노란색으로 표시하되, 지금 순회 중인 항목만 주황색
+/// (텍스트 선택 하이라이트의 파란색과도 구별됨)으로 돋보이게 한다 — 브라우저 찾기 기능의
+/// 일반적인 관례(전체는 옅게, 현재는 진하게)와 같다.
+fn draw_search_highlight(
+    ui: &egui::Ui,
+    app: &PdfViewerApp,
+    image_rect: egui::Rect,
+    target_width: i32,
+) {
+    if app.search_matches.is_empty() {
+        return;
+    }
+    let Some(document) = app.document.as_ref() else {
+        return;
+    };
+    let Ok(page) = document
+        .pages()
+        .get((app.current_page - 1) as PdfPageIndex)
+    else {
+        return;
+    };
+
+    let config = PdfRenderConfig::new().set_target_width(target_width);
+    let scale = image_rect.width() / target_width as f32;
+
+    let to_screen = |point: (f32, f32)| -> Option<egui::Pos2> {
+        let (px, py) = page
+            .points_to_pixels(PdfPoints::new(point.0), PdfPoints::new(point.1), &config)
+            .ok()?;
+        Some(egui::pos2(
+            image_rect.left() + px as f32 * scale,
+            image_rect.top() + py as f32 * scale,
+        ))
+    };
+
+    let current_fill = egui::Color32::from_rgba_unmultiplied(255, 165, 0, 70);
+    let current_stroke = egui::Color32::from_rgb(255, 140, 0);
+    let other_fill = egui::Color32::from_rgba_unmultiplied(255, 235, 59, 60);
+    let other_stroke = egui::Color32::from_rgb(255, 213, 79);
+
+    let painter = ui.painter();
+    for (index, m) in app.search_matches.iter().enumerate() {
+        if m.page != app.current_page {
+            continue;
+        }
+        let (fill, stroke) = if index == app.search_current_index {
+            (current_fill, current_stroke)
+        } else {
+            (other_fill, other_stroke)
+        };
+
+        for rect in &m.rects {
+            if let (Some(top_left), Some(bottom_right)) = (
+                to_screen((rect.left().value, rect.top().value)),
+                to_screen((rect.right().value, rect.bottom().value)),
+            ) {
+                let screen_rect = egui::Rect::from_two_pos(top_left, bottom_right);
+                painter.rect_filled(screen_rect, 2.0, fill);
+                painter.rect_stroke(screen_rect, 2.0, egui::Stroke::new(2.0_f32, stroke));
+            }
         }
     }
 }

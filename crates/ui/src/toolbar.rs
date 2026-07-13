@@ -110,6 +110,75 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 ui.separator();
                 ui.label(message);
             }
+
+            // 검색 UI를 메인바 제일 오른쪽에 고정한다. 남은 가로 공간을 이 하위 레이아웃이
+            // 통째로 차지한 뒤 오른쪽에서 왼쪽 방향으로 채워나가므로(egui의
+            // Layout::right_to_left 관례), 이 스코프 안에서 먼저 추가한 위젯이 가장
+            // 오른쪽에 온다 — 그래서 눈에 보이는 순서([검색창][🔍][◀][N/M][▶])와는
+            // 반대로 ▶부터 추가한다.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let has_results = !app.search_matches.is_empty();
+                let searching = app.search_running.is_some();
+
+                let next_response = ui
+                    .add_enabled(has_results, egui::Button::new("▶"))
+                    .on_hover_text("다음 결과 (Enter)");
+                if next_response.clicked() {
+                    app.search_next();
+                }
+                // 검색이 막 끝나 결과가 나오면 포커스를 이 버튼으로 옮겨준다 — 그래야
+                // 검색창에 남아있던 포커스가 없어져서(요청사항: 검색 버튼을 누르면 포커스가
+                // 검색창에서 사라지도록) 이후 Enter가 검색창 재검색이 아니라 이 버튼의
+                // 클릭으로 해석된다(egui는 Sense::click 위젯이 포커스를 가진 상태에서
+                // Enter/Space를 누르면 클릭으로 처리한다).
+                if app.request_focus_next_result {
+                    next_response.request_focus();
+                    app.request_focus_next_result = false;
+                }
+                if has_results {
+                    ui.label(format!(
+                        "{} / {}",
+                        app.search_current_index + 1,
+                        app.search_matches.len()
+                    ));
+                }
+                if ui
+                    .add_enabled(has_results, egui::Button::new("◀"))
+                    .on_hover_text("이전 결과")
+                    .clicked()
+                {
+                    app.search_previous();
+                }
+                if searching {
+                    ui.spinner();
+                }
+                if ui
+                    .add_enabled(!searching, egui::Button::new("🔍"))
+                    .on_hover_text("검색 실행 (Enter)")
+                    .clicked()
+                {
+                    app.execute_search();
+                }
+
+                let search_field_id = egui::Id::new("pdf_search_field");
+                let search_response = ui.add(
+                    egui::TextEdit::singleline(&mut app.search_query)
+                        .id(search_field_id)
+                        .hint_text("검색어")
+                        .desired_width(160.0),
+                );
+                if app.request_focus_search {
+                    ui.memory_mut(|m| m.request_focus(search_field_id));
+                    app.request_focus_search = false;
+                }
+                // 검색창에 포커스가 있는 동안의 Enter는 항상 "새로 검색"이다 — 결과를
+                // 순회하던 중이라도 다른 검색어를 입력하고 Enter를 누르면 그 새 검색어로
+                // 다시 검색해야 한다(예전엔 has_results를 봐서 "다음 결과로 이동"으로
+                // 잘못 처리했었음 — 이전 검색어의 결과를 계속 순회하는 버그였음).
+                if search_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    app.execute_search();
+                }
+            });
         });
     });
 }

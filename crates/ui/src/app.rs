@@ -76,6 +76,26 @@ pub struct PdfViewerApp {
     pub selection: Option<pdf_engine::selection::TextSelectionRange>,
     pub selection_drag_start_index: Option<i32>,
 
+    /// 툴바 검색창에 입력 중인 검색어.
+    pub search_query: String,
+    /// 마지막으로 완료된 검색의 결과(문서 전체, 페이지 순). 새로 문서를 열면 비운다.
+    pub search_matches: Vec<pdf_engine::search::SearchMatch>,
+    /// `search_matches` 안에서 현재 보고 있는 항목의 0-based 인덱스.
+    pub search_current_index: usize,
+    /// 진행 중인 검색. `poll_search_job`이 매 프레임 정해진 페이지 수만큼만 진행시키고
+    /// (PDFium은 스레드 안전하지 않아 백그라운드 스레드로 못 돌린다 — `pdf_engine::search`
+    /// 모듈 문서 참고), 다 끝나면 결과를 반영하고 비운다.
+    pub search_running: Option<pdf_engine::search::IncrementalSearch>,
+    /// 검색을 실행했지만 일치하는 결과가 없어 "일치하는 결과가 없습니다" 알림을 띄운 상태.
+    pub search_no_results: bool,
+    /// Ctrl/Cmd+F 등으로 검색창에 포커스를 옮겨야 하는지 — 실제 포커스 이동은 toolbar.rs가
+    /// 검색창을 그리는 시점에 처리한다(sidebar.rs의 focus_editing과 같은 패턴).
+    pub request_focus_search: bool,
+    /// 검색이 결과와 함께 끝나 포커스를 "다음 결과"(▶) 버튼으로 옮겨야 하는지 — 검색창에
+    /// 포커스가 남아있으면 다음 Enter가 재검색으로 해석돼야 하므로, 결과가 나온 뒤엔
+    /// 검색창에서 포커스를 치워둔다.
+    pub request_focus_next_result: bool,
+
     /// pdfium 바인딩. 라이브러리 로드에 실패하면 None으로 두고 뷰어는 안내 메시지만 표시.
     pub engine: Option<PdfEngine>,
     /// PdfEngine이 Pdfium을 `'static`으로 리크해 보관하므로 (crates/pdf_engine/src/lib.rs 참고)
@@ -148,6 +168,13 @@ impl PdfViewerApp {
             page_forward_history: Vec::new(),
             selection: None,
             selection_drag_start_index: None,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            search_current_index: 0,
+            search_running: None,
+            search_no_results: false,
+            request_focus_search: false,
+            request_focus_next_result: false,
             engine,
             document: None,
             page_texture: None,
@@ -195,6 +222,11 @@ impl PdfViewerApp {
                 self.rendered_for = None;
                 self.selection = None;
                 self.selection_drag_start_index = None;
+                // 이전 문서의 검색 결과는 새 문서에서 의미가 없다.
+                self.search_matches.clear();
+                self.search_current_index = 0;
+                self.search_running = None;
+                self.search_no_results = false;
                 self.status_message = None;
                 self.go_to_page(1);
             }
@@ -513,6 +545,119 @@ impl PdfViewerApp {
         }
     }
 
+    /// 검색 실행(돋보기 버튼/검색창 Enter). 문서 전체를 페이지마다 훑어야 해서 한 번에
+    /// 끝내면 무거울 수 있는 작업이지만, **PDFium은 스레드 안전하지 않아 백그라운드
+    /// 스레드로 돌릴 수 없다**(`pdf_engine::search` 모듈 문서 참고 — 실제로 그렇게 했다가
+    /// 검색 버튼을 누르는 즉시 세그폴트가 나는 걸 재현·확인함). 대신
+    /// `pdf_engine::search::IncrementalSearch`로 여러 프레임에 나눠 메인 스레드에서만
+    /// 진행시킨다 — `poll_search_job`이 매 프레임 이어간다. 이미 진행 중인 검색이 있으면
+    /// 무시해 중복 실행을 막는다.
+    pub fn execute_search(&mut self) {
+        let query = self.search_query.trim().to_string();
+        if query.is_empty() || self.search_running.is_some() || self.document.is_none() {
+            return;
+        }
+
+        self.search_matches.clear();
+        self.search_current_index = 0;
+        self.search_no_results = false;
+        self.search_running = Some(pdf_engine::search::IncrementalSearch::new(
+            query,
+            self.total_pages,
+        ));
+    }
+
+    /// 매 프레임 호출. 진행 중인 검색이 있으면 이번 프레임 몫만큼 진행시키고, 다 끝났으면
+    /// 결과를 반영한다.
+    ///
+    /// egui는 기본적으로 입력 이벤트가 있을 때만 다시 그리는 즉시모드라, 검색이 끝난
+    /// 순간을 마우스/키보드 입력 없이도 알아채려면 검색이 진행 중인 동안 매 프레임
+    /// `request_repaint()`를 걸어둬야 한다 — 안 그러면 사용자가 뭔가 조작하기 전까지
+    /// 다음 배치가 진행되지 않고 멈춘 것처럼 보인다.
+    pub fn poll_search_job(&mut self, ctx: &egui::Context) {
+        if self.search_running.is_none() {
+            return;
+        }
+
+        // 한 프레임에 훑을 페이지 수. 페이지 하나 텍스트 검색에 몇 ms 정도 걸릴 수 있어
+        // (실측: 360p 문서 전체 스캔에 release 빌드로 약 2초) 너무 크면 그 프레임이
+        // 버벅이고, 너무 작으면 전체 완료까지 프레임이 과도하게 많이 필요하다 — 8이
+        // 적당한 절충.
+        const PAGES_PER_FRAME: usize = 8;
+
+        let Some(document) = self.document.as_ref() else {
+            // 검색 중에 문서가 사라졌으면(이론상 open_file_now가 먼저 비우지만 방어적으로)
+            // 더 진행할 수 없으니 포기한다.
+            self.search_running = None;
+            return;
+        };
+        let finished = self
+            .search_running
+            .as_mut()
+            .expect("search_running checked Some above")
+            .step(document, PAGES_PER_FRAME);
+
+        ctx.request_repaint();
+
+        if !finished {
+            return;
+        }
+
+        let matches = self.search_running.take().unwrap().into_matches();
+        if matches.is_empty() {
+            self.search_no_results = true;
+            return;
+        }
+
+        // 현재 보고 있는 페이지와 같거나 그 이후에 있는 첫 결과부터 보여준다 — 훑어보던
+        // 위치에서 "다음"을 찾는 일반적인 찾기 동작과 맞추기 위함. 그런 결과가 없으면
+        // (현재 페이지 이후로는 없다는 뜻) 문서의 첫 결과로 되돌아간다.
+        let start = matches
+            .iter()
+            .position(|m| m.page >= self.current_page)
+            .unwrap_or(0);
+
+        self.search_matches = matches;
+        self.jump_to_search_match(start);
+        // 검색창에서 포커스를 치워 "다음 결과" 버튼으로 옮긴다 — 검색창에 포커스가
+        // 남아있으면 다음 Enter가 재검색으로 해석돼버려서 결과를 순회할 수 없다.
+        self.request_focus_next_result = true;
+    }
+
+    fn jump_to_search_match(&mut self, index: usize) {
+        let Some(m) = self.search_matches.get(index) else {
+            return;
+        };
+        self.search_current_index = index;
+        self.go_to_page(m.page);
+    }
+
+    /// 다음 결과로 이동(검색창 Enter, ▶ 버튼). 마지막 결과에서는 처음으로 순환한다.
+    pub fn search_next(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        let next = (self.search_current_index + 1) % self.search_matches.len();
+        self.jump_to_search_match(next);
+    }
+
+    /// 이전 결과로 이동(◀ 버튼). 첫 결과에서는 마지막으로 순환한다.
+    pub fn search_previous(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        let len = self.search_matches.len();
+        let previous = (self.search_current_index + len - 1) % len;
+        self.jump_to_search_match(previous);
+    }
+
+    /// "일치하는 결과가 없습니다" 알림을 닫는다(Enter 또는 닫기 버튼) — 닫힌 뒤에는 다시
+    /// 검색창에 포커스를 돌려줘야 하므로 그 요청 플래그도 같이 세운다.
+    pub fn dismiss_search_no_results(&mut self) {
+        self.search_no_results = false;
+        self.request_focus_search = true;
+    }
+
     /// 페이지 이동. 실제 페이지가 바뀌는 경우 현재 페이지를 뒤로가기 히스토리에 쌓고
     /// 앞으로가기 히스토리는 비운다(표준 브라우저 히스토리 관례 — 새로 이동하면 그 시점
     /// 이후의 "앞으로" 기록은 더 이상 의미가 없음). 히스토리 자체를 순회하는
@@ -624,6 +769,20 @@ impl PdfViewerApp {
         let copy_pressed = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
         if copy_pressed {
             self.copy_selection_to_clipboard();
+        }
+
+        // Cmd+F(맥)/Ctrl+F(윈도우) — 검색창으로 포커스 이동. 어디에 포커스가 있든(예:
+        // 사이드바 이름 편집 중이 아닌 한) 항상 가로채야 브라우저의 찾기 단축키처럼
+        // 동작한다 — wants_keyboard_input() 게이트 밖에 둔 이유.
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::F)) {
+            self.request_focus_search = true;
+        }
+
+        // "일치하는 결과가 없습니다" 알림이 떠 있는 동안의 Enter는 그 알림을 닫는 데 쓴다
+        // — 검색창이 여전히 포커스를 쥐고 있어 wants_keyboard_input()이 true인 상태라도
+        // 반드시 동작해야 하므로 게이트 밖에서 확인한다.
+        if self.search_no_results && ctx.input(|i| i.key_pressed(Key::Enter)) {
+            self.dismiss_search_no_results();
         }
     }
 
@@ -797,12 +956,33 @@ fn show_quit_confirmation_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
         });
 }
 
+/// "일치하는 결과가 없습니다" 검색 결과 없음 알림. Enter(app.rs 전역 처리) 또는 이 창의
+/// "확인" 버튼으로 닫을 수 있고, 닫히면 검색창에 다시 포커스가 돌아간다.
+fn show_search_no_results_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
+    if !app.search_no_results {
+        return;
+    }
+
+    egui::Window::new("검색")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label("일치하는 결과가 없습니다.");
+            ui.add_space(8.0);
+            if ui.button("확인").clicked() {
+                app.dismiss_search_no_results();
+            }
+        });
+}
+
 impl eframe::App for PdfViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_window_title(ctx);
         self.handle_page_navigation_keys(ctx);
         self.handle_dropped_files(ctx);
         self.handle_close_request(ctx);
+        self.poll_search_job(ctx);
 
         crate::toolbar::show(ctx, self);
         crate::sidebar::show(ctx, self);
@@ -818,6 +998,7 @@ impl eframe::App for PdfViewerApp {
         show_unsaved_changes_dialog(ctx, self);
         show_crash_recovery_dialog(ctx, self);
         show_quit_confirmation_dialog(ctx, self);
+        show_search_no_results_dialog(ctx, self);
         crate::viewer_panel::show(ctx, self);
     }
 
