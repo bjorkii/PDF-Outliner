@@ -20,7 +20,7 @@ Set-Location $RepoRoot
 
 $Target = "x86_64-pc-windows-msvc"
 
-Write-Host "==> Building pdf_viewer release binary for $Target"
+Write-Host "==> Building PDF-Outliner release binary for $Target"
 cargo build --release --target $Target -p ui
 
 $DistDir = Join-Path $RepoRoot "dist"
@@ -28,7 +28,7 @@ $PkgDir = Join-Path $DistDir "PDF Outliner"
 if (Test-Path $PkgDir) { Remove-Item -Recurse -Force $PkgDir }
 New-Item -ItemType Directory -Path $PkgDir | Out-Null
 
-Copy-Item (Join-Path $RepoRoot "target\$Target\release\pdf_viewer.exe") (Join-Path $PkgDir "pdf_viewer.exe")
+Copy-Item (Join-Path $RepoRoot "target\$Target\release\PDF-Outliner.exe") (Join-Path $PkgDir "PDF-Outliner.exe")
 Copy-Item $PdfiumDllPath (Join-Path $PkgDir "pdfium.dll")
 
 $ZipPath = Join-Path $DistDir "PDF-Outliner-windows-x64.zip"

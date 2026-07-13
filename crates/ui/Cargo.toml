@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "pdf_viewer"
+name = "PDF-Outliner"
 path = "src/main.rs"
 
 [dependencies]

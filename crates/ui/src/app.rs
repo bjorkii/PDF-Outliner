@@ -843,7 +843,7 @@ impl PdfViewerApp {
 fn create_engine() -> Option<PdfEngine> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
-    // 배포 번들 레이아웃: macOS는 `PDF Outliner.app/Contents/MacOS/pdf_viewer` 기준
+    // 배포 번들 레이아웃: macOS는 `PDF Outliner.app/Contents/MacOS/PDF-Outliner` 기준
     // `../Frameworks/libpdfium.dylib`, Windows/Linux는 실행 파일과 같은 디렉토리.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {

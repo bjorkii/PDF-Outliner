@@ -19,7 +19,7 @@
 cd "/Users/researchkofa/Documents/VibeCoding/PDF/PDF Bookmark Editor-Rust"
 cargo build --workspace   # rustc/cargo는 ~/.zshrc에 이미 PATH 잡혀있음
 cargo test --workspace    # 전부 통과해야 정상 (bookmark 13, import_export 3+2, pdf_outline_writer 6, ui 4+3 등)
-./target/debug/pdf_viewer [선택: 열 pdf 경로]
+./target/debug/PDF-Outliner [선택: 열 pdf 경로]
 ```
 pdfium dylib 탐색 순서(`crates/ui/src/app.rs`의 `create_engine()`, 2026-07-13 배포 대응으로 순서 변경): (1) 실행 파일 기준 배포 번들 경로(macOS `../Frameworks/libpdfium.dylib`, Windows 같은 디렉토리 `pdfium.dll`) → (2) `PDFIUM_DYLIB_PATH` 환경변수 → (3) 이 머신 전용 Homebrew `ocrmypdf` 종속성 경로 하드코딩 폴백: `/opt/homebrew/Cellar/ocrmypdf/17.8.0/libexec/lib/python3.14/site-packages/pypdfium2_raw/libpdfium.dylib`. 배포 패키징은 §5 참고.
 

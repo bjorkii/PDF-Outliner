@@ -31,7 +31,7 @@ case "$TARGET" in
     ;;
 esac
 
-echo "==> Building pdf_viewer release binary for $TARGET"
+echo "==> Building PDF-Outliner release binary for $TARGET"
 cargo build --release --target "$TARGET" -p ui
 
 DIST_DIR="$REPO_ROOT/dist"
@@ -39,7 +39,7 @@ APP_DIR="$DIST_DIR/PDF Outliner.app"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Frameworks"
 
-cp "target/$TARGET/release/pdf_viewer" "$APP_DIR/Contents/MacOS/pdf_viewer"
+cp "target/$TARGET/release/PDF-Outliner" "$APP_DIR/Contents/MacOS/PDF-Outliner"
 cp "$PDFIUM_DYLIB" "$APP_DIR/Contents/Frameworks/libpdfium.dylib"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
@@ -58,7 +58,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key>
     <string>$VERSION</string>
     <key>CFBundleExecutable</key>
-    <string>pdf_viewer</string>
+    <string>PDF-Outliner</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
