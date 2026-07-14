@@ -44,6 +44,10 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
         // 보여주므로 함께 멈춘다. 한도 초과분을 흐릿하게 스케일업해서 보여주는 방안은
         // 사용자가 기각(2026-07-14). 세로형 페이지는 높이가 먼저 한도에 걸리므로 페이지
         // 종횡비(page_aspect)를 반영해 허용 가능한 최대 렌더 폭을 역산한다.
+        // 주의: 이 상한은 고정 %가 아니다 — %는 "패널 폭 대비 배율"이라 창이 좁거나
+        // 사이드바가 넓으면 같은 800%라도 텍스처가 작아져 상한에 안 걸릴 수 있다
+        // (실측: 기본 창에서는 세로형 A4급이 ~647%에서 멈추지만, 패널이 ~734pt 이하면
+        // 800% 전체가 합법). 지켜지는 불변식은 "텍스처 ≤ GPU 한도" 하나다.
         if let (Some(aspect), Some(max_side)) = (app.page_aspect, app.max_texture_side) {
             let max_side = max_side.min(16384) as f32;
             let max_width_px = if aspect > 1.0 { max_side / aspect } else { max_side };
