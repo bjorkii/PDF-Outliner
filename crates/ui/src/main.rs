@@ -1,3 +1,8 @@
+// Windows에서 콘솔 서브시스템(기본값) 대신 GUI 서브시스템으로 빌드 — 없으면 실행 시
+// 빈 콘솔 창이 같이 뜬다(v0.1.2 배포본에서 사용자 확인). 대가로 Windows에선
+// println!/env_logger 콘솔 출력이 안 보이게 되지만 최종 사용자에겐 무관.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 //! Sumatra급 속도를 목표로 한 PDF 뷰어 진입점.
 //! GUI: egui + eframe(wgpu 백엔드) — immediate-mode, 콜드 스타트 최소화 목적으로 선택.
 //! 이 크레이트는 macOS/Windows 타겟이며, 실제 렌더링에는 앱 번들에 동봉된 pdfium 동적
