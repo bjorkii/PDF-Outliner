@@ -262,7 +262,8 @@ CSV/Excel 컬럼 순서 동일, 헤더는 한글, CSV는 UTF-8 BOM 적용(§2).
 - [ ] macOS `.pkg`화, Windows `.msi`화 (§5 — 현재는 zip 배포로 충분하다고 판단)
 - [ ] 진짜로 시각적으로 기울어진 스캔 텍스트 샘플로 하이라이트 정확도 검증(§3)
 - [ ] Excel 행 수동 재배열 후 import 시 계층 깨짐 방지 UX (§4)
-- [ ] GitHub 저장소 연결 + 첫 릴리스 태그 push(§5 — CI workflow 자체는 완성, 저장소 연결은 사용자 액션 대기 중)
+- [x] GitHub 저장소 연결 + 릴리스 — 완료(2026-07-13~14): [github.com/bjorkii/PDF-Outliner](https://github.com/bjorkii/PDF-Outliner) (private), v0.1.0~v0.1.2 릴리스됨. 배포본 실기 확인: Apple Silicon Mac ✅, Windows ✅(아래 콘솔 창 이슈 제외), Intel Mac 확인 대기 중
+- [ ] Windows 배포본 실행 시 빈 콘솔 창이 같이 뜸(v0.1.2에서 사용자 확인, 2026-07-14) — `crates/ui/src/main.rs` 맨 위에 `#![cfg_attr(windows, windows_subsystem = "windows")]` 한 줄 추가로 해결 가능(단, Windows에서 println/env_logger 콘솔 출력이 안 보이게 됨 — 최종 사용자에겐 무관). 다음 릴리스에 포함할 것.
 
 ---
 
