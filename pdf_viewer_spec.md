@@ -263,6 +263,7 @@ CSV/Excel 컬럼 순서 동일, 헤더는 한글, CSV는 UTF-8 BOM 적용(§2).
 - [ ] 진짜로 시각적으로 기울어진 스캔 텍스트 샘플로 하이라이트 정확도 검증(§3)
 - [ ] Excel 행 수동 재배열 후 import 시 계층 깨짐 방지 UX (§4)
 - [x] GitHub 저장소 연결 + 릴리스 — 완료(2026-07-13~14): [github.com/bjorkii/PDF-Outliner](https://github.com/bjorkii/PDF-Outliner) (private), v0.1.0~v0.1.2 릴리스됨. 배포본 실기 확인: Apple Silicon Mac ✅, Windows ✅(아래 콘솔 창 이슈 제외), Intel Mac 확인 대기 중
+- [ ] 확대(줌)를 어느 수준 이상으로 올리면 앱이 크래시로 종료됨(사용자 리포트, 2026-07-14 — 재현 조건/에러 메시지 미채집). 유력 가설: 줌 배율만큼 페이지를 크게 래스터화해 텍스처로 올리는 구조라서(`MAX_ZOOM = 8.0`, `crates/ui/src/app.rs`의 `ViewportState`) 고배율에서 텍스처 크기가 wgpu 디바이스의 최대 텍스처 한도(보통 8192 또는 16384px)를 넘어 validation error로 패닉하는 것일 수 있음. 다음 세션에서 터미널로 실행해 크래시 메시지부터 채집할 것 — 수정 방향은 (a) 렌더 해상도를 한도 이하로 클램프하고 확대는 GPU 스케일링에 맡기기, (b) 타일 렌더링.
 - [ ] Windows 배포본 실행 시 빈 콘솔 창이 같이 뜸(v0.1.2에서 사용자 확인, 2026-07-14) — `crates/ui/src/main.rs` 맨 위에 `#![cfg_attr(windows, windows_subsystem = "windows")]` 한 줄 추가로 해결 가능(단, Windows에서 println/env_logger 콘솔 출력이 안 보이게 됨 — 최종 사용자에겐 무관). 다음 릴리스에 포함할 것.
 
 ---
