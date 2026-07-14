@@ -25,6 +25,31 @@ fn main() -> eframe::Result<()> {
             .with_title("PDF Outliner"),
         // wgpu 백엔드 - 콜드 스타트/렌더링 속도 우선
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            // egui-wgpu 기본 device_descriptor는 max_texture_dimension_2d를 8192로
+            // 하드코딩한다 — Retina에서 줌 ~312%면 세로형 페이지 텍스처 높이가 이 한도에
+            // 걸려 더 선명하게 확대할 수 없다(§7 "고배율 줌 크래시" 참고). GPU가 실제로
+            // 지원하는 한도(Apple Silicon Metal은 16384)로 디바이스를 연다.
+            // 이 클로저의 나머지 부분은 egui-wgpu 0.29.1 기본 구현을 그대로 복사한 것.
+            device_descriptor: std::sync::Arc::new(|adapter| {
+                use eframe::wgpu;
+                let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+                    wgpu::Limits::downlevel_webgl2_defaults()
+                } else {
+                    wgpu::Limits::default()
+                };
+                wgpu::DeviceDescriptor {
+                    label: Some("egui wgpu device"),
+                    required_features: wgpu::Features::default(),
+                    required_limits: wgpu::Limits {
+                        max_texture_dimension_2d: adapter.limits().max_texture_dimension_2d,
+                        ..base_limits
+                    },
+                    memory_hints: wgpu::MemoryHints::default(),
+                }
+            }),
+            ..Default::default()
+        },
         ..Default::default()
     };
 

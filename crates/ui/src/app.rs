@@ -107,6 +107,14 @@ pub struct PdfViewerApp {
     /// 마지막 렌더링에 사용한 target width. 클릭 좌표→PDF 포인트 변환 시 동일한
     /// PdfRenderConfig를 재구성하기 위해 필요(PdfRenderConfig는 Clone을 구현하지 않음).
     pub render_target_width: Option<i32>,
+
+    /// GPU가 허용하는 한 변 최대 텍스처 크기(픽셀). 첫 프레임에 wgpu 디바이스에서 조회.
+    /// 고배율 줌에서 이 한도를 넘는 텍스처를 만들면 wgpu validation 패닉으로 앱이 죽는다
+    /// (Apple Silicon Retina에서 실측 — §7 "고배율 줌 크래시" 참고).
+    pub max_texture_side: Option<u32>,
+    /// 현재 페이지의 높이/폭 비율(PDF 포인트 기준, 렌더링 시 갱신). viewer_panel이
+    /// GPU 텍스처 한도에 맞춰 줌 상한을 역산할 때 사용.
+    pub page_aspect: Option<f32>,
     /// 이번 프레임에 페이지 이미지가 그려진 화면 좌표(rect). 클릭 좌표 변환에 사용.
     pub image_rect: Option<egui::Rect>,
 
@@ -185,6 +193,8 @@ impl PdfViewerApp {
             page_texture: None,
             rendered_for: None,
             render_target_width: None,
+            max_texture_side: None,
+            page_aspect: None,
             image_rect: None,
             pending_open_path: None,
             pending_recovery,
@@ -498,7 +508,21 @@ impl PdfViewerApp {
             .get((self.current_page - 1) as PdfPageIndex)
             .context("페이지 조회 실패")?;
 
-        let config = PdfRenderConfig::new().set_target_width(target_width);
+        // 고배율 줌에서 요청 폭 그대로 렌더하면 텍스처가 GPU 최대 크기를 넘어 wgpu
+        // validation 패닉으로 앱이 죽는다(Apple Silicon Retina에서 800% 줌 크래시 실측,
+        // Metal 한도 16384 — §7 참고). 렌더 해상도만 한도 안으로 줄이고,
+        // `rendered_for`에는 요청값을 그대로 저장해 매 프레임 재렌더링을 막는다.
+        // 히트테스트/하이라이트(viewer_panel)는 image_rect 대비 비율로 좌표를 환산하므로
+        // 실제 텍스처 해상도가 요청과 달라도 일치가 유지된다.
+        let render_width = clamped_render_width(
+            target_width,
+            page.width().value,
+            page.height().value,
+            self.max_texture_side.unwrap_or(8192),
+        );
+        self.page_aspect = Some(page.height().value / page.width().value.max(1.0));
+
+        let config = PdfRenderConfig::new().set_target_width(render_width);
         let bitmap = page
             .render_with_config(&config)
             .context("페이지 렌더링 실패")?;
@@ -871,6 +895,31 @@ impl PdfViewerApp {
     }
 }
 
+/// 요청된 렌더 폭을, 결과 텍스처의 가로·세로가 모두 GPU 한도(`max_texture_side`) 안에
+/// 들도록 페이지 종횡비를 반영해 줄인다. 세로형 페이지는 높이가 먼저 한도에 걸리므로
+/// 폭만 검사해서는 부족하다. 한도가 비정상적으로 크게 보고되는 GPU에서도 거대 텍스처
+/// 할당(수 GB)을 피하기 위해 16384로 상한을 둔다.
+fn clamped_render_width(
+    target_width: i32,
+    page_width_pt: f32,
+    page_height_pt: f32,
+    max_texture_side: u32,
+) -> i32 {
+    let max_side = max_texture_side.min(16384) as f64;
+    let aspect = if page_width_pt > 0.0 {
+        page_height_pt as f64 / page_width_pt as f64
+    } else {
+        1.0
+    };
+
+    let mut width = target_width as f64;
+    if width * aspect > max_side {
+        width = max_side / aspect;
+    }
+    width = width.min(max_side);
+    (width.floor() as i32).max(50)
+}
+
 /// pdfium 동적 라이브러리를 찾아 엔진을 초기화한다.
 /// 우선순위: (1) 실행 파일 기준 배포 번들 동봉 경로 → (2) PDFIUM_DYLIB_PATH 환경변수(개발용 오버라이드)
 /// → (3) 이 머신에 Homebrew(ocrmypdf 의존성)로 이미 설치된 libpdfium.dylib(개발 편의 폴백).
@@ -1024,7 +1073,13 @@ fn show_search_no_results_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
 }
 
 impl eframe::App for PdfViewerApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if self.max_texture_side.is_none() {
+            self.max_texture_side = frame
+                .wgpu_render_state()
+                .map(|rs| rs.device.limits().max_texture_dimension_2d);
+        }
+
         self.update_window_title(ctx);
         self.handle_page_navigation_keys(ctx);
         self.handle_dropped_files(ctx);
@@ -1074,5 +1129,47 @@ impl eframe::App for PdfViewerApp {
     /// 크래시 복구 자동저장 주기 — 사용자 요청대로 1분.
     fn auto_save_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(60)
+    }
+}
+
+#[cfg(test)]
+mod render_width_tests {
+    use super::clamped_render_width;
+
+    /// A4 세로형(612×792pt) 기준. 한도 안이면 요청 폭 그대로.
+    #[test]
+    fn within_limit_is_unchanged() {
+        assert_eq!(clamped_render_width(2000, 612.0, 792.0, 16384), 2000);
+    }
+
+    /// 세로형 페이지는 높이가 먼저 한도에 걸린다 — 800% 줌 Retina에서 실측된 크래시
+    /// 시나리오(요청 폭 16000 → 높이 약 20700 > 16384).
+    #[test]
+    fn portrait_page_is_height_bound() {
+        let w = clamped_render_width(16000, 612.0, 792.0, 16384);
+        assert!(w < 16000);
+        let h = (w as f64 * 792.0 / 612.0).ceil() as i32;
+        assert!(h <= 16384, "height {h} exceeds limit");
+    }
+
+    /// 가로형 페이지는 폭이 먼저 걸린다.
+    #[test]
+    fn landscape_page_is_width_bound() {
+        let w = clamped_render_width(20000, 792.0, 612.0, 16384);
+        assert_eq!(w, 16384);
+    }
+
+    /// GPU가 한도를 비정상적으로 크게 보고해도 16384 상한(거대 텍스처 할당 방지).
+    #[test]
+    fn sanity_cap_applies() {
+        let w = clamped_render_width(40000, 612.0, 612.0, 1_000_000);
+        assert_eq!(w, 16384);
+    }
+
+    /// 폭 0짜리 비정상 페이지에서도 패닉/0 반환 없이 동작.
+    #[test]
+    fn degenerate_page_size_is_safe() {
+        let w = clamped_render_width(2000, 0.0, 792.0, 16384);
+        assert!(w >= 50);
     }
 }

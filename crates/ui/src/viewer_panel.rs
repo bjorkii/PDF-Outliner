@@ -1,4 +1,4 @@
-use crate::app::PdfViewerApp;
+use crate::app::{PdfViewerApp, ViewportState};
 use crate::toolbar::handle_scroll_zoom;
 use egui::Sense;
 use pdf_engine::links::LinkTarget;
@@ -38,6 +38,21 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
         // Retina(2x) 화면에서 렌더링이 흐릿하게 나온다 — target_width를 물리 픽셀 기준으로
         // 렌더링하고, 화면에 그릴 때는 다시 포인트로 나눠 배치한다.
         let pixels_per_point = ctx.pixels_per_point();
+
+        // GPU 텍스처 한도를 넘는 배율은 그 해상도로 렌더링 자체가 불가능하므로(§7 "고배율
+        // 줌 크래시") 줌 값을 여기서 상한에 멈춘다 — 툴바 % 표시도 viewport.zoom을 그대로
+        // 보여주므로 함께 멈춘다. 한도 초과분을 흐릿하게 스케일업해서 보여주는 방안은
+        // 사용자가 기각(2026-07-14). 세로형 페이지는 높이가 먼저 한도에 걸리므로 페이지
+        // 종횡비(page_aspect)를 반영해 허용 가능한 최대 렌더 폭을 역산한다.
+        if let (Some(aspect), Some(max_side)) = (app.page_aspect, app.max_texture_side) {
+            let max_side = max_side.min(16384) as f32;
+            let max_width_px = if aspect > 1.0 { max_side / aspect } else { max_side };
+            let max_zoom = max_width_px / (available.x * pixels_per_point).max(1.0);
+            if app.viewport.zoom > max_zoom {
+                app.viewport.zoom = max_zoom.max(ViewportState::MIN_ZOOM);
+            }
+        }
+
         let target_width =
             ((available.x * app.viewport.zoom * pixels_per_point).round() as i32).max(50);
 
