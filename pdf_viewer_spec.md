@@ -267,6 +267,14 @@ CSV/Excel 컬럼 순서 동일, 헤더는 한글, CSV는 UTF-8 BOM 적용(§2).
 - [x] Windows 배포본 실행 시 빈 콘솔 창이 같이 뜸(v0.1.2에서 사용자 확인) — `crates/ui/src/main.rs` 맨 위 `#![cfg_attr(windows, windows_subsystem = "windows")]`로 수정, v0.1.3에 포함, **Windows 실기로 콘솔 창 사라짐 확인 완료(2026-07-14)**. 대가: Windows에서 println/env_logger 콘솔 출력이 안 보임(최종 사용자 무관, 디버깅 시 유의).
 - [ ] 다른 실리콘 맥에 릴리스 앱 복사 시 아이콘이 기본 이미지로 보이는 현상 — 번들 자체는 정상(.icns 동봉, 원 기기에서 Finder/Dock 표시 확인됨)이라 대상 기기의 Finder/LaunchServices 캐시로 추정. 사용자가 추후 확인 예정(앱 실행 후 Dock 아이콘 확인 → 폴더 이동/killall Finder 순).
 
+### 사이드바/북마크 UX 요청 (2026-07-14 접수, 순서대로 처리 예정)
+- [ ] **사이드바 하단 여백 + Cmd+B 시 새 항목이 안 보이는 문제**: 북마크가 패널을 꽉 채우면 새로 추가된 항목(항상 맨 끝에 생성)이 스크롤 밖에 있어 안 보임. (a) `crates/ui/src/sidebar.rs:93`의 `egui::ScrollArea::vertical()` 안, 트리 렌더링 뒤에 여백(`ui.add_space(...)`) 추가. (b) 새 항목 추가/편집 시작 시 그 위치로 자동 스크롤 — egui `Response::scroll_to_me` 또는 `ui.scroll_to_rect`로, `drag_state.focus_editing`이 세워지는 시점(현재 `add_new_bookmark`, sidebar.rs:198-199)에 편집 중인 노드의 rect를 스크롤 뷰에 걸어주면 됨.
+- [ ] **새 북마크 삽입 위치를 페이지 번호 순으로**: 현재 `bookmark::insert_node`(`crates/bookmark/src/tree.rs:76`)는 항상 부모의 `children` 끝에 `push`(최상위도 동일, `nodes.push`) — 그래서 새 북마크는 항상 그 레벨의 맨 마지막에 생김. **요청**: 대상 페이지 번호 기준으로 같은 레벨의 형제들 사이 올바른 위치에 삽입(예: 34쪽 A, 37쪽 B 사이에 35쪽 신규 → A/B 사이). **동일 페이지 내 여러 북마크의 순서**: `BookmarkNode`(`crates/bookmark/src/model.rs:53`)엔 페이지 내 위치(y좌표 등) 정보가 아예 없음 — pdfium outline에도 그런 좌표 개념 없음. 다만 형제 `Vec<BookmarkNode>` 안에서의 위치 자체가 이미 CSV/Excel export 순서를 결정하는 유일한 근거(model.rs:40 주석 "행 순서 자체가 트리 구조를 결정") 이므로, 별도로 "-1/-2" 같은 필드를 새로 만들 필요 없이 **그 Vec 안에서의 삽입 위치만 올바르게 잡으면** 동일 페이지 내 순서도, export 순서도, 이후 사용자가 사이드바에서 드래그로 수동 재배열하는 것도 전부 자동으로 일관됨(사용자가 제안한 "-1/-2 접미사" 방식은 이 방법으로 갈음 가능 — 구현 시 재확인).
+- [ ] **새 북마크 생성 시 레벨 결정 로직 변경**: 현재 `add_bookmark_under_selection`(`crates/ui/src/app.rs:468`)은 선택된 노드가 있으면 그 자식으로(`bookmark::insert_node`에 `self.selected_bookmark`를 parent_id로 전달), 없으면 무조건 최상위(`None`)에 생성. **요청**: 선택된 노드가 없을 때는 위 페이지 순서 삽입 위치 기준 "바로 직전(페이지 번호상 이전) 북마크"와 같은 레벨(형제)로 생성 — 무조건 최상위가 아니라.
+- [ ] **새 북마크 placeholder 텍스트 자동 선택**: 지금은 `drag_state.editing = Some((new_id, "새 북마크".to_string()))`(sidebar.rs:198)로 편집 모드는 진입하고 포커스도 옮기지만(`request_focus`, sidebar.rs:258) 텍스트가 선택 상태는 아니라서, 사용자가 바로 타이핑해도 "새 북마크"에 이어붙거나 수동으로 전체 선택해야 함. `egui::TextEdit`에 `CCursorRange`로 전체 선택 상태를 얹어 포커스 이동과 같은 프레임에 적용해야 함(egui-winit/egui TextEdit state API 확인 필요).
+- [ ] **한글 IME 신규 버그 2건(편집 모드)**: (a) 한글 입력 후 스페이스바 1번 눌렀는데 공백이 2칸 들어감. (b) 한글 조합 중 다음 글자로 기호/숫자(`(`, `)` 등)를 치면 첫 입력이 화면에 안 뜨고 두 번째 입력부터 보임 — 간헐적(재현조건 미확정, 추가 조사 필요). 둘 다 §7 "한글 IME"에서 고친 winit 포크(`bjorkii/winit`)의 조합 처리 경로와 관련 가능성 있음 — 그 두 수정(discardMarkedText, CGEvent 웜업) 이후 새로 나타난 것인지, 원래 있었는데 이제 눈에 띈 것인지부터 확인.
+- [ ] **뷰어에 현재 보이는 페이지의 북마크를 사이드바에서 볼드체로 표시**: `sidebar.rs`의 트리 렌더링(약 284행 `egui::Label::new(node.title.clone())`)에서 `node.page == app.current_page`일 때 `.strong()` 또는 폰트 굵기 조정. 페이지 이동은 되는데 해당 북마크가 없는 페이지(북마크 사이 페이지)일 때 어떻게 표시할지(가장 가까운 이전 북마크를 볼드? 아무것도 안 볼드?) 결정 필요.
+
 ---
 
 ## 7. 값진 기술적 교훈 (다음 세션이 같은 삽질을 반복하지 않도록)
