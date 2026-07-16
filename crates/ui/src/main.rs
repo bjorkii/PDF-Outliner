@@ -66,9 +66,19 @@ fn main() -> eframe::Result<()> {
             let mut app = PdfViewerApp::new(cc);
             // CLI 인자(더블클릭으로 특정 파일 열기)가 명시적으로 주어졌으면 그게 우선,
             // 없으면 지난 실행에서 열려있던 파일을 자동으로 이어서 연다.
+            let is_auto_reopen = initial_file.is_none();
             let path_to_open = initial_file.or_else(|| app.last_opened_file.take());
             if let Some(path) = path_to_open {
                 app.request_open_file(path);
+                // 이전 세션을 이어서 여는 경우에만 마지막으로 보던 페이지로 이동한다
+                // (open_file_now가 내부적으로 1페이지로 리셋하므로 그 뒤에 덮어써야 함) —
+                // CLI 인자로 명시적으로 다른 파일을 열 때는 그 페이지 번호가 무의미하다.
+                if is_auto_reopen {
+                    if let Some(page) = app.last_opened_page {
+                        app.go_to_page(page);
+                        app.scroll_sidebar_to_active_once = true;
+                    }
+                }
             }
             Ok(Box::new(app))
         }),

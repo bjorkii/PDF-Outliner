@@ -133,6 +133,11 @@ pub struct PdfViewerApp {
     /// 이전 실행 종료 시점에 열려있던 파일 경로(eframe Storage에서 복원). `main.rs`가
     /// 시작 시 CLI 인자가 없으면 이 값으로 자동으로 연 뒤 소비(take)한다.
     pub last_opened_file: Option<PathBuf>,
+    /// 이전 실행 종료 시점에 보고 있던 페이지 번호. `last_opened_file`과 짝을 이뤄 저장되며,
+    /// `main.rs`가 자동 재오픈(CLI 인자 없이 이전 세션 파일을 이어서 열 때) 직후 이 페이지로
+    /// 이동한다 — CLI 인자로 명시적으로 다른 파일을 열 때는 쓰지 않는다(그 파일과 무관한
+    /// 페이지 번호이므로).
+    pub last_opened_page: Option<u32>,
 
     /// 마지막으로 창에 실제로 적용한 제목. 매 프레임 같은 값을 다시 보내지 않기 위한 캐시.
     last_window_title: Option<String>,
@@ -142,10 +147,17 @@ pub struct PdfViewerApp {
     /// §7 "한글 IME" 참고 — 포크한 winit의 discardMarkedText 패치와 한 세트).
     prev_focused_widget: Option<egui::Id>,
 
+    /// 앱 시작 시 마지막으로 보던 페이지를 복원한 직후 한 번만 세우는 플래그 — 사이드바가
+    /// 그 페이지에 해당하는(또는 가장 가까운 이전) 북마크로 자동 스크롤한다(`main.rs`에서
+    /// 설정, `sidebar.rs`가 소비). 이후 일반 페이지 이동에서는 스크롤하지 않는다 — 사용자
+    /// 요청 범위가 "앱 재실행 시"로 한정됨(2026-07-14).
+    pub scroll_sidebar_to_active_once: bool,
+
     pub status_message: Option<String>,
 }
 
 const LAST_OPENED_FILE_KEY: &str = "last_opened_file";
+const LAST_OPENED_PAGE_KEY: &str = "last_opened_page";
 
 impl PdfViewerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -160,6 +172,10 @@ impl PdfViewerApp {
             .storage
             .and_then(|s| s.get_string(LAST_OPENED_FILE_KEY))
             .map(PathBuf::from);
+        let last_opened_page = cc
+            .storage
+            .and_then(|s| s.get_string(LAST_OPENED_PAGE_KEY))
+            .and_then(|s| s.parse::<u32>().ok());
 
         // 이번 세션이 자동저장 파일을 건드리기 전에 먼저 확인해야 이전 세션의 흔적을
         // 덮어쓰지 않는다.
@@ -200,6 +216,8 @@ impl PdfViewerApp {
             pending_recovery,
             quit_confirmation_pending: false,
             last_opened_file,
+            last_opened_page,
+            scroll_sidebar_to_active_once: false,
             last_window_title: None,
             prev_focused_widget: None,
             status_message,
@@ -1116,6 +1134,7 @@ impl eframe::App for PdfViewerApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         if let Some(path) = &self.current_file {
             storage.set_string(LAST_OPENED_FILE_KEY, path.to_string_lossy().to_string());
+            storage.set_string(LAST_OPENED_PAGE_KEY, self.current_page.to_string());
         }
         crate::autosave::record(self.current_file.as_deref(), &self.bookmarks, self.bookmarks_dirty);
     }

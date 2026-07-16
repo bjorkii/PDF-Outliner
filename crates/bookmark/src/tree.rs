@@ -266,6 +266,24 @@ fn find_node(nodes: &[BookmarkNode], id: Uuid) -> Option<&BookmarkNode> {
 
 /// id 노드의 부모 id를 찾는다. 최상위 노드거나 트리에 없으면 None.
 /// 사이드바 화살표 키(리프 노드에서 좌/우로 부모 레벨을 접고 펴기)에 쓰인다.
+/// 뷰어에 표시 중인 페이지에 대응하는 "활성" 북마크를 찾는다(사이드바 볼드 표시용,
+/// `crates/ui/src/sidebar.rs`). 정확히 그 페이지의 북마크가 없으면, 페이지 번호가 그 이하인
+/// 것 중 트리 depth-first 순서상 가장 마지막(= 문서 흐름상 가장 가까운 이전) 노드를 반환한다
+/// — `insert_node_by_page`의 anchor 탐색과 같은 규칙(사용자가 "가장 가까운 이전 북마크를
+/// 볼드"로 확정, 2026-07-14). 모든 북마크보다 현재 페이지가 앞서면 None.
+pub fn active_bookmark_for_page(nodes: &[BookmarkNode], page: u32) -> Option<Uuid> {
+    let mut flat = Vec::new();
+    collect_ids_dfs(nodes, &mut flat);
+    flat.into_iter().rev().find(|(_, p)| *p <= page).map(|(id, _)| id)
+}
+
+fn collect_ids_dfs(nodes: &[BookmarkNode], out: &mut Vec<(Uuid, u32)>) {
+    for n in nodes {
+        out.push((n.id, n.page));
+        collect_ids_dfs(&n.children, out);
+    }
+}
+
 pub fn parent_of(nodes: &[BookmarkNode], id: Uuid) -> Option<Uuid> {
     for n in nodes {
         if n.children.iter().any(|c| c.id == id) {
@@ -564,5 +582,36 @@ mod tests {
 
         assert_eq!(tree.len(), 3);
         assert_eq!(tree[1].title, "B");
+    }
+
+    #[test]
+    fn active_bookmark_exact_page_match() {
+        let tree = vec![BookmarkNode::new("A", 10), BookmarkNode::new("B", 20)];
+        assert_eq!(active_bookmark_for_page(&tree, 20), Some(tree[1].id));
+    }
+
+    /// 북마크 사이 페이지는 가장 가까운 이전 북마크가 활성 상태여야 한다.
+    #[test]
+    fn active_bookmark_between_pages_picks_nearest_preceding() {
+        let tree = vec![BookmarkNode::new("A", 10), BookmarkNode::new("B", 20)];
+        assert_eq!(active_bookmark_for_page(&tree, 15), Some(tree[0].id));
+    }
+
+    /// 중첩된 자식이 더 뒤 페이지를 가리키면 그쪽이 anchor가 된다(depth-first 순서 반영).
+    #[test]
+    fn active_bookmark_prefers_nested_child_when_later_in_dfs_order() {
+        let mut tree = vec![BookmarkNode::new("1장", 1)];
+        let chapter_id = tree[0].id;
+        insert_node_by_page(&mut tree, Some(chapter_id), BookmarkNode::new("1.1절", 2));
+        let child_id = tree[0].children[0].id;
+
+        assert_eq!(active_bookmark_for_page(&tree, 3), Some(child_id));
+    }
+
+    /// 모든 북마크보다 앞선 페이지에서는 활성 북마크가 없다.
+    #[test]
+    fn active_bookmark_none_before_first_bookmark() {
+        let tree = vec![BookmarkNode::new("A", 10)];
+        assert_eq!(active_bookmark_for_page(&tree, 5), None);
     }
 }

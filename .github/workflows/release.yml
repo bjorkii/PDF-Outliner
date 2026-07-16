@@ -11,6 +11,10 @@ on:
 env:
   # bblanchon/pdfium-binaries 릴리스 태그. 업데이트 시 이 값만 바꾸면 됨.
   PDFIUM_TAG_ENCODED: chromium%2F7947
+  # 배포 파일명/앱 버전에 쓰는 값 — git 태그를 유일한 버전 소스로 삼는다(Cargo.toml의
+  # version은 릴리스마다 올리지 않아 실제 태그와 어긋나 있었음, 2026-07-14 발견).
+  # workflow_dispatch(태그 없는 수동 실행)일 땐 release 잡이 어차피 스킵되므로 dev-<run 번호>로.
+  VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('dev-{0}', github.run_number) }}
 
 jobs:
   build-macos:
@@ -46,7 +50,7 @@ jobs:
           echo "path=$path" >> "$GITHUB_OUTPUT"
 
       - name: Package
-        run: ./scripts/package-macos.sh ${{ matrix.target }} "${{ steps.pdfium.outputs.path }}"
+        run: ./scripts/package-macos.sh ${{ matrix.target }} "${{ steps.pdfium.outputs.path }}" "$VERSION"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -79,7 +83,7 @@ jobs:
 
       - name: Package
         shell: pwsh
-        run: ./scripts/package-windows.ps1 -PdfiumDllPath "${{ steps.pdfium.outputs.path }}"
+        run: ./scripts/package-windows.ps1 -PdfiumDllPath "${{ steps.pdfium.outputs.path }}" -VersionTag "$env:VERSION"
 
       - uses: actions/upload-artifact@v4
         with:

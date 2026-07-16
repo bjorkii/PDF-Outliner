@@ -89,9 +89,30 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
 
             let mut outcome = RenderOutcome::default();
             let current_selected = app.selected_bookmark;
+            let active_bookmark = bookmark::active_bookmark_for_page(&app.bookmarks, app.current_page);
+            // 1회성 플래그라 여기서 바로 소비(false로 되돌림) — 앱 시작 시 마지막으로 보던
+            // 페이지를 복원했을 때만 세워짐(main.rs 참고), 이후 일반 페이지 이동에는 적용 안 함.
+            let scroll_to_active_once = std::mem::take(&mut app.scroll_sidebar_to_active_once);
+            if scroll_to_active_once {
+                // 접혀있는 조상 밑에 있으면 애초에 안 그려져서 스크롤이 무의미하다 —
+                // add_new_bookmark와 같은 패턴으로 미리 펼쳐둔다.
+                if let Some(id) = active_bookmark {
+                    for ancestor in ancestors_of(&app.bookmarks, id) {
+                        drag_state.collapsed.remove(&ancestor);
+                    }
+                }
+            }
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                render_nodes(ui, &mut app.bookmarks, &mut drag_state, current_selected, &mut outcome);
+                render_nodes(
+                    ui,
+                    &mut app.bookmarks,
+                    &mut drag_state,
+                    current_selected,
+                    active_bookmark,
+                    scroll_to_active_once,
+                    &mut outcome,
+                );
                 // 트리가 패널을 꽉 채우면 새로 추가된 항목(항상 형제 중 맨 끝 근처에 생김)이
                 // 스크롤 영역 맨 아래 경계에 딱 붙어 다음 "+"/Cmd+B를 누르기 전까지 시야에서
                 // 잘려 보이는 느낌을 준다 — 여유 공간을 좀 둬서 항상 마지막 항목 아래가
@@ -209,6 +230,8 @@ fn render_nodes(
     nodes: &mut Vec<BookmarkNode>,
     drag_state: &mut DragState,
     current_selected: Option<Uuid>,
+    active_bookmark: Option<Uuid>,
+    scroll_to_active_once: bool,
     outcome: &mut RenderOutcome,
 ) {
     let mut delete_id: Option<Uuid> = None;
@@ -216,6 +239,7 @@ fn render_nodes(
     for node in nodes.iter_mut() {
         let is_editing = drag_state.editing.as_ref().is_some_and(|(id, _)| *id == node.id);
         let is_selected = current_selected == Some(node.id);
+        let is_active_page = active_bookmark == Some(node.id);
         let has_children = !node.children.is_empty();
         let is_collapsed = drag_state.collapsed.contains(&node.id);
 
@@ -303,11 +327,41 @@ fn render_nodes(
                 // 드래그해서 재정렬" 동작과 충돌해서, 실제로는 텍스트 선택 박스가
                 // 늘어나는 것처럼 보이고 정작 재정렬용 hover_target은 갱신되지 않는
                 // 버그가 있었다. false로 꺼야 Sense::click_and_drag()가 온전히 우리 것.
-                let label = egui::Label::new(node.title.clone())
-                    .wrap()
-                    .selectable(false)
-                    .sense(Sense::click_and_drag());
-                let label_response = ui.add(label);
+                // 뷰어에 표시 중인 페이지에 해당하는 북마크는 어두운 회색 배경 + 흰 글자로
+                // 강조 — 정확히 그 페이지가 아니어도 가장 가까운 이전 북마크가 강조된다
+                // (active_bookmark_for_page 참고, 사용자가 이 규칙으로 확정, 2026-07-14).
+                // 처음엔 볼드체만 썼으나 시인성이 떨어진다는 피드백으로 배경색 강조로 변경 —
+                // 배경이 텍스트보다 먼저 칠해져야 해서(볼드 때와 달리) egui::Frame으로 감싼다.
+                let title_text = egui::RichText::new(node.title.clone());
+                let title_text = if is_active_page {
+                    title_text.color(egui::Color32::WHITE)
+                } else {
+                    title_text
+                };
+                let label_response = egui::Frame::none()
+                    .fill(if is_active_page {
+                        egui::Color32::from_gray(60)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    })
+                    .inner_margin(egui::Margin::symmetric(3.0, 1.0))
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(title_text)
+                                .wrap()
+                                .selectable(false)
+                                .sense(Sense::click_and_drag()),
+                        )
+                    })
+                    .inner;
+
+                // 앱 시작 시 마지막으로 보던 페이지를 복원한 직후 한 번만: 그 활성 북마크가
+                // 사이드바에서 보이는 위치까지 스크롤한다(scroll_sidebar_to_active_once,
+                // main.rs 참고) — 안 그러면 트리가 길 때 강조된 항목이 스크롤 밖에 있어도
+                // 사용자가 알아챌 방법이 없었다.
+                if is_active_page && scroll_to_active_once {
+                    label_response.scroll_to_me(Some(egui::Align::Center));
+                }
 
                 if is_selected {
                     ui.painter().rect_filled(
@@ -404,7 +458,15 @@ fn render_nodes(
 
         if has_children && !is_collapsed {
             ui.indent(("bm_children", node.id), |ui| {
-                render_nodes(ui, &mut node.children, drag_state, current_selected, outcome);
+                render_nodes(
+                    ui,
+                    &mut node.children,
+                    drag_state,
+                    current_selected,
+                    active_bookmark,
+                    scroll_to_active_once,
+                    outcome,
+                );
             });
         }
     }

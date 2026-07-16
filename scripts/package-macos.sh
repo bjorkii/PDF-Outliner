@@ -6,11 +6,17 @@ set -euo pipefail
 # (free, no Apple Developer ID required — arm64 refuses to launch any binary
 # with zero signature at all), and zips the result for distribution.
 #
-# Usage: package-macos.sh <target-triple> <pdfium-dylib-path>
+# Usage: package-macos.sh <target-triple> <pdfium-dylib-path> [version-tag]
 #   target-triple: aarch64-apple-darwin | x86_64-apple-darwin
+#   version-tag: e.g. "v0.1.4" — used in the zip filename and (with the
+#     leading "v" stripped) in Info.plist. Defaults to "v<Cargo.toml version>"
+#     for convenient local/ad-hoc runs; CI always passes the actual release
+#     tag (the git tag is the single source of truth for release versions —
+#     Cargo.toml's version is not bumped per release and will drift).
 
-TARGET="${1:?usage: package-macos.sh <target-triple> <pdfium-dylib-path>}"
-PDFIUM_DYLIB="${2:?usage: package-macos.sh <target-triple> <pdfium-dylib-path>}"
+TARGET="${1:?usage: package-macos.sh <target-triple> <pdfium-dylib-path> [version-tag]}"
+PDFIUM_DYLIB="${2:?usage: package-macos.sh <target-triple> <pdfium-dylib-path> [version-tag]}"
+VERSION_TAG="${3:-}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -20,7 +26,10 @@ if [[ ! -f "$PDFIUM_DYLIB" ]]; then
   exit 1
 fi
 
-VERSION="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+if [[ -z "$VERSION_TAG" ]]; then
+  VERSION_TAG="v$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+fi
+VERSION="${VERSION_TAG#v}"
 
 case "$TARGET" in
   aarch64-apple-darwin) ARCH_LABEL="arm64" ;;
@@ -76,7 +85,7 @@ echo "==> Ad-hoc signing (no paid Apple Developer ID needed)"
 codesign --force --deep --sign - "$APP_DIR"
 codesign --verify --verbose "$APP_DIR"
 
-ZIP_NAME="PDF-Outliner-macos-$ARCH_LABEL.zip"
+ZIP_NAME="PDF-Outliner-$VERSION_TAG-macos-$ARCH_LABEL.zip"
 rm -f "$DIST_DIR/$ZIP_NAME"
 ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$DIST_DIR/$ZIP_NAME"
 
