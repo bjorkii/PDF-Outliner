@@ -23,11 +23,23 @@ fn main() -> eframe::Result<()> {
     // Finder "연결 프로그램" 더블클릭이나 CLI에서 파일 경로를 인자로 넘기면 시작 시 바로 연다.
     let initial_file = std::env::args().nth(1).map(std::path::PathBuf::from);
 
+    // ViewportBuilder에 아이콘을 안 주면 eframe이 자기 기본 아이콘(egui 로고, "e" 모양)을
+    // 런타임에 Dock/Cmd+Tab용으로 강제 설정해버린다(eframe-0.29.1의
+    // native/epi_integration.rs `load_default_egui_icon` + native/app_icon.rs
+    // `AppTitleIconSetter` — macOS에서 실행 중인 NSApplication 아이콘을 직접 갈아치움).
+    // Finder 아이콘(.icns, 앱이 안 떠 있어도 보임)과는 별개 경로라 번들에 .icns를 넣는 것만
+    // 으로는 Dock/Cmd+Tab이 안 고쳐진다 — 우리 아이콘을 직접 줘야 한다.
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!(
+        "../../../assets/icon/icon-master-1024.png"
+    ))
+    .expect("assets/icon/icon-master-1024.png 로드 실패");
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([600.0, 400.0])
-            .with_title("PDF Outliner"),
+            .with_title("PDF Outliner")
+            .with_icon(icon),
         // wgpu 백엔드 - 콜드 스타트/렌더링 속도 우선
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {

@@ -14,29 +14,35 @@
     </linearGradient>
   </defs>
 
-  <!-- macOS-style rounded-square background -->
-  <rect x="0" y="0" width="1024" height="1024" rx="220" ry="220" fill="url(#bg)"/>
+  <!-- macOS 앱 아이콘은 캔버스 전체를 안 채우고 가장자리에 여백(대략 8%)을 두는 관례가
+       있음 — Dock/Cmd+Tab에서 다른 앱과 나란히 놓였을 때 유독 커 보이는 문제(사용자
+       리포트, 2026-07-16)가 배경을 1024 캔버스 끝까지 그린 탓이었음. 기존 내용 전체를
+       그대로 두고 균일하게 축소+중앙 정렬만 추가(MARGIN=80, S=(1024-160)/1024). -->
+  <g transform="translate(80, 80) scale(0.84375)">
+    <!-- macOS-style rounded-square background -->
+    <rect x="0" y="0" width="1024" height="1024" rx="220" ry="220" fill="url(#bg)"/>
 
-  <!-- Bookmark ribbon: forked tail tucks behind the document, notch stays visible above the page edge -->
-  <path d="M 566 140 L 626 140 L 626 280 L 596 225 L 566 280 Z" fill="url(#ribbon)"/>
+    <!-- Bookmark ribbon: forked tail tucks behind the document, notch stays visible above the page edge -->
+    <path d="M 566 140 L 626 140 L 626 280 L 596 225 L 566 280 Z" fill="url(#ribbon)"/>
 
-  <!-- Document page with folded top-right corner -->
-  <path d="M 282 260
-           L 672 260
-           L 742 330
-           L 742 852
-           Q 742 868 726 868
-           L 298 868
-           Q 282 868 282 852
-           Z" fill="#FFFFFF"/>
-  <path d="M 672 260 L 742 330 L 672 330 Z" fill="url(#fold)"/>
+    <!-- Document page with folded top-right corner -->
+    <path d="M 282 260
+             L 672 260
+             L 742 330
+             L 742 852
+             Q 742 868 726 868
+             L 298 868
+             Q 282 868 282 852
+             Z" fill="#FFFFFF"/>
+    <path d="M 672 260 L 742 330 L 672 330 Z" fill="url(#fold)"/>
 
-  <!-- Outline / bookmark tree lines inside the document -->
-  <rect x="326" y="408" width="300" height="26" rx="13" fill="#2B4C7E"/>
-  <rect x="366" y="466" width="220" height="22" rx="11" fill="#7C93B8"/>
-  <rect x="366" y="510" width="260" height="22" rx="11" fill="#7C93B8"/>
-  <rect x="326" y="568" width="280" height="26" rx="13" fill="#2B4C7E"/>
-  <rect x="366" y="626" width="200" height="22" rx="11" fill="#7C93B8"/>
-  <rect x="366" y="670" width="240" height="22" rx="11" fill="#7C93B8"/>
-  <rect x="326" y="728" width="260" height="26" rx="13" fill="#2B4C7E"/>
+    <!-- Outline / bookmark tree lines inside the document -->
+    <rect x="326" y="408" width="300" height="26" rx="13" fill="#2B4C7E"/>
+    <rect x="366" y="466" width="220" height="22" rx="11" fill="#7C93B8"/>
+    <rect x="366" y="510" width="260" height="22" rx="11" fill="#7C93B8"/>
+    <rect x="326" y="568" width="280" height="26" rx="13" fill="#2B4C7E"/>
+    <rect x="366" y="626" width="200" height="22" rx="11" fill="#7C93B8"/>
+    <rect x="366" y="670" width="240" height="22" rx="11" fill="#7C93B8"/>
+    <rect x="326" y="728" width="260" height="26" rx="13" fill="#2B4C7E"/>
+  </g>
 </svg>
