@@ -35,5 +35,12 @@ winres = "0.1"
 # 열린 파일이 같은 폴더 안에서 이름이 바뀌면(Finder에서 rename) inode로 대조해 자동으로
 # 따라가기 위함(app.rs의 file_watcher 관련 코드) — inode 개념이 있는 macOS 전용, Windows는
 # 해당 없음(§ pdf_viewer_spec.md 참고).
+#
+# winit: Finder 더블클릭/"다음으로 열기"로 PDF를 열 때 파일 경로를 받기 위함
+# (macos_open_file.rs) — winit 자체는 이 macOS Apple Event(application:openURLs:)를
+# 지원하지 않아 bjorkii/winit 포크(korean-ime-discard-marked-text-0.30.13 브랜치, 루트
+# Cargo.toml의 [patch.crates-io] 참고)에 직접 핸들러를 추가했다. eframe이 이미 이
+# 패치된 winit을 쓰므로 버전만 맞추면 같은 인스턴스로 유니파이된다.
 [target.'cfg(target_os = "macos")'.dependencies]
 notify = "6"
+winit = "0.30"

@@ -22,6 +22,17 @@ impl Default for ViewportState {
     }
 }
 
+/// 방향키를 사이드바(북마크 탐색)와 뷰어(페이지 이동) 중 어디로 보낼지 결정하는 상태.
+/// 선택된 북마크가 있는지 여부와는 별개다(2026-07-17 재설계 — 이전엔 `selected_bookmark`
+/// 유무로 방향키를 분기했는데, 그러면 "북마크를 클릭한 뒤 화살표로 페이지를 넘겨도 선택은
+/// 그대로 유지하고 싶다"는 요구를 표현할 방법이 없었음). Tab으로 전환(app.rs), 뷰어 클릭
+/// 시 Viewer로(viewer_panel.rs), 북마크 클릭 시 Sidebar로(sidebar.rs) 바뀐다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusArea {
+    Sidebar,
+    Viewer,
+}
+
 impl ViewportState {
     pub const MIN_ZOOM: f32 = 0.25;
     pub const MAX_ZOOM: f32 = 8.0;
@@ -55,7 +66,19 @@ pub struct PdfViewerApp {
     pub bookmarks_dirty: bool,
     /// 사이드바에서 현재 선택된 북마크. 클릭 시 뷰어 페이지 이동 + 이 값 설정, "+"는 이
     /// 노드의 자식으로 추가, "-"는 이 노드를 삭제하는 데 쓰인다.
+    /// 페이지가 바뀔 때마다 그 페이지의 활성 북마크로 자동 동기화된다(`set_current_page`,
+    /// 2026-07-17 재설계 — "순회 중인 북마크가 곧 선택된 북마크") — 사이드바 하이라이트도
+    /// 이 값 하나만 따라간다.
     pub selected_bookmark: Option<Uuid>,
+    /// `selected_bookmark`가 사용자의 명시적 조작(사이드바 클릭/화살표 탐색)으로 정해진
+    /// 것인지, 페이지 이동에 따라 자동 동기화된 것인지 구분한다. 자동 선택된 항목을
+    /// 처음 클릭했을 때 "이미 선택된 항목 재클릭 = 이름 편집"으로 오인되는 것을 막고
+    /// (sidebar.rs), Cmd+B의 "선택 없으면 페이지 순서 삽입" 관례(2026-07-14 스펙)를
+    /// 자동 선택이 망가뜨리지 않게 한다(`add_bookmark_under_selection`).
+    pub selection_is_explicit: bool,
+    /// 방향키를 사이드바/뷰어 중 어디로 보낼지 — `FocusArea` 문서 참고. 기본값은 Viewer
+    /// (문서를 막 열었을 때 화살표 키로 곧바로 페이지를 넘길 수 있어야 하므로).
+    pub focus_area: FocusArea,
     /// 북마크 변경 실행취소(Cmd+Z) 스택 — 변경 직전 스냅샷을 최대 20개까지 보관.
     pub bookmark_undo_stack: VecDeque<Vec<BookmarkNode>>,
     /// 다시 실행(Cmd+Shift+Z) 스택. undo할 때 채워지고, 새 편집이 생기면 비워진다
@@ -219,6 +242,8 @@ impl PdfViewerApp {
             bookmarks: Vec::new(),
             bookmarks_dirty: false,
             selected_bookmark: None,
+            selection_is_explicit: false,
+            focus_area: FocusArea::Viewer,
             bookmark_undo_stack: VecDeque::new(),
             bookmark_redo_stack: VecDeque::new(),
             request_add_bookmark: false,
@@ -390,6 +415,21 @@ impl PdfViewerApp {
             self.current_file = Some(new_path);
             break;
         }
+    }
+
+    /// 매 프레임 호출 — Finder 더블클릭/"다음으로 열기"로 받은 파일이 있으면 연다
+    /// (`macos_open_file.rs` 참고, winit이 이 Apple Event를 지원하지 않아 별도 등록한
+    /// `NSAppleEventManager` 핸들러가 채워두는 큐를 폴링). 앱이 이미 떠 있는 상태에서
+    /// 또 다른 PDF를 열어도(새 프로세스가 아니라) 같은 인스턴스로 이벤트가 다시
+    /// 오므로 시작 시 1회성이 아니라 계속 폴링해야 한다.
+    #[cfg(target_os = "macos")]
+    fn poll_macos_open_file_events(&mut self, ctx: &egui::Context) {
+        let files = crate::macos_open_file::take_pending_files();
+        let Some(path) = files.into_iter().next() else {
+            return;
+        };
+        self.request_open_file(path);
+        ctx.request_repaint();
     }
 
     fn open_file_now(&mut self, path: PathBuf) {
@@ -686,8 +726,17 @@ impl PdfViewerApp {
         self.push_bookmark_undo_snapshot();
         let new_node = BookmarkNode::new("새 북마크", self.current_page);
         let new_id = new_node.id;
-        bookmark::insert_node_by_page(&mut self.bookmarks, self.selected_bookmark, new_node);
+        // 자동 동기화로 잡힌 선택(selection_is_explicit=false)은 "선택 없음"으로 취급 —
+        // 페이지 이동만 해도 선택이 거의 항상 잡혀 있게 된 뒤로(set_current_page 참고),
+        // 이걸 부모로 쓰면 "선택 없으면 직전 북마크와 같은 레벨에 페이지 순서 삽입"
+        // 관례(2026-07-14 스펙)가 사실상 사라져버린다. 사용자가 직접 클릭/화살표로
+        // 고른 선택만 "이 노드의 자식으로" 관례를 탄다.
+        let parent = self
+            .selected_bookmark
+            .filter(|_| self.selection_is_explicit);
+        bookmark::insert_node_by_page(&mut self.bookmarks, parent, new_node);
         self.selected_bookmark = Some(new_id);
+        self.selection_is_explicit = true;
         self.bookmarks_dirty = true;
         new_id
     }
@@ -703,6 +752,9 @@ impl PdfViewerApp {
         self.push_bookmark_undo_snapshot();
         if bookmark::remove_node(&mut self.bookmarks, id).is_some() {
             self.selected_bookmark = next_selection;
+            // 삭제 후 이어지는 화살표 탐색/재클릭 이름수정이 예전처럼 동작하도록,
+            // 넘겨받은 선택도 명시적 선택으로 취급한다.
+            self.selection_is_explicit = next_selection.is_some();
             self.bookmarks_dirty = true;
         } else {
             // 아무것도 지워지지 않았으면 방금 남긴 스냅샷도 의미가 없으니 되돌린다.
@@ -943,22 +995,36 @@ impl PdfViewerApp {
         self.viewport.pan_offset = egui::Vec2::ZERO;
         self.selection = None;
         self.selection_drag_start_index = None;
+        // 페이지가 바뀌면 사이드바 선택도 그 페이지의 활성 북마크로 자동 동기화한다
+        // (2026-07-17 재설계 — "순회 중인 북마크가 곧 선택된 북마크", 최초 구동 시에도
+        // 마지막 페이지 복원 경로가 여기를 지나므로 Tab 직후 화살표 탐색이 바로 된다).
+        // 사이드바 클릭/화살표 탐색은 이 함수가 불린 "뒤에" 자기가 고른 노드로
+        // selected_bookmark를 다시 덮어쓰므로(sidebar.rs의 outcome 적용 순서) 같은
+        // 페이지에 북마크가 여러 개여도 명시적 선택이 항상 이긴다.
+        self.selected_bookmark = bookmark::active_bookmark_for_page(&self.bookmarks, clamped);
+        self.selection_is_explicit = false;
     }
 
     fn handle_page_navigation_keys(&mut self, ctx: &egui::Context) {
-        // 텍스트필드 등에 포커스가 있을 때는 방향키를 페이지 이동으로 가로채지 않는다.
-        // 사이드바에 선택된 북마크가 있을 때도 마찬가지로 가로채지 않는다 — 그때는
-        // 좌/우 화살표가 트리 접기/펼치기(sidebar.rs)로 쓰이기 때문에 페이지 이동과 겹치면
-        // 안 된다. 뷰어 패널을 클릭하면 선택이 해제되어 다시 페이지 이동으로 돌아온다.
-        if !ctx.wants_keyboard_input() && self.selected_bookmark.is_none() {
-            ctx.input(|i| {
-                if i.key_pressed(Key::ArrowRight) {
-                    self.go_to_page_delta(1);
-                }
-                if i.key_pressed(Key::ArrowLeft) {
-                    self.go_to_page_delta(-1);
-                }
-            });
+        // Tab(사이드바<->뷰어 포커스 전환)은 여기가 아니라 raw_input_hook에서 처리한다 —
+        // 여기서 key_pressed(Tab)를 봐도 egui가 같은 프레임 시작 시점에 이미 그 Tab으로
+        // 위젯 포커스 순회를 시작해버려("파일 열기" 버튼 등으로 포커스가 끼어드는 실측
+        // 리포트, 2026-07-17) 전환이 오염된다. raw_input_hook 쪽 주석 참고.
+
+        // 텍스트필드 등에 포커스가 있을 때는 방향키를 가로채지 않는다.
+        if !ctx.wants_keyboard_input() {
+            // 좌/우 화살표는 뷰어가 포커스일 때만 페이지 이동 — 사이드바가 포커스면 좌/우
+            // 화살표는 sidebar.rs가 트리 접기/펼치기로 쓴다(예전 동작 그대로).
+            if self.focus_area == FocusArea::Viewer {
+                ctx.input(|i| {
+                    if i.key_pressed(Key::ArrowRight) {
+                        self.go_to_page_delta(1);
+                    }
+                    if i.key_pressed(Key::ArrowLeft) {
+                        self.go_to_page_delta(-1);
+                    }
+                });
+            }
         }
 
         // Cmd+Z(실행취소)/Cmd+Shift+Z(다시 실행). Cmd+C와 달리 egui-winit이 별도 세맨틱
@@ -995,8 +1061,12 @@ impl PdfViewerApp {
 
             // Delete/Backspace — 선택된 북마크 삭제. 사이드바 텍스트 편집 중엔
             // wants_keyboard_input()이 true라 여기까지 안 온다(편집 중 백스페이스가
-            // 항목 자체를 지워버리는 사고 방지).
-            if self.selected_bookmark.is_some()
+            // 항목 자체를 지워버리는 사고 방지). 사이드바가 포커스일 때만 동작 —
+            // 페이지 이동만 해도 선택이 자동 동기화로 거의 항상 잡혀 있으므로
+            // (set_current_page 참고), 뷰어를 보다가 무심코 누른 Delete가 엉뚱한
+            // 북마크를 지우는 사고를 막아야 한다(2026-07-17).
+            if self.focus_area == FocusArea::Sidebar
+                && self.selected_bookmark.is_some()
                 && ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace))
             {
                 self.delete_selected_bookmark();
@@ -1307,6 +1377,58 @@ fn show_search_no_results_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
 }
 
 impl eframe::App for PdfViewerApp {
+    /// Tab 키를 egui보다 먼저 가로채 사이드바<->뷰어 포커스 전환(FocusArea) 전용으로
+    /// 쓴다. update() 안에서 `key_pressed(Tab)`를 보는 방식은 안 된다 — egui의 포커스
+    /// 시스템(`Memory::begin_pass`)이 프레임 시작 시점에 raw 이벤트에서 Tab을 읽어
+    /// 위젯 포커스 순회를 시작해버리므로("파일 열기" 버튼 등으로 포커스가 끼어드는 실측
+    /// 리포트, 2026-07-17), 그 전에 raw input에서 Tab 이벤트 자체를 제거해야 한다.
+    ///
+    /// Tab 이벤트는 텍스트 편집 중이든 아니든 **항상** 걷어낸다 — 처음엔 편집 중
+    /// (wants_keyboard_input)일 때 TextEdit의 표준 동작을 살리려고 통과시켰는데, egui의
+    /// "표준 동작"이 바로 위젯 포커스 순회여서 편집 필드에서 Tab을 누르는 순간 포커스가
+    /// 다음 위젯(버튼/북마크)으로 옮겨가고, 그 뒤로는 Tab 연타로 모든 위젯을 순회하는
+    /// 상태에 빠졌다(사용자 리포트, 2026-07-17). 이 앱에서 Tab의 의미는 사이드바<->뷰어
+    /// 전환 딱 하나다: 텍스트 입력 중엔 아무 일도 하지 않고, 그 외엔 전환.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let mut toggle = false;
+        raw_input.events.retain(|event| {
+            if let egui::Event::Key {
+                key: Key::Tab,
+                pressed,
+                repeat,
+                modifiers,
+                ..
+            } = event
+            {
+                if modifiers.is_none() || modifiers.shift_only() {
+                    if *pressed && !*repeat {
+                        toggle = true;
+                    }
+                    return false; // egui 포커스 순회로 새어나가지 않게 이벤트 제거
+                }
+            }
+            true
+        });
+        // 텍스트 입력 중(북마크 이름 편집, 검색창, 페이지 번호 입력)의 Tab은 무시 —
+        // 이벤트는 위에서 이미 걷어냈으므로 위젯 순회도 일어나지 않는다.
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+        if toggle {
+            self.focus_area = match self.focus_area {
+                FocusArea::Sidebar => FocusArea::Viewer,
+                FocusArea::Viewer => FocusArea::Sidebar,
+            };
+            // 사이드바로 들어왔는데 선택이 없으면(현재 페이지보다 앞선 북마크가 하나도
+            // 없어 자동 동기화가 None을 남긴 경우) 화살표 탐색의 출발점이 없어 키가
+            // 죽는다 — 첫 북마크를 잡아준다.
+            if self.focus_area == FocusArea::Sidebar && self.selected_bookmark.is_none() {
+                self.selected_bookmark = self.bookmarks.first().map(|n| n.id);
+                self.selection_is_explicit = false;
+            }
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if self.max_texture_side.is_none() {
             self.max_texture_side = frame
@@ -1321,6 +1443,8 @@ impl eframe::App for PdfViewerApp {
         self.poll_search_job(ctx);
         #[cfg(target_os = "macos")]
         self.poll_file_rename(ctx);
+        #[cfg(target_os = "macos")]
+        self.poll_macos_open_file_events(ctx);
 
         crate::toolbar::show(ctx, self);
         crate::sidebar::show(ctx, self);

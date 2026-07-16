@@ -30,7 +30,7 @@ struct RenderOutcome {
 }
 
 pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
-    egui::SidePanel::left("bookmarks_sidebar")
+    let panel_response = egui::SidePanel::left("bookmarks_sidebar")
         .resizable(true)
         .default_width(240.0)
         .min_width(90.0)
@@ -48,8 +48,38 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 add_new_bookmark(app, &mut drag_state);
             }
 
-            ui.horizontal(|ui| {
-                ui.heading("북마크");
+            // 헤더: +/-/Undo/Redo 버튼을 헤더 영역 안에서 가로/세로 모두 중앙 정렬
+            // ("북마크" 제목 텍스트는 자리만 차지해서 제거 — 2026-07-17 요청).
+            // 가로 중앙: egui는 single-pass immediate mode라 그리기 전엔 콘텐츠 폭을 알 수
+            // 없으므로, 지난 프레임에 측정해둔 버튼 그룹 폭으로 오프셋을 계산한다(첫
+            // 프레임만 왼쪽 치우침, 다음 프레임부터 중앙 — 실사용에선 안 보임).
+            // 세로 중앙: 고정 높이 rect를 잡고 그 안에 Align::Center 가로 레이아웃 child를
+            // 만든다 — 예전처럼 ui.horizontal을 그냥 쓰면 행 높이가 버튼 높이에 딱 맞아
+            // 헤더 영역 위쪽에 붙어 보인다는 피드백.
+            let header_height = 36.0;
+            // 아래쪽엔 item_spacing + 구분선 자체 패딩(합계 ~6pt)이 붙는데 위쪽 패널
+            // 마진은 ~1pt뿐이라, 36pt 밴드 정중앙에 놓아도 버튼이 위 테두리 쪽으로
+            // 치우쳐 보인다(스크린샷 픽셀 실측: 위 24px vs 아래 31px @2x) — 그 차이만큼
+            // 밴드를 내려 균형을 맞춘다(3pt 적용 후 재실측 29px vs 30px).
+            ui.add_space(3.0);
+            let (header_rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), header_height),
+                Sense::hover(),
+            );
+            let buttons_width_id = Id::new("bm_header_buttons_width");
+            let known_width: f32 = ctx
+                .data_mut(|d| d.get_temp(buttons_width_id))
+                .unwrap_or(0.0);
+            let mut header_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(header_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            {
+                let ui = &mut header_ui;
+                ui.add_space(((header_rect.width() - known_width) / 2.0).max(0.0));
+                let buttons_start_x = ui.cursor().min.x;
+
                 if ui
                     .button("+")
                     .on_hover_text("추가 (선택된 항목의 하위, 없으면 최상위) — Cmd+B")
@@ -84,19 +114,23 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 {
                     app.redo_bookmarks();
                 }
-            });
+
+                let measured = ui.min_rect().max.x - buttons_start_x;
+                ctx.data_mut(|d| d.insert_temp(buttons_width_id, measured));
+            }
             ui.separator();
 
             let mut outcome = RenderOutcome::default();
             let current_selected = app.selected_bookmark;
-            let active_bookmark = bookmark::active_bookmark_for_page(&app.bookmarks, app.current_page);
             // 1회성 플래그라 여기서 바로 소비(false로 되돌림) — 앱 시작 시 마지막으로 보던
             // 페이지를 복원했을 때만 세워짐(main.rs 참고), 이후 일반 페이지 이동에는 적용 안 함.
+            // 선택은 페이지 이동 때마다 활성 북마크로 자동 동기화되므로(set_current_page)
+            // 복원 직후의 selected_bookmark가 곧 그 페이지의 활성 북마크다.
             let scroll_to_active_once = std::mem::take(&mut app.scroll_sidebar_to_active_once);
             if scroll_to_active_once {
                 // 접혀있는 조상 밑에 있으면 애초에 안 그려져서 스크롤이 무의미하다 —
                 // add_new_bookmark와 같은 패턴으로 미리 펼쳐둔다.
-                if let Some(id) = active_bookmark {
+                if let Some(id) = current_selected {
                     for ancestor in ancestors_of(&app.bookmarks, id) {
                         drag_state.collapsed.remove(&ancestor);
                     }
@@ -109,7 +143,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     &mut app.bookmarks,
                     &mut drag_state,
                     current_selected,
-                    active_bookmark,
+                    app.selection_is_explicit,
                     scroll_to_active_once,
                     &mut outcome,
                 );
@@ -139,8 +173,12 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             }
 
             // 선택된 북마크 기준 화살표 키 네비게이션 + F2 이름 편집. 텍스트 편집 중이거나
-            // 다른 위젯이 키보드를 쓰고 있을 때는 가로채지 않는다.
-            if !ctx.wants_keyboard_input() && drag_state.editing.is_none() {
+            // 다른 위젯이 키보드를 쓰고 있을 때, 그리고 포커스가 뷰어 쪽일 때는(app.rs의
+            // FocusArea 참고 — Tab 또는 뷰어 클릭으로 옮겨감) 가로채지 않는다.
+            if !ctx.wants_keyboard_input()
+                && drag_state.editing.is_none()
+                && app.focus_area == crate::app::FocusArea::Sidebar
+            {
                 if let Some(selected) = current_selected {
                     // F2 — 선택된 항목을 곧바로 이름 편집 모드로. 더블클릭/재클릭과 동일한
                     // 진입점이지만 키보드만으로 접근 가능하게 하는 게 목적.
@@ -151,29 +189,32 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                         }
                     }
 
-                    // Enter — 선택된 항목의 페이지를 뷰어에 표시. 클릭으로 처음 선택했을 때는
-                    // 곧바로 페이지가 넘어가지만, 화살표 키로 선택을 옮긴 뒤에는 페이지가 안
-                    // 따라와서 다시 확인하고 싶을 때 이 키만으로도 이동할 수 있게 한다.
-                    if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        if let Some(page) = find_page(&app.bookmarks, selected) {
-                            outcome.jump_page = Some(page);
-                        }
-                    }
+                    // (Enter로 선택 항목 페이지 재확인하던 기능은 제거 — 상/하 화살표
+                    // 이동이 곧바로 페이지를 넘기므로 선택과 페이지가 항상 동기화된다,
+                    // 2026-07-17 사용자 확정.)
 
                     let mut visible = Vec::new();
                     flatten_visible(&app.bookmarks, &drag_state.collapsed, &mut visible);
                     if let Some(pos) = visible.iter().position(|id| *id == selected) {
                         ctx.input(|i| {
+                            // 상/하 화살표 = 형제/전체 탐색. 클릭과 마찬가지로 이동한 항목의
+                            // 페이지를 곧바로 뷰어에 보여준다(2026-07-17 추가 요구사항 — 예전엔
+                            // Enter를 따로 눌러야 페이지가 따라왔음).
                             if i.key_pressed(egui::Key::ArrowDown) && pos + 1 < visible.len() {
-                                outcome.selected = Some(visible[pos + 1]);
+                                let target = visible[pos + 1];
+                                outcome.selected = Some(target);
+                                outcome.jump_page = find_page(&app.bookmarks, target);
                             }
                             if i.key_pressed(egui::Key::ArrowUp) && pos > 0 {
-                                outcome.selected = Some(visible[pos - 1]);
+                                let target = visible[pos - 1];
+                                outcome.selected = Some(target);
+                                outcome.jump_page = find_page(&app.bookmarks, target);
                             }
                             // 좌/우 화살표는 선택된 항목 자체가 자식을 가지면 그 항목을,
                             // 아니면(리프 노드) 그 부모를 접고/편다 — "선택된 항목이 속한
-                            // 레벨"을 조작한다는 요구사항. 예전엔 선택된 항목 자신이 자식을
-                            // 가질 때만 작동해서 리프 노드에서는 아무 반응이 없었다.
+                            // 레벨"을 조작한다는 요구사항(예전 동작 그대로, 2026-07-17 복원 —
+                            // 포커스가 사이드바일 때만 여기로 오므로 뷰어 페이지 이동과 더 이상
+                            // 겹치지 않는다).
                             let fold_target = if has_children(&app.bookmarks, selected) {
                                 Some(selected)
                             } else {
@@ -189,6 +230,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                                     // 여전히 화면에 보이니 선택을 그대로 둔다.
                                     if target != selected {
                                         outcome.selected = Some(target);
+                                        outcome.jump_page = find_page(&app.bookmarks, target);
                                     }
                                 }
                                 if i.key_pressed(egui::Key::ArrowRight) {
@@ -206,12 +248,37 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 app.go_to_page(page);
             }
             if let Some(selected) = outcome.selected {
+                // go_to_page(위 jump_page 처리)가 자동 동기화로 selected_bookmark를 앵커
+                // 북마크로 덮어썼을 수 있으므로, 사용자가 직접 고른 노드가 반드시 그 뒤에
+                // 다시 쓰여야 한다(같은 페이지에 북마크 여러 개인 경우 실제로 갈라짐).
                 app.selected_bookmark = Some(selected);
+                app.selection_is_explicit = true;
+                // 클릭이든 화살표 키 탐색이든, 북마크 선택이 바뀌면 포커스는 사이드바다
+                // (이미 사이드바 포커스였던 화살표 키 경로에는 no-op, 뷰어 포커스 상태에서
+                // 북마크를 클릭한 경우엔 실제로 되돌림 — app::FocusArea 문서 참고).
+                app.focus_area = crate::app::FocusArea::Sidebar;
             }
             if outcome.dirty {
                 app.bookmarks_dirty = true;
             }
         });
+
+    // 포커스가 사이드바일 때 패널 둘레에 테두리를 그려 "지금 화살표 키가 북마크
+    // 탐색으로 동작한다"는 걸 시각적으로 알려준다(Tab/클릭으로 전환 — FocusArea 문서
+    // 참고). 처음엔 패널 닫기 전에 ui.painter()로 그렸는데, 패널 안의 painter는 패널
+    // 내용 영역으로 클리핑돼서 위/아래 변이 잘리고 좌/우 변만 보였다(사용자 리포트,
+    // 2026-07-17) — 패널이 닫힌 뒤 클리핑 없는 Foreground 레이어 painter로 패널 전체
+    // rect에 그려야 네 변이 다 나온다. 스트로크가 화면 경계에서 잘리지 않게 절반
+    // 폭만큼 안쪽으로 줄인다.
+    if app.focus_area == crate::app::FocusArea::Sidebar {
+        let panel_rect = panel_response.response.rect;
+        let stroke = egui::Stroke::new(2.0_f32, ctx.style().visuals.selection.bg_fill);
+        ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            Id::new("sidebar_focus_border"),
+        ))
+        .rect_stroke(panel_rect.shrink(1.0), 2.0_f32, stroke);
+    }
 }
 
 /// "+"버튼과 Cmd+B가 공유하는 로직: 선택된 항목의 자식(없으면 최상위)으로 새 북마크를
@@ -230,7 +297,7 @@ fn render_nodes(
     nodes: &mut Vec<BookmarkNode>,
     drag_state: &mut DragState,
     current_selected: Option<Uuid>,
-    active_bookmark: Option<Uuid>,
+    selection_is_explicit: bool,
     scroll_to_active_once: bool,
     outcome: &mut RenderOutcome,
 ) {
@@ -239,7 +306,6 @@ fn render_nodes(
     for node in nodes.iter_mut() {
         let is_editing = drag_state.editing.as_ref().is_some_and(|(id, _)| *id == node.id);
         let is_selected = current_selected == Some(node.id);
-        let is_active_page = active_bookmark == Some(node.id);
         let has_children = !node.children.is_empty();
         let is_collapsed = drag_state.collapsed.contains(&node.id);
 
@@ -327,27 +393,14 @@ fn render_nodes(
                 // 드래그해서 재정렬" 동작과 충돌해서, 실제로는 텍스트 선택 박스가
                 // 늘어나는 것처럼 보이고 정작 재정렬용 hover_target은 갱신되지 않는
                 // 버그가 있었다. false로 꺼야 Sense::click_and_drag()가 온전히 우리 것.
-                // 뷰어에 표시 중인 페이지에 해당하는 북마크는 어두운 회색 배경 + 흰 글자로
-                // 강조 — 정확히 그 페이지가 아니어도 가장 가까운 이전 북마크가 강조된다
-                // (active_bookmark_for_page 참고, 사용자가 이 규칙으로 확정, 2026-07-14).
-                // 처음엔 볼드체만 썼으나 시인성이 떨어진다는 피드백으로 배경색 강조로 변경 —
-                // 배경이 텍스트보다 먼저 칠해져야 해서(볼드 때와 달리) egui::Frame으로 감싼다.
-                let title_text = egui::RichText::new(node.title.clone());
-                let title_text = if is_active_page {
-                    title_text.color(egui::Color32::WHITE)
-                } else {
-                    title_text
-                };
+                // (하이라이트는 아래 is_selected 오버레이 하나로 통일 — 예전의 "현재 페이지
+                // 활성 북마크" 회색 배경 강조는 선택이 페이지와 자동 동기화되면서 중복이라
+                // 제거, 2026-07-17 사용자 확정. Frame의 inner_margin은 행 간격 유지용.)
                 let label_response = egui::Frame::none()
-                    .fill(if is_active_page {
-                        egui::Color32::from_gray(60)
-                    } else {
-                        egui::Color32::TRANSPARENT
-                    })
                     .inner_margin(egui::Margin::symmetric(3.0, 1.0))
                     .show(ui, |ui| {
                         ui.add(
-                            egui::Label::new(title_text)
+                            egui::Label::new(node.title.clone())
                                 .wrap()
                                 .selectable(false)
                                 .sense(Sense::click_and_drag()),
@@ -355,11 +408,11 @@ fn render_nodes(
                     })
                     .inner;
 
-                // 앱 시작 시 마지막으로 보던 페이지를 복원한 직후 한 번만: 그 활성 북마크가
-                // 사이드바에서 보이는 위치까지 스크롤한다(scroll_sidebar_to_active_once,
-                // main.rs 참고) — 안 그러면 트리가 길 때 강조된 항목이 스크롤 밖에 있어도
-                // 사용자가 알아챌 방법이 없었다.
-                if is_active_page && scroll_to_active_once {
+                // 앱 시작 시 마지막으로 보던 페이지를 복원한 직후 한 번만: 선택(=그 페이지의
+                // 활성 북마크, set_current_page의 자동 동기화)이 사이드바에서 보이는
+                // 위치까지 스크롤한다(scroll_sidebar_to_active_once, main.rs 참고) —
+                // 안 그러면 트리가 길 때 강조된 항목이 스크롤 밖에 있어도 알 방법이 없다.
+                if is_selected && scroll_to_active_once {
                     label_response.scroll_to_me(Some(egui::Align::Center));
                 }
 
@@ -372,7 +425,12 @@ fn render_nodes(
                 }
 
                 if label_response.clicked() {
-                    if is_selected {
+                    // "이미 선택된 항목 재클릭 = 이름 편집"은 사용자가 직접 고른
+                    // 선택(selection_is_explicit)일 때만 — 페이지 이동만으로 자동 선택된
+                    // 항목(set_current_page 참고)을 처음 클릭했는데 곧바로 편집 모드로
+                    // 들어가면 당황스럽다. 자동 선택 항목의 첫 클릭은 일반 선택으로 처리
+                    // (outcome 적용 시 explicit로 승격되므로 두 번째 클릭부터 편집).
+                    if is_selected && selection_is_explicit {
                         drag_state.editing = Some((node.id, node.title.clone()));
                         drag_state.focus_editing = true;
                     } else {
@@ -463,12 +521,18 @@ fn render_nodes(
                     &mut node.children,
                     drag_state,
                     current_selected,
-                    active_bookmark,
+                    selection_is_explicit,
                     scroll_to_active_once,
                     outcome,
                 );
             });
         }
+
+        // 기본 item_spacing(약 4pt)만으로는 두 줄 이상으로 줄바꿈되는 제목이 많을 때
+        // 항목 경계가 잘 안 보인다는 피드백(2026-07-16) — 항목마다 약간의 여백을 더해
+        // 시각적으로 구분되게 한다. 너무 벌리면 한 화면에 보이는 항목 수가 줄어 오히려
+        // 활용성이 떨어지므로 적당히(3pt 추가, 기본과 합쳐 총 ~7pt)만 늘린다.
+        ui.add_space(3.0);
     }
 
     if let Some(id) = delete_id {

@@ -11,6 +11,8 @@
 mod app;
 mod autosave;
 mod fonts;
+#[cfg(target_os = "macos")]
+mod macos_open_file;
 mod toolbar;
 mod viewer_panel;
 mod sidebar;
@@ -20,7 +22,9 @@ use app::PdfViewerApp;
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
-    // Finder "연결 프로그램" 더블클릭이나 CLI에서 파일 경로를 인자로 넘기면 시작 시 바로 연다.
+    // CLI에서 파일 경로를 인자로 넘기면 시작 시 바로 연다(Windows "연결 프로그램"은
+    // 이 방식으로 파일 경로를 argv에 넘겨준다 — macOS는 argv가 아니라 Apple Event로
+    // 알려주므로 macos_open_file.rs가 별도로 처리한다).
     let initial_file = std::env::args().nth(1).map(std::path::PathBuf::from);
 
     // ViewportBuilder에 아이콘을 안 주면 eframe이 자기 기본 아이콘(egui 로고, "e" 모양)을

@@ -115,6 +115,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                             (format!("{m}+F"), "내용 검색"),
                             (format!("{m}+["), "이전 화면"),
                             (format!("{m}+]"), "다음 화면"),
+                            ("Tab".to_string(), "북마크↔뷰어"),
                         ] {
                             ui.label(key);
                             ui.label(desc);

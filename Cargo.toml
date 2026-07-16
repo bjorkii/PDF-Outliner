@@ -22,9 +22,14 @@ anyhow = "1"
 thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
 
-# 한글 IME 자소 유출 버그 수정용 winit 포크 (pdf_viewer_spec.md §7 "한글 IME" 참고).
-# upstream 0.30.13 + macOS set_ime_allowed(false)에서 OS input context의 조합 상태까지
-# discardMarkedText()로 정리하는 1커밋 패치. upstream winit#3095가 고쳐지면 제거 가능.
+# winit 포크(upstream 0.30.13 기반) — 패치 2건을 담고 있음:
+# (1) 한글 IME 자소 유출 수정: set_ime_allowed(false)에서 OS input context 조합 상태까지
+#     discardMarkedText()로 정리 + CGEvent 웜업 (pdf_viewer_spec.md §7 "한글 IME" 참고).
+# (2) macOS 파일 연결: Finder 더블클릭/"다음으로 열기"의 open-document Apple Event를
+#     받는 application:openURLs: 델리게이트 + take_opened_files() API — 콜드 스타트
+#     이벤트는 finishLaunching 도중 배달돼 winit 델리게이트만 받을 수 있음
+#     (pdf_viewer_spec.md §5 macOS 참고). upstream winit#3095만 고쳐져도 제거 불가 —
+#     (2)가 upstream에 없는 한 이 포크는 유지해야 함.
 [patch.crates-io]
 winit = { git = "https://github.com/bjorkii/winit", branch = "korean-ime-discard-marked-text-0.30.13" }
 
