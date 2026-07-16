@@ -253,6 +253,7 @@ fn render_nodes(
 
             if is_editing {
                 let (_, buffer) = drag_state.editing.as_mut().unwrap();
+                let buffer_len_chars = buffer.chars().count();
                 let edit_id = Id::new(("bm_edit", node.id));
                 let edit_response = ui.add(
                     egui::TextEdit::singleline(buffer)
@@ -265,6 +266,18 @@ fn render_nodes(
                     // 밖에 있을 수 있으니 편집 필드가 보이는 위치까지 스크롤한다 — 사이드바가
                     // 꽉 찬 상태에서 Cmd+B로 추가하면 새 항목이 안 보이던 문제.
                     edit_response.scroll_to_me(Some(egui::Align::Center));
+                    // 텍스트 전체를 선택 상태로 둬서, 새로 만든 placeholder("새 북마크")나
+                    // F2/재클릭으로 연 기존 제목을 바로 타이핑해서 덮어쓸 수 있게 한다 —
+                    // request_focus만으로는 커서만 옮겨갈 뿐 선택은 안 돼서 매번 수동으로
+                    // 전체 선택(Cmd+A)해야 했다.
+                    if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), edit_id) {
+                        let range = egui::text::CCursorRange::two(
+                            egui::text::CCursor::new(0),
+                            egui::text::CCursor::new(buffer_len_chars),
+                        );
+                        state.cursor.set_char_range(Some(range));
+                        egui::TextEdit::store_state(ui.ctx(), edit_id, state);
+                    }
                     drag_state.focus_editing = false;
                 }
 
