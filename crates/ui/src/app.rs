@@ -3,7 +3,7 @@ use egui::Key;
 use pdf_engine::PdfEngine;
 use pdfium_render::prelude::*;
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// 뷰포트(스크롤+줌) 상태. 확대 시 drag 탐색을 위해 오프셋을 별도로 관리한다.
@@ -139,6 +139,10 @@ pub struct PdfViewerApp {
     /// 페이지 번호이므로).
     pub last_opened_page: Option<u32>,
 
+    /// 최근에 연 파일 경로 — 최신순, 중복 없이 최대 10개(eframe Storage에서 복원).
+    /// 툴바 "파일 열기" 버튼에 마우스를 올리면 드롭다운으로 보여준다(`toolbar.rs`).
+    pub recent_files: Vec<PathBuf>,
+
     /// 마지막으로 창에 실제로 적용한 제목. 매 프레임 같은 값을 다시 보내지 않기 위한 캐시.
     last_window_title: Option<String>,
 
@@ -153,11 +157,30 @@ pub struct PdfViewerApp {
     /// 요청 범위가 "앱 재실행 시"로 한정됨(2026-07-14).
     pub scroll_sidebar_to_active_once: bool,
 
+    /// 열린 파일이 같은 폴더 안에서 이름이 바뀌면(Finder에서 rename 등) `current_file`이
+    /// 자동으로 그 새 이름을 따라가게 하기 위한 감시 상태 — macOS 전용(inode 개념이 있는
+    /// 유닉스 계열에서만 신뢰할 수 있음). 다른 폴더로 옮겨진 경우나, 같은 폴더 안이라도
+    /// 이 감시가 놓친 경우는 저장 시점에 `save_as_requested`로 이어진다(§7 "열린 파일
+    /// 외부 변경 추적" 참고).
+    #[cfg(target_os = "macos")]
+    file_watcher: Option<notify::RecommendedWatcher>,
+    #[cfg(target_os = "macos")]
+    file_watch_rx: Option<std::sync::mpsc::Receiver<notify::Result<notify::Event>>>,
+    #[cfg(target_os = "macos")]
+    watched_file_inode: Option<u64>,
+
+    /// `save_bookmarks_to_pdf`가 원본 파일을 못 찾았을 때 세우는 플래그 — `toolbar.rs`가
+    /// 이 값을 보고 저장 대화상자를 띄운 뒤 `save_bookmarks_as`를 호출한다("다른 이름으로
+    /// 저장" 플로우, §7 "열린 파일 외부 변경 추적" 참고).
+    pub save_as_requested: bool,
+
     pub status_message: Option<String>,
 }
 
 const LAST_OPENED_FILE_KEY: &str = "last_opened_file";
 const LAST_OPENED_PAGE_KEY: &str = "last_opened_page";
+const RECENT_FILES_KEY: &str = "recent_files";
+const RECENT_FILES_MAX: usize = 10;
 
 impl PdfViewerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -176,6 +199,12 @@ impl PdfViewerApp {
             .storage
             .and_then(|s| s.get_string(LAST_OPENED_PAGE_KEY))
             .and_then(|s| s.parse::<u32>().ok());
+        let recent_files = cc
+            .storage
+            .and_then(|s| s.get_string(RECENT_FILES_KEY))
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .map(|paths| paths.into_iter().map(PathBuf::from).collect())
+            .unwrap_or_default();
 
         // 이번 세션이 자동저장 파일을 건드리기 전에 먼저 확인해야 이전 세션의 흔적을
         // 덮어쓰지 않는다.
@@ -217,7 +246,15 @@ impl PdfViewerApp {
             quit_confirmation_pending: false,
             last_opened_file,
             last_opened_page,
+            recent_files,
             scroll_sidebar_to_active_once: false,
+            #[cfg(target_os = "macos")]
+            file_watcher: None,
+            #[cfg(target_os = "macos")]
+            file_watch_rx: None,
+            #[cfg(target_os = "macos")]
+            watched_file_inode: None,
+            save_as_requested: false,
             last_window_title: None,
             prev_focused_widget: None,
             status_message,
@@ -231,6 +268,127 @@ impl PdfViewerApp {
             self.pending_open_path = Some(path);
         } else {
             self.open_file_now(path);
+        }
+    }
+
+    /// 툴바 "파일 열기" 호버 드롭다운(`toolbar.rs`)에서 최근 파일을 선택했을 때 쓴다.
+    /// 그 사이 파일이 삭제/이동됐을 수 있으니 열기 전에 존재를 확인하고, 없으면 안내
+    /// 메시지를 띄운 뒤 목록에서 빼버린다(있으면 평소처럼 열고, `open_file_now`가
+    /// `remember_recent_file`로 맨 앞에 다시 끌어올린다).
+    pub fn open_recent_file(&mut self, path: PathBuf) {
+        if !path.exists() {
+            let name = display_filename(&path);
+            self.status_message = Some(format!("파일을 찾을 수 없습니다: {name}"));
+            self.recent_files.retain(|p| p != &path);
+            return;
+        }
+        self.request_open_file(path);
+    }
+
+    /// `recent_files`에 최신순으로 기록한다 — 이미 있던 항목이면 앞으로 끌어올리고
+    /// (중복 없음), 10개를 넘으면 뒤에서부터 잘라낸다. 툴바 "파일 열기" 버튼 호버
+    /// 드롭다운(`toolbar.rs`)이 이 목록을 보여준다.
+    fn remember_recent_file(&mut self, path: &Path) {
+        self.recent_files.retain(|p| p != path);
+        self.recent_files.insert(0, path.to_path_buf());
+        self.recent_files.truncate(RECENT_FILES_MAX);
+    }
+
+    /// 지금 연 파일의 inode를 기억해두고 그 부모 폴더를 감시 시작한다 — Finder에서
+    /// 이 파일 이름이 바뀌면(같은 폴더 안에서) `poll_file_rename`이 이 inode로 새 이름을
+    /// 찾아 `current_file`을 조용히 갱신한다. 파일을 새로 열 때마다 이전 감시는 watcher를
+    /// 새 값으로 덮으면서 자동으로 정리된다(Drop).
+    #[cfg(target_os = "macos")]
+    fn start_watching_current_file(&mut self) {
+        use std::os::unix::fs::MetadataExt;
+
+        self.file_watcher = None;
+        self.file_watch_rx = None;
+        self.watched_file_inode = None;
+
+        let Some(path) = self.current_file.clone() else {
+            return;
+        };
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return;
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let Ok(mut watcher) = notify::recommended_watcher(move |res| {
+            let _ = tx.send(res);
+        }) else {
+            return;
+        };
+        if notify::Watcher::watch(&mut watcher, parent, notify::RecursiveMode::NonRecursive).is_ok() {
+            self.watched_file_inode = Some(meta.ino());
+            self.file_watcher = Some(watcher);
+            self.file_watch_rx = Some(rx);
+        }
+    }
+
+    /// 매 프레임 호출 — 감시 중인 폴더에서 변화가 있었는데 현재 파일이 그 이름으로는
+    /// 더 이상 없으면(이름이 바뀐 것으로 추정), 기억해둔 inode로 같은 폴더 안을 뒤져
+    /// 새 이름을 찾는다. 찾으면 `current_file`/`recent_files`를 조용히 갱신 — 사용자
+    /// 입장에서는 저장이 계속 정상 동작하는 것처럼 보인다(요청사항: seamless하게 대처).
+    #[cfg(target_os = "macos")]
+    fn poll_file_rename(&mut self, ctx: &egui::Context) {
+        use std::os::unix::fs::MetadataExt;
+
+        let Some(rx) = &self.file_watch_rx else {
+            return;
+        };
+        // egui는 기본적으로 입력 이벤트가 있을 때만 다시 그리는 즉시모드라(§7 "문서 전체
+        // 텍스트 검색"의 poll_search_job과 같은 사정), 사용자가 Finder에서 파일 이름만
+        // 바꾸고 이 앱 창은 그대로 idle 상태로 둔 채 마우스도 안 움직이면 update() 자체가
+        // 한동안 안 불려서 이 폴링도 멈춰버린다 — "seamless하게 따라간다"는 목표와
+        // 어긋나므로, 감시 중인 동안은 주기적으로 강제 리페인트를 요청해 폴링이 계속
+        // 돌아가게 한다(실측: 이 요청 없이는 창이 idle일 때 파일명 변경 감지가 사용자가
+        // 창을 클릭/스크롤하기 전까지 멈춰 있었음, 2026-07-16).
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+
+        // 이번 프레임에 온 이벤트를 전부 비우기만 하면 됨 — 정확히 어떤 이벤트인지보다
+        // "뭔가 바뀌었다"는 신호로만 쓰고, 실제 판단은 아래 파일 존재 여부로 한다.
+        let mut changed = false;
+        while rx.try_recv().is_ok() {
+            changed = true;
+        }
+        if !changed {
+            return;
+        }
+
+        let Some(old_path) = self.current_file.clone() else {
+            return;
+        };
+        if old_path.exists() {
+            // 이름은 그대로고 폴더 안의 다른 무언가가 바뀐 것 — 우리와 무관.
+            return;
+        }
+        let Some(inode) = self.watched_file_inode else {
+            return;
+        };
+        let Some(parent) = old_path.parent() else {
+            return;
+        };
+
+        let Ok(entries) = std::fs::read_dir(parent) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.ino() != inode {
+                continue;
+            }
+            let new_path = entry.path();
+            let new_name = display_filename(&new_path);
+            self.status_message = Some(format!("파일 이름이 바뀌어 자동으로 따라갔습니다: {new_name}"));
+            if let Some(pos) = self.recent_files.iter().position(|p| p == &old_path) {
+                self.recent_files[pos] = new_path.clone();
+            }
+            self.current_file = Some(new_path);
+            break;
         }
     }
 
@@ -251,7 +409,10 @@ impl PdfViewerApp {
                 self.page_back_history.clear();
                 self.page_forward_history.clear();
                 self.document = Some(document);
+                self.remember_recent_file(&path);
                 self.current_file = Some(path);
+                #[cfg(target_os = "macos")]
+                self.start_watching_current_file();
                 self.page_texture = None;
                 self.rendered_for = None;
                 self.selection = None;
@@ -349,6 +510,20 @@ impl PdfViewerApp {
             return false;
         };
 
+        if !path.exists() {
+            // 이름이 바뀌었거나(같은 폴더 안이면 poll_file_rename이 보통 따라잡지만
+            // 놓쳤을 수 있음) 다른 폴더로 이동/삭제된 것으로 보임 — lopdf 기반 쓰기는
+            // 이 경로의 실제 파일을 다시 읽어야 하는데 원본이 없으니 더 진행할 수 없다.
+            // "다른 이름으로 저장" 플로우로 유도한다(save_as_requested를 세우면
+            // toolbar.rs가 저장 대화상자를 띄우고 `save_bookmarks_as`를 부른다).
+            self.status_message = Some(
+                "원본 파일을 찾을 수 없습니다(이름이 바뀌었거나 이동/삭제됨) — 다른 이름으로 저장해주세요."
+                    .to_string(),
+            );
+            self.save_as_requested = true;
+            return false;
+        }
+
         let temp_path = path.with_extension("bookmarks_tmp.pdf");
 
         if let Err(err) =
@@ -395,13 +570,35 @@ impl PdfViewerApp {
         }
     }
 
+    /// "다른 이름으로 저장" — `save_bookmarks_to_pdf`가 원본을 못 찾아 `save_as_requested`를
+    /// 세우면 `toolbar.rs`가 저장 대화상자로 받은 새 경로를 여기로 넘긴다. lopdf 기반
+    /// outline 쓰기는 디스크의 실제 파일을 다시 읽어야 하는데 원본이 사라졌으니, pdfium이
+    /// 메모리에 이미 들고 있는 문서(원본 경로가 사라져도 이 세션 안에서는 여전히 유효 —
+    /// 열 때 내용을 다 읽어들인 뒤라 디스크 경로와 독립적, `Document::save_to_file` 참고)를
+    /// 이 새 위치에 먼저 내보낸 뒤, 그 새 파일을 대상으로 평소처럼 북마크를 쓴다.
+    pub fn save_bookmarks_as(&mut self, new_path: PathBuf) -> bool {
+        let Some(document) = self.document.as_ref() else {
+            self.status_message = Some("저장할 문서가 열려있지 않습니다.".to_string());
+            return false;
+        };
+        if let Err(err) = document.save_to_file(&new_path) {
+            self.status_message = Some(format!("파일 내보내기 실패: {err}"));
+            return false;
+        }
+
+        self.current_file = Some(new_path.clone());
+        self.remember_recent_file(&new_path);
+        #[cfg(target_os = "macos")]
+        self.start_watching_current_file();
+        self.save_bookmarks_to_pdf()
+    }
+
     /// 북마크 트리를 flat row로 펴서 파일명 컬럼에 채울 이름을 정한다.
     /// 열려있는 PDF가 있으면 그 파일명을, 없으면 빈 문자열을 쓴다.
     fn current_filename_for_export(&self) -> String {
         self.current_file
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().to_string())
+            .as_deref()
+            .map(display_filename)
             .unwrap_or_default()
     }
 
@@ -828,6 +1025,14 @@ impl PdfViewerApp {
             self.request_focus_search = true;
         }
 
+        // Cmd+S(맥)/Ctrl+S(윈도우) — PDF에 북마크 저장. "저장" 버튼과 동일한 동작이며,
+        // 다른 텍스트 필드에 포커스가 있어도(Cmd+C/Cmd+F와 같은 이유로) 항상 동작해야
+        // 하므로 게이트 밖에 둔다. 저장할 변경사항이 없으면(bookmarks_dirty == false)
+        // 아무 일도 안 한다 — 툴바 "저장" 버튼의 활성/비활성 조건과 동일하게.
+        if self.bookmarks_dirty && ctx.input(|i| i.modifiers.command && i.key_pressed(Key::S)) {
+            self.save_bookmarks_to_pdf();
+        }
+
         // "일치하는 결과가 없습니다" 알림이 떠 있는 동안의 Enter는 그 알림을 닫는 데 쓴다
         // — 검색창이 여전히 포커스를 쥐고 있어 wants_keyboard_input()이 true인 상태라도
         // 반드시 동작해야 하므로 게이트 밖에서 확인한다.
@@ -899,10 +1104,7 @@ impl PdfViewerApp {
     fn update_window_title(&mut self, ctx: &egui::Context) {
         let title = match &self.current_file {
             Some(path) => {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.to_string_lossy().to_string());
+                let name = display_filename(path);
                 format!("PDF Outliner - {name}")
             }
             None => "PDF Outliner".to_string(),
@@ -913,6 +1115,22 @@ impl PdfViewerApp {
             self.last_window_title = Some(title);
         }
     }
+}
+
+/// 사람이 읽는 문자열로 화면에 표시하기 전에 NFC(조합형)로 정규화한다. macOS(APFS/HFS+)는
+/// 한글 등 분해 가능한 유니코드를 파일/폴더명에 NFD(분해형)로 저장하는데, 그대로 그리면
+/// 자소가 낱개로 갈라져 보인다(예: 최근 파일 목록의 긴 한글 파일명에서 재현됨, 사용자
+/// 리포트 2026-07-16) — 대부분의 폰트/텍스트 셰이핑이 조합형을 전제로 하기 때문. 실제
+/// 파일 경로(`PathBuf`) 자체는 OS가 준 그대로 유지해야 하므로(파일 I/O·비교에 영향 없게)
+/// 이 함수는 표시 직전에 뽑아낸 `String`에만 적용한다. Windows(NTFS)는 이미 대개 NFC라
+/// 사실상 no-op — 플랫폼 분기 없이 항상 적용해도 안전하다.
+pub(crate) fn display_filename(path: &std::path::Path) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let raw = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+    raw.nfc().collect()
 }
 
 /// 요청된 렌더 폭을, 결과 텍스처의 가로·세로가 모두 GPU 한도(`max_texture_side`) 안에
@@ -1011,11 +1229,7 @@ fn show_crash_recovery_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
         return;
     };
 
-    let file_name = session
-        .file_path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| session.file_path.to_string_lossy().to_string());
+    let file_name = display_filename(&session.file_path);
     let saved_at = session
         .saved_at
         .with_timezone(&chrono::Local)
@@ -1105,6 +1319,8 @@ impl eframe::App for PdfViewerApp {
         self.handle_dropped_files(ctx);
         self.handle_close_request(ctx);
         self.poll_search_job(ctx);
+        #[cfg(target_os = "macos")]
+        self.poll_file_rename(ctx);
 
         crate::toolbar::show(ctx, self);
         crate::sidebar::show(ctx, self);
@@ -1135,6 +1351,14 @@ impl eframe::App for PdfViewerApp {
         if let Some(path) = &self.current_file {
             storage.set_string(LAST_OPENED_FILE_KEY, path.to_string_lossy().to_string());
             storage.set_string(LAST_OPENED_PAGE_KEY, self.current_page.to_string());
+        }
+        let recent_as_strings: Vec<String> = self
+            .recent_files
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        if let Ok(json) = serde_json::to_string(&recent_as_strings) {
+            storage.set_string(RECENT_FILES_KEY, json);
         }
         crate::autosave::record(self.current_file.as_deref(), &self.bookmarks, self.bookmarks_dirty);
     }
