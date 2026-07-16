@@ -100,6 +100,92 @@ fn insert_into(nodes: &mut [BookmarkNode], parent_id: Uuid, node: BookmarkNode) 
     Some(node)
 }
 
+/// `insert_node`(항상 형제 목록 맨 끝)를 대체하는, 페이지 번호 순서를 지키는 삽입.
+/// 사이드바 "+"/Cmd+B(`crates/ui/src/app.rs`의 `add_bookmark_under_selection`)가 쓴다.
+///
+/// - `parent_id`가 `Some(pid)`: pid 노드의 자식 목록 안에서 `node.page` 기준 정렬 위치에
+///   삽입(같은 페이지의 기존 항목이 있으면 그 뒤). pid를 못 찾으면 최상위에서 같은 규칙으로
+///   삽입한다(기존 `insert_node`와 동일한 폴백 관례).
+/// - `parent_id`가 `None`: 특정 부모를 지정하지 않은 경우다. 트리 전체를 depth-first로 훑어
+///   "페이지가 `node.page` 이하인 마지막 노드"(anchor)를 찾고, **anchor의 자식이 아니라
+///   anchor와 같은 레벨(형제)**로, anchor 바로 뒤에 끼워 넣는다 — "선택된 북마크가 없으면
+///   페이지 순서상 직전 북마크와 같은 레벨로 생성" 요구사항이 이 한 번의 탐색으로 충족된다.
+///   anchor가 없으면(모든 기존 북마크보다 페이지가 앞섬) 최상위 목록에서 페이지 순서 위치에
+///   삽입한다.
+pub fn insert_node_by_page(nodes: &mut Vec<BookmarkNode>, parent_id: Option<Uuid>, node: BookmarkNode) {
+    match parent_id {
+        Some(pid) => {
+            if let Some(unplaced) = insert_into_children_ordered(nodes, pid, node) {
+                insert_ordered(nodes, unplaced);
+            }
+        }
+        None => {
+            let mut paths = Vec::new();
+            let mut prefix = Vec::new();
+            collect_paths(nodes, &mut prefix, &mut paths);
+            let anchor_path = paths
+                .into_iter()
+                .rev()
+                .find(|(_, page)| *page <= node.page)
+                .map(|(path, _)| path);
+
+            match anchor_path {
+                Some(path) => {
+                    let idx = *path.last().expect("collect_paths never returns an empty path");
+                    let siblings = children_at_path_mut(nodes, &path[..path.len() - 1]);
+                    siblings.insert(idx + 1, node);
+                }
+                None => insert_ordered(nodes, node),
+            }
+        }
+    }
+}
+
+/// 같은 형제 목록 안에서 페이지 순서 위치에 삽입 — 같은 페이지가 이미 있으면 그 뒤(그
+/// 페이지 그룹 안에서는 나중에 추가한 게 끝에 붙는 관례. 페이지 내 세부 위치 개념 자체가
+/// 없으므로 — pdfium outline에도 그런 좌표가 없다 — 이 순서가 곧 CSV/Excel export 순서와
+/// 사용자가 드래그로 수동 재배열한 결과의 유일한 근거가 된다).
+fn insert_ordered(siblings: &mut Vec<BookmarkNode>, node: BookmarkNode) {
+    let pos = siblings
+        .iter()
+        .position(|s| s.page > node.page)
+        .unwrap_or(siblings.len());
+    siblings.insert(pos, node);
+}
+
+/// pid 노드를 찾으면 그 자식 목록에 페이지 순서로 삽입하고 None, 못 찾으면 소유권을
+/// 돌려준다(Some(node)) — `insert_into`와 동일한 재귀/폴백 패턴, 정렬 삽입만 다르다.
+fn insert_into_children_ordered(
+    nodes: &mut [BookmarkNode],
+    pid: Uuid,
+    node: BookmarkNode,
+) -> Option<BookmarkNode> {
+    let mut node = node;
+    for n in nodes.iter_mut() {
+        if n.id == pid {
+            insert_ordered(&mut n.children, node);
+            return None;
+        }
+        match insert_into_children_ordered(&mut n.children, pid, node) {
+            None => return None,
+            Some(returned) => node = returned,
+        }
+    }
+    Some(node)
+}
+
+/// (path, page) 목록을 depth-first 순서로 수집한다 — path의 각 원소는 그 깊이에서의
+/// 형제 목록 내 인덱스(마지막 원소가 자기 자신의 인덱스). `children_at_path_mut`(build_tree가
+/// 쓰는 것과 동일)로 `path[..len-1]`을 넘기면 그 노드의 부모 형제 목록을 다시 얻을 수 있다.
+fn collect_paths(nodes: &[BookmarkNode], prefix: &mut Vec<usize>, out: &mut Vec<(Vec<usize>, u32)>) {
+    for (i, n) in nodes.iter().enumerate() {
+        prefix.push(i);
+        out.push((prefix.clone(), n.page));
+        collect_paths(&n.children, prefix, out);
+        prefix.pop();
+    }
+}
+
 /// moving_id 노드를(하위 트리 포함 통째로) 찾아 제거하고 반환한다.
 pub fn remove_node(nodes: &mut Vec<BookmarkNode>, id: Uuid) -> Option<BookmarkNode> {
     if let Some(pos) = nodes.iter().position(|n| n.id == id) {
@@ -395,5 +481,88 @@ mod tests {
         let tree = build_tree(&[row("a.pdf", 0, "유일한 루트", 1)]);
         let id = tree[0].id;
         assert_eq!(sibling_or_parent_after_removal(&tree, id), None);
+    }
+
+    /// 사용자가 준 예시 그대로: A(34쪽)/B(37쪽)가 최상위에 있을 때 선택 없이(parent_id=None)
+    /// 35쪽 북마크를 추가하면 A와 B 사이, 최상위(형제) 레벨에 들어가야 한다.
+    #[test]
+    fn insert_by_page_no_selection_lands_between_siblings_at_same_level() {
+        let mut tree = vec![
+            BookmarkNode::new("A", 34),
+            BookmarkNode::new("B", 37),
+        ];
+        insert_node_by_page(&mut tree, None, BookmarkNode::new("새 북마크", 35));
+
+        assert_eq!(tree.len(), 3);
+        assert_eq!(tree[0].title, "A");
+        assert_eq!(tree[1].title, "새 북마크");
+        assert_eq!(tree[2].title, "B");
+    }
+
+    /// anchor가 중첩된 자식일 때도, anchor의 자식이 아니라 anchor와 같은 레벨(형제)에 들어가야
+    /// 한다 — "선택 없으면 직전 북마크와 같은 레벨" 요구사항.
+    #[test]
+    fn insert_by_page_no_selection_matches_anchor_level_not_its_children() {
+        let mut tree = vec![BookmarkNode::new("1장", 1)];
+        let chapter_id = tree[0].id;
+        insert_node_by_page(&mut tree, Some(chapter_id), BookmarkNode::new("1.1절", 2));
+
+        // 지금 트리: 1장(1쪽) -> 1.1절(2쪽). 선택 없이 3쪽을 추가하면 anchor는 1.1절(가장 최근
+        // 페이지가 3 이하인 노드)이고, 1.1절의 자식이 아니라 1.1절과 같은 레벨 —
+        // 즉 1장의 children 목록에 형제로 들어가야 한다.
+        insert_node_by_page(&mut tree, None, BookmarkNode::new("1.2절", 3));
+
+        assert_eq!(tree.len(), 1, "최상위에 새로 생기면 안 됨 — 1.1절과 같은 레벨(1장의 자식)이어야 함");
+        assert_eq!(tree[0].children.len(), 2);
+        assert_eq!(tree[0].children[0].title, "1.1절");
+        assert_eq!(tree[0].children[1].title, "1.2절");
+    }
+
+    /// anchor가 없을 때(모든 기존 북마크보다 페이지가 앞섬) 최상위 맨 앞에 들어간다.
+    #[test]
+    fn insert_by_page_no_selection_no_anchor_goes_to_front() {
+        let mut tree = vec![BookmarkNode::new("B", 37)];
+        insert_node_by_page(&mut tree, None, BookmarkNode::new("A", 10));
+
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].title, "A");
+        assert_eq!(tree[1].title, "B");
+    }
+
+    /// 선택된 노드가 있으면 그 자식으로 들어가되(기존 관례 유지), 그 자식들 사이에서도
+    /// 페이지 순서를 지킨다.
+    #[test]
+    fn insert_by_page_with_selection_orders_within_that_parents_children() {
+        let mut tree = vec![BookmarkNode::new("장", 1)];
+        let parent_id = tree[0].id;
+        insert_node_by_page(&mut tree, Some(parent_id), BookmarkNode::new("절2", 5));
+        insert_node_by_page(&mut tree, Some(parent_id), BookmarkNode::new("절1", 3));
+
+        assert_eq!(tree[0].children.len(), 2);
+        assert_eq!(tree[0].children[0].title, "절1");
+        assert_eq!(tree[0].children[1].title, "절2");
+    }
+
+    /// 같은 페이지에 이미 북마크가 있으면, 새로 추가되는 게 그 뒤에 붙는다(페이지 내 세부
+    /// 위치 개념이 없으므로 이게 유일한 순서 근거 — model.rs 주석 참고).
+    #[test]
+    fn insert_by_page_same_page_appends_after_existing() {
+        let mut tree = vec![BookmarkNode::new("먼저", 5)];
+        insert_node_by_page(&mut tree, None, BookmarkNode::new("나중", 5));
+
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].title, "먼저");
+        assert_eq!(tree[1].title, "나중");
+    }
+
+    /// parent_id를 지정했는데 트리에서 못 찾으면(예: 그 사이 삭제됨) 조용히 사라지지 않고
+    /// 최상위에서 페이지 순서로 폴백 — 기존 insert_node의 폴백 관례와 동일.
+    #[test]
+    fn insert_by_page_missing_parent_falls_back_to_top_level_ordered() {
+        let mut tree = vec![BookmarkNode::new("A", 10), BookmarkNode::new("C", 30)];
+        insert_node_by_page(&mut tree, Some(Uuid::new_v4()), BookmarkNode::new("B", 20));
+
+        assert_eq!(tree.len(), 3);
+        assert_eq!(tree[1].title, "B");
     }
 }

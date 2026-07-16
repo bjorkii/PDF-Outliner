@@ -92,6 +92,11 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
 
             egui::ScrollArea::vertical().show(ui, |ui| {
                 render_nodes(ui, &mut app.bookmarks, &mut drag_state, current_selected, &mut outcome);
+                // 트리가 패널을 꽉 채우면 새로 추가된 항목(항상 형제 중 맨 끝 근처에 생김)이
+                // 스크롤 영역 맨 아래 경계에 딱 붙어 다음 "+"/Cmd+B를 누르기 전까지 시야에서
+                // 잘려 보이는 느낌을 준다 — 여유 공간을 좀 둬서 항상 마지막 항목 아래가
+                // 눈에 들어오게 한다.
+                ui.add_space(48.0);
             });
 
             // 마우스를 뗀 시점에 실제 드래그 재구성 적용
@@ -256,6 +261,10 @@ fn render_nodes(
                 );
                 if drag_state.focus_editing {
                     ui.memory_mut(|m| m.request_focus(edit_id));
+                    // 새로 추가한 항목(또는 F2/재클릭으로 편집 시작한 항목)이 스크롤 영역
+                    // 밖에 있을 수 있으니 편집 필드가 보이는 위치까지 스크롤한다 — 사이드바가
+                    // 꽉 찬 상태에서 Cmd+B로 추가하면 새 항목이 안 보이던 문제.
+                    edit_response.scroll_to_me(Some(egui::Align::Center));
                     drag_state.focus_editing = false;
                 }
 

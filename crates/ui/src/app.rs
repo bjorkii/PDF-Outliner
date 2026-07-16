@@ -463,13 +463,15 @@ impl PdfViewerApp {
         }
     }
 
-    /// "+"버튼: 현재 선택된 북마크가 있으면 그 자식으로, 없으면 최상위에 새 항목을 추가하고
+    /// "+"버튼: 현재 선택된 북마크가 있으면 그 자식으로(단, 그 자식들 사이에서 페이지 순서에
+    /// 맞는 위치에), 없으면 페이지 순서상 직전 북마크와 같은 레벨(형제)에 새 항목을 추가하고
     /// 즉시 이름 편집 상태로 선택한다(사이드바 쪽에서 편집 모드 진입을 이어서 처리).
+    /// `insert_node_by_page`(무조건 끝에 붙이던 `insert_node`를 대체) 참고.
     pub fn add_bookmark_under_selection(&mut self) -> Uuid {
         self.push_bookmark_undo_snapshot();
         let new_node = BookmarkNode::new("새 북마크", self.current_page);
         let new_id = new_node.id;
-        bookmark::insert_node(&mut self.bookmarks, self.selected_bookmark, new_node);
+        bookmark::insert_node_by_page(&mut self.bookmarks, self.selected_bookmark, new_node);
         self.selected_bookmark = Some(new_id);
         self.bookmarks_dirty = true;
         new_id
