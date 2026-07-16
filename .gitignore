@@ -4,8 +4,12 @@
 .claude/settings.local.json
 
 # 테스트 결과물(소스 아님) 및 사용자가 수동 GUI 테스트로 계속 내용을 바꾸는 "살아있는" 파일.
-# 자동화 테스트(cargo test)가 필요로 하는 pdf-samples/의 나머지 PDF는 그대로 추적함 —
-# 전체를 지우면 fresh checkout에서 테스트가 깨짐(pdf_viewer_spec.md §0, §7 참고).
 pdf-samples/bookmarks.csv
 pdf-samples/bookmarks.xlsx
 pdf-samples/embeddedoutline.pdf
+
+# 2026-07-16부터: 실기 테스트 중 pdf-samples/에 새 샘플 PDF가 계속 untracked로 쌓이는 게
+# 번거로워 앞으로 새로 생기는 PDF는 아예 git이 추적하지 않기로 함(사용자 결정). 이미
+# 추적 중인 기존 PDF(자동화 테스트 cargo test가 필요로 함, pdf_viewer_spec.md §0/§7 참고)는
+# .gitignore가 소급 적용되지 않으니 그대로 유지됨 — 이 패턴은 새 파일에만 영향.
+*.pdf
