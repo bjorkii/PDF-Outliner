@@ -4,6 +4,10 @@ use egui::{Id, Sense};
 use std::collections::HashSet;
 use uuid::Uuid;
 
+/// 사이드바 강조색 — 선택된 북마크 하이라이트(배경, 글자는 흰색)와 사이드바 포커스
+/// 테두리에 공통 사용(2026-07-17 사용자 확정: #69178A, egui 기본 cyan 대신).
+const SIDEBAR_ACCENT: egui::Color32 = egui::Color32::from_rgb(0x69, 0x17, 0x8A);
+
 /// 드래그 중인 노드 id와, 현재 hover 중인 대상 위에서의 드롭 위치.
 #[derive(Default, Clone)]
 pub struct DragState {
@@ -17,6 +21,10 @@ pub struct DragState {
     pub collapsed: HashSet<Uuid>,
     /// 새로 만든 항목이라 이번 프레임에 편집 텍스트필드로 포커스를 옮겨야 하는지.
     pub focus_editing: bool,
+    /// 화살표 키 순회로 선택이 방금 바뀌었으니, 다음 프레임에 그 행이 스크롤 영역
+    /// 밖(위/아래)이면 부드럽게 중앙으로 스크롤해 달라는 1회성 요청(2026-07-17 요청).
+    /// 클릭 선택에는 세우지 않는다 — 클릭된 행은 정의상 이미 화면 안에 있다.
+    pub scroll_selected_into_view: bool,
 }
 
 /// 재귀 전체에 걸쳐 누적되는 결과. 재귀 호출마다 지역 변수를 새로 선언하면 하위 노드의
@@ -204,11 +212,13 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                                 let target = visible[pos + 1];
                                 outcome.selected = Some(target);
                                 outcome.jump_page = find_page(&app.bookmarks, target);
+                                drag_state.scroll_selected_into_view = true;
                             }
                             if i.key_pressed(egui::Key::ArrowUp) && pos > 0 {
                                 let target = visible[pos - 1];
                                 outcome.selected = Some(target);
                                 outcome.jump_page = find_page(&app.bookmarks, target);
+                                drag_state.scroll_selected_into_view = true;
                             }
                             // 좌/우 화살표는 선택된 항목 자체가 자식을 가지면 그 항목을,
                             // 아니면(리프 노드) 그 부모를 접고/편다 — "선택된 항목이 속한
@@ -231,6 +241,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                                     if target != selected {
                                         outcome.selected = Some(target);
                                         outcome.jump_page = find_page(&app.bookmarks, target);
+                                        drag_state.scroll_selected_into_view = true;
                                     }
                                 }
                                 if i.key_pressed(egui::Key::ArrowRight) {
@@ -272,7 +283,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
     // 폭만큼 안쪽으로 줄인다.
     if app.focus_area == crate::app::FocusArea::Sidebar {
         let panel_rect = panel_response.response.rect;
-        let stroke = egui::Stroke::new(2.0_f32, ctx.style().visuals.selection.bg_fill);
+        let stroke = egui::Stroke::new(2.0_f32, SIDEBAR_ACCENT);
         ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             Id::new("sidebar_focus_border"),
@@ -393,14 +404,26 @@ fn render_nodes(
                 // 드래그해서 재정렬" 동작과 충돌해서, 실제로는 텍스트 선택 박스가
                 // 늘어나는 것처럼 보이고 정작 재정렬용 hover_target은 갱신되지 않는
                 // 버그가 있었다. false로 꺼야 Sense::click_and_drag()가 온전히 우리 것.
-                // (하이라이트는 아래 is_selected 오버레이 하나로 통일 — 예전의 "현재 페이지
-                // 활성 북마크" 회색 배경 강조는 선택이 페이지와 자동 동기화되면서 중복이라
-                // 제거, 2026-07-17 사용자 확정. Frame의 inner_margin은 행 간격 유지용.)
+                // 선택 하이라이트는 SIDEBAR_ACCENT 배경 + 흰 글자(2026-07-17 사용자 확정)
+                // — 배경이 텍스트보다 먼저 칠해져야 흰 글자가 먹히므로 rect_filled 오버레이가
+                // 아니라 Frame fill로 그린다(§7에 기록된 함정과 동일한 이유).
+                let title_text = egui::RichText::new(node.title.clone());
+                let title_text = if is_selected {
+                    title_text.color(egui::Color32::WHITE)
+                } else {
+                    title_text
+                };
                 let label_response = egui::Frame::none()
+                    .fill(if is_selected {
+                        SIDEBAR_ACCENT
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    })
+                    .rounding(2.0)
                     .inner_margin(egui::Margin::symmetric(3.0, 1.0))
                     .show(ui, |ui| {
                         ui.add(
-                            egui::Label::new(node.title.clone())
+                            egui::Label::new(title_text)
                                 .wrap()
                                 .selectable(false)
                                 .sense(Sense::click_and_drag()),
@@ -416,12 +439,19 @@ fn render_nodes(
                     label_response.scroll_to_me(Some(egui::Align::Center));
                 }
 
-                if is_selected {
-                    ui.painter().rect_filled(
-                        label_response.rect.expand(2.0),
-                        2.0,
-                        ui.visuals().selection.bg_fill.gamma_multiply(0.5),
-                    );
+                // 화살표 키 순회로 선택이 방금 바뀐 경우(1회성 플래그): 새 선택 행이
+                // 스크롤 영역의 보이는 범위를 벗어났으면 수직 중앙으로 스크롤한다
+                // (2026-07-17 요청 — 예: 화면 맨 윗줄이 선택된 상태에서 ↑를 누르면 바로
+                // 위 항목이 중앙으로 스르르 내려옴). scroll_to_me는 egui 0.29의
+                // style.scroll_animation 기본값(거리 기반 0.1~0.3초)으로 이미 부드럽게
+                // 애니메이션된다. 화면 안에 멀쩡히 보이면 스크롤하지 않는다(시점 튐 방지).
+                if is_selected && drag_state.scroll_selected_into_view {
+                    drag_state.scroll_selected_into_view = false;
+                    let clip = ui.clip_rect();
+                    let rect = label_response.rect;
+                    if rect.top() < clip.top() || rect.bottom() > clip.bottom() {
+                        label_response.scroll_to_me(Some(egui::Align::Center));
+                    }
                 }
 
                 if label_response.clicked() {
