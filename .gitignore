@@ -3,13 +3,11 @@
 .DS_Store
 .claude/settings.local.json
 
-# 테스트 결과물(소스 아님) 및 사용자가 수동 GUI 테스트로 계속 내용을 바꾸는 "살아있는" 파일.
-pdf-samples/bookmarks.csv
-pdf-samples/bookmarks.xlsx
-pdf-samples/embeddedoutline.pdf
+# 2026-07-17: pdf-samples/는 git에서 완전 제거(git filter-repo로 과거 히스토리까지 퍼지) —
+# 장차 저장소를 public으로 전환할 때 공개되면 안 되는 자료라서(사용자 결정). 폴더 전체를
+# 로컬 전용으로 유지한다. 자동화 테스트(cargo test)가 이 폴더의 특정 파일을 필요로 하므로
+# (pdf_viewer_spec.md §0/§7 참고) 테스트는 이 파일들이 있는 로컬에서만 통과한다 — CI는
+# 테스트를 돌리지 않고 빌드만 하므로 릴리스에는 영향 없음.
+pdf-samples/
 
-# 2026-07-16부터: 실기 테스트 중 pdf-samples/에 새 샘플 PDF가 계속 untracked로 쌓이는 게
-# 번거로워 앞으로 새로 생기는 PDF는 아예 git이 추적하지 않기로 함(사용자 결정). 이미
-# 추적 중인 기존 PDF(자동화 테스트 cargo test가 필요로 함, pdf_viewer_spec.md §0/§7 참고)는
-# .gitignore가 소급 적용되지 않으니 그대로 유지됨 — 이 패턴은 새 파일에만 영향.
 *.pdf
