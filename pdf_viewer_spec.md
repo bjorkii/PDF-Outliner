@@ -39,7 +39,8 @@ pdfium dylib 탐색 순서(`crates/ui/src/app.rs`의 `create_engine()`, 2026-07-
 - `cargo run --example render_crop -p pdf_engine -- <pdfium_dylib> <pdf> <page_0based> <out.png> [char_index]` — 렌더링 결과를 PNG로 저장해 Read 툴로 육안 확인(화면 캡처 안 되는 세션에서 유일한 시각 확인 수단)
 - `cargo run --example smoke_test -p pdf_engine -- <pdfium_dylib> <pdf> [최대_페이지수]` — 임의 PDF 렌더링/텍스트선택 구조적 정상성 확인
 - 테스트용 실제 PDF 샘플: `pdf-samples/` 안에 여러 개. **일부는 사용자가 수동 GUI 테스트에 실사용 중이라 자동화 테스트가 함부로 건드리면 안 됨**(§7 "테스트 설계 원칙" 참고) — 자동화 테스트는 항상 pristine 백업을 임시 디렉터리에 복사해서 쓸 것.
-  - `pdf-samples/SQ-main.pdf`(2026-07-13 추가, git 미추적 — 의도적으로 커밋 안 함, §7 "테스트 설계 원칙" 참고): 358페이지, 링크 3641개, 실제 한글 텍스트를 담은 큰 실사용 문서 — 링크/검색 기능을 대량·현실적 데이터로 검증할 때 이 파일을 씀(§3의 링크·검색 절 전부 이 파일로 검증함).
+  - **⚠️ 이 폴더 전체가 git에서 완전 제거됨(2026-07-17)**: 장차 저장소를 public으로 전환할 때 공개되면 안 되는 자료라서(사용자 결정) `git filter-repo`로 **과거 히스토리까지 전부 퍼지**하고 `.gitignore`에 `pdf-samples/` 추가 — 이 로컬 머신에만 존재하는 로컬 전용 폴더다. `cargo test`가 이 폴더의 특정 파일(BZR001088_01.pdf, KKZ000160_01.pdf, "embeddedoutline 복사본.pdf" 등)을 필요로 하므로 **테스트는 이 머신에서만 통과**하고, 새 클론에서는 해당 테스트가 실패한다(CI는 테스트를 돌리지 않고 빌드만 하므로 릴리스 무관). 퍼지 직전 전체 히스토리 백업: `../PDF-Outliner-history-backup-pre-samples-purge.bundle`(리포 밖, 커밋 금지).
+  - `pdf-samples/SQ-main.pdf`(2026-07-13 추가): 358페이지, 링크 3641개, 실제 한글 텍스트를 담은 큰 실사용 문서 — 링크/검색 기능을 대량·현실적 데이터로 검증할 때 이 파일을 씀(§3의 링크·검색 절 전부 이 파일로 검증함).
 
 ---
 
