@@ -1,7 +1,6 @@
 # PDF Outliner
 
-Sumatra급 속도의 PDF 뷰어 + 북마크(목차) 편집기. PDF에 내장된 북마크를 열 때 자동으로
-불러오고, 추가·이름수정·삭제·드래그 재정렬한 뒤 **PDF 문서 자체에** 다시 저장합니다.
+PDF 북마크(목차) 편집, 저장, 내보내기/불러오기 기능을 갖춘 빠른 PDF 뷰어입니다.
 
 - **플랫폼**: Apple Silicon Mac, Intel Mac, Windows
 - **스택**: Rust · [egui](https://github.com/emilk/egui)/eframe (wgpu) · [pdfium-render](https://github.com/ajrcarey/pdfium-render) · [lopdf](https://github.com/J-F-Liu/lopdf)
