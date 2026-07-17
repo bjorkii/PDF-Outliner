@@ -12,6 +12,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 authors = ["PDF Viewer Project"]
+license = "MIT"
 
 # 워크스페이스 전역 공통 의존성 버전 고정 (크레이트 간 버전 불일치 방지)
 [workspace.dependencies]
