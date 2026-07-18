@@ -146,6 +146,14 @@ fn show_single_page(
         if response.clicked() {
             app.focus_area = crate::app::FocusArea::Viewer;
 
+            // 텍스트 선택이 있는 상태에서 뷰어를 클릭하면 선택 해제(2026-07-18 요청) —
+            // 일반 텍스트 편집기/뷰어의 관례. 드래그로 새 선택을 시작할 때는 clicked()가
+            // 아니라 drag_started() 경로라 여기 안 옴(거기서도 어차피 선택을 새로 잡음).
+            // 우클릭 복사 메뉴는 secondary 클릭이라 clicked()(primary 전용)에 안 걸림 —
+            // 선택을 유지한 채 메뉴를 띄울 수 있다.
+            app.selection = None;
+            app.selection_page = None;
+
             // 클릭한 위치가 문서 내 링크(주석)라면 그 대상으로 이동/열기한다 — 문서 내
             // 다른 페이지를 가리키면 뷰어에서 바로 이동, 외부 URI(웹 링크 등)면 시스템
             // 기본 브라우저로 연다.
@@ -373,6 +381,9 @@ fn show_continuous(
 
             if full_response.clicked() {
                 app.focus_area = crate::app::FocusArea::Viewer;
+                // 클릭 시 텍스트 선택 해제 — 쪽 단위 모드와 동일한 관례(2026-07-18 요청).
+                app.selection = None;
+                app.selection_page = None;
                 if let Some(pos) = full_response.interact_pointer_pos() {
                     if let Some((page_number, page_rect)) = page_at(pos, origin) {
                         match link_target_at_screen_pos(app, pos, page_rect, target_width, page_number) {
