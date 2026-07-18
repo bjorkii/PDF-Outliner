@@ -1087,6 +1087,17 @@ impl PdfViewerApp {
         }
     }
 
+    /// 쪽 단위 ↔ 연속 스크롤 보기 전환('C' 키와 툴바 모드 토글 버튼이 공유).
+    /// 연속 스크롤로 들어갈 때 지금 보던 페이지로 스크롤해야 한다 — 안 그러면 스크롤
+    /// 영역의 예전(또는 초기 0) 위치가 그대로 남아 있어서 엉뚱한 페이지로 "점프"한
+    /// 것처럼 보인다(2026-07-18 리포트).
+    pub(crate) fn toggle_continuous_scroll(&mut self) {
+        self.continuous_scroll = !self.continuous_scroll;
+        if self.continuous_scroll {
+            self.scroll_to_page_once = Some(self.current_page);
+        }
+    }
+
     /// 연속 스크롤 모드에서 화면에 보이는 페이지로 `current_page`만 조용히 따라가게 한다
     /// (viewer_panel.rs가 매 프레임 호출). `set_current_page`와 달리 페이지 이동
     /// 히스토리·텍스트 선택·팬 오프셋·`scroll_to_page_once`는 건드리지 않는다 — 스크롤
@@ -1186,13 +1197,7 @@ impl PdfViewerApp {
             // Ctrl+C는 플랫폼에 따라 raw 키가 같이 올 수도 있어 modifiers가 하나라도 있으면
             // 무시하도록 방어적으로 막는다.
             if ctx.input(|i| i.key_pressed(Key::C) && i.modifiers.is_none()) {
-                self.continuous_scroll = !self.continuous_scroll;
-                // 연속 스크롤로 들어갈 때 지금 보던 페이지로 스크롤해야 한다 — 안 그러면
-                // 스크롤 영역의 예전(또는 초기 0) 위치가 그대로 남아 있어서 엉뚱한
-                // 페이지로 "점프"한 것처럼 보인다(2026-07-18 리포트).
-                if self.continuous_scroll {
-                    self.scroll_to_page_once = Some(self.current_page);
-                }
+                self.toggle_continuous_scroll();
             }
         }
 

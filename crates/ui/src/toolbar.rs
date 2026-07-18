@@ -73,6 +73,37 @@ fn draw_fit_page_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Co
     painter.rect_stroke(page, 1.0, egui::Stroke::new(1.1_f32, color));
 }
 
+/// "쪽 단위 보기"(현재 모드 표시용) — 페이지 한 장. flat/simple 스타일.
+fn draw_single_page_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.3_f32, color);
+    let page = egui::Rect::from_center_size(
+        rect.center(),
+        egui::vec2(rect.width() * 0.62, rect.height() * 0.92),
+    );
+    painter.rect_stroke(page, 1.0, stroke);
+}
+
+/// "연속 스크롤 보기"(현재 모드 표시용) — 세로로 이어지는 페이지 두 장(위/아래는 화면
+/// 밖으로 이어지는 느낌으로 개방). flat/simple 스타일 — 사용자 확인 완료(2026-07-18).
+fn draw_continuous_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.3_f32, color);
+    let page_w = rect.width() * 0.62;
+    let left = rect.center().x - page_w / 2.0;
+    let right = rect.center().x + page_w / 2.0;
+    let gap = rect.height() * 0.12;
+    let mid = rect.center().y;
+    // 위 페이지: 상단 열림(위로 계속 이어짐을 암시) — 좌/우 변 + 아래 변만.
+    let top_bottom = mid - gap / 2.0;
+    painter.line_segment([egui::pos2(left, rect.top()), egui::pos2(left, top_bottom)], stroke);
+    painter.line_segment([egui::pos2(right, rect.top()), egui::pos2(right, top_bottom)], stroke);
+    painter.line_segment([egui::pos2(left, top_bottom), egui::pos2(right, top_bottom)], stroke);
+    // 아래 페이지: 하단 열림 — 좌/우 변 + 위 변만.
+    let bottom_top = mid + gap / 2.0;
+    painter.line_segment([egui::pos2(left, bottom_top), egui::pos2(left, rect.bottom())], stroke);
+    painter.line_segment([egui::pos2(right, bottom_top), egui::pos2(right, rect.bottom())], stroke);
+    painter.line_segment([egui::pos2(left, bottom_top), egui::pos2(right, bottom_top)], stroke);
+}
+
 pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
@@ -197,19 +228,37 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             if ui.button("➕").on_hover_text("확대").clicked() {
                 app.viewport.zoom_by(1.25);
             }
-            if icon_button(ui, draw_fit_width_icon)
+            // 폭 맞춤/쪽 맞춤 통합 토글(2026-07-18 요청) — 아이콘은 "누르면 무엇이 되는지"
+            // 를 보여준다: 100%(폭 맞춤) 상태면 쪽 맞춤 아이콘을, 그 외에는 폭 맞춤
+            // 아이콘을 표시. 상태 플래그 없이 현재 줌 값으로만 판정하므로 사용자가 수동
+            // 줌을 해도 자연스럽게 동작한다(수동 줌 상태 → 폭 맞춤 → 쪽 맞춤 → 폭 맞춤…).
+            let at_fit_width = (app.viewport.zoom - 1.0).abs() < 0.01;
+            if at_fit_width {
+                if icon_button(ui, draw_fit_page_icon)
+                    .on_hover_text("쪽 맞춤")
+                    .clicked()
+                {
+                    // 실제 계산은 그 프레임의 패널 높이를 아는 viewer_panel.rs에서 처리
+                    // (app::request_fit_page 문서 참고).
+                    app.request_fit_page = true;
+                }
+            } else if icon_button(ui, draw_fit_width_icon)
                 .on_hover_text("폭 맞춤 (100%)")
                 .clicked()
             {
                 app.viewport.zoom = 1.0;
             }
-            if icon_button(ui, draw_fit_page_icon)
-                .on_hover_text("쪽 맞춤")
-                .clicked()
-            {
-                // 실제 계산은 그 프레임의 패널 높이를 아는 viewer_panel.rs에서 처리한다
-                // (app::request_fit_page 문서 참고).
-                app.request_fit_page = true;
+
+            // 쪽 단위/연속 스크롤 모드 토글('C'와 동일 동작, 2026-07-18 요청) — 이쪽은
+            // 위와 달리 "현재 모드"를 아이콘으로 보여준다(사용자 명세: 연속 모드에서는
+            // 연속 스크롤 아이콘, 다시 누르거나 C를 누르면 쪽 단위 아이콘으로 변경).
+            let mode_response = if app.continuous_scroll {
+                icon_button(ui, draw_continuous_icon).on_hover_text("연속 스크롤 보기 중 — 누르면 쪽 단위 (C)")
+            } else {
+                icon_button(ui, draw_single_page_icon).on_hover_text("쪽 단위 보기 중 — 누르면 연속 스크롤 (C)")
+            };
+            if mode_response.clicked() {
+                app.toggle_continuous_scroll();
             }
 
             ui.separator();
