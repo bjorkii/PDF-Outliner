@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-const HEADERS: [&str; 4] = ["파일명", "계층", "북마크명", "페이지번호"];
+const HEADERS: [&str; 5] = ["순서", "파일명", "계층", "북마크명", "페이지번호"];
 
 /// CSV export. Windows Excel이 BOM 없는 UTF-8 CSV를 CP949로 오판독해
 /// 한글이 깨지는 문제를 막기 위해 파일 맨 앞에 UTF-8 BOM(EF BB BF)을 명시적으로 기록한다.
@@ -17,6 +17,7 @@ pub fn export_csv(rows: &[BookmarkRow], path: &Path) -> Result<()> {
     wtr.write_record(HEADERS)?;
     for row in rows {
         wtr.write_record(&[
+            &row.order.to_string(),
             row.filename.as_str(),
             &row.depth.to_string(),
             row.title.as_str(),
@@ -75,15 +76,27 @@ fn parse_csv_str(text: &str) -> Result<Vec<BookmarkRow>> {
             .position(|h| h.trim() == name)
             .with_context(|| format!("필수 컬럼 '{}'을 찾을 수 없음", name))
     };
+    // '순서' 컬럼(2026-07-19 신설)은 구버전 export 파일 호환을 위해 선택적 — 없으면
+    // 행 순서를 그대로 일련번호로 쓴다(예전 동작과 동일).
+    let i_order = headers.iter().position(|h| h.trim() == "순서");
     let i_filename = idx("파일명")?;
     let i_depth = idx("계층")?;
     let i_title = idx("북마크명")?;
     let i_page = idx("페이지번호")?;
 
     let mut rows = Vec::new();
-    for result in rdr.records() {
+    for (row_index, result) in rdr.records().enumerate() {
         let record = result?;
         rows.push(BookmarkRow {
+            order: match i_order {
+                Some(i) => record
+                    .get(i)
+                    .unwrap_or("0")
+                    .trim()
+                    .parse()
+                    .context("순서 컬럼이 숫자가 아님")?,
+                None => row_index as u32 + 1,
+            },
             filename: record.get(i_filename).unwrap_or_default().to_string(),
             depth: record
                 .get(i_depth)
@@ -115,12 +128,14 @@ mod tests {
 
         let rows = vec![
             BookmarkRow {
+                order: 1,
                 filename: "계약서_최종본.pdf".to_string(),
                 depth: 0,
                 title: "제1장 총칙".to_string(),
                 page: 1,
             },
             BookmarkRow {
+                order: 2,
                 filename: "계약서_최종본.pdf".to_string(),
                 depth: 1,
                 title: "제1조 목적".to_string(),
@@ -151,5 +166,7 @@ mod tests {
         assert_eq!(imported.len(), 1);
         assert_eq!(imported[0].title, "서론");
         assert_eq!(imported[0].filename, "오래된파일.pdf");
+        // '순서' 컬럼이 없는 구버전 파일 — 행 순서가 일련번호로 대체된다.
+        assert_eq!(imported[0].order, 1);
     }
 }

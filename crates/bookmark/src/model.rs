@@ -36,10 +36,14 @@ impl Bookmark {
 }
 
 /// CSV/Excel import·export용 flat row.
-/// 스키마: 파일명 / 계층 / 북마크명 / 페이지번호
-/// 행 순서 자체가 트리 구조를 결정하므로(depth-first 필수) 순서 보존이 중요하다.
+/// 스키마: 순서 / 파일명 / 계층 / 북마크명 / 페이지번호 (2026-07-19 '순서' 컬럼 추가)
+/// 트리 구조는 depth-first 나열 순서가 결정하는데, 예전엔 "파일의 행 순서"가 그
+/// 역할이라 사용자가 Excel에서 행을 재배열하면 계층이 깨졌다 — 이제 export 때 매긴
+/// 일련번호(`order`, 1-based)가 순서의 진실이고 import는 이 값으로 정렬한 뒤 트리를
+/// 만든다(`prepare_imported_rows`). 행이 뒤섞여 있어도 안전.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BookmarkRow {
+    pub order: u32,
     pub filename: String,
     pub depth: u32,
     pub title: String,

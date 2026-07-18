@@ -732,24 +732,44 @@ impl PdfViewerApp {
 
     pub fn import_bookmarks_csv(&mut self, path: PathBuf) {
         match import_export::import_csv(&path, None) {
-            Ok(rows) => {
-                self.bookmarks = bookmark::build_tree(&rows);
-                self.bookmarks_dirty = true;
-                self.status_message = Some(format!("CSV에서 북마크 {}개를 가져왔습니다.", rows.len()));
-            }
+            Ok(rows) => self.apply_imported_rows(rows, "CSV"),
             Err(err) => self.status_message = Some(format!("CSV 가져오기 실패: {err}")),
         }
     }
 
     pub fn import_bookmarks_xlsx(&mut self, path: PathBuf) {
         match import_export::import_xlsx(&path) {
-            Ok(rows) => {
-                self.bookmarks = bookmark::build_tree(&rows);
-                self.bookmarks_dirty = true;
-                self.status_message = Some(format!("Excel에서 북마크 {}개를 가져왔습니다.", rows.len()));
-            }
+            Ok(rows) => self.apply_imported_rows(rows, "Excel"),
             Err(err) => self.status_message = Some(format!("Excel 가져오기 실패: {err}")),
         }
+    }
+
+    /// CSV/Excel import 공통 정책(2026-07-19): '파일명' 컬럼이 현재 열린 파일과 일치하는
+    /// 행만 받아들이고, '순서' 컬럼 기준으로 정렬한 뒤 트리를 만든다(행이 뒤섞여 있어도
+    /// 안전 — `bookmark::prepare_imported_rows`). 일치하는 행이 하나도 없으면 기존
+    /// 북마크를 건드리지 않고 안내만 한다(파일을 잘못 고른 경우 데이터가 조용히 사라지는
+    /// 사고 방지).
+    fn apply_imported_rows(&mut self, rows: Vec<bookmark::BookmarkRow>, format_label: &str) {
+        let total = rows.len();
+        let current_name = self.current_filename_for_export();
+        let (kept, skipped) = bookmark::prepare_imported_rows(rows, &current_name);
+        if kept.is_empty() {
+            self.status_message = Some(format!(
+                "{format_label} 가져오기 취소: '파일명' 컬럼이 현재 파일({current_name})과 일치하는 행이 없습니다({total}행 검사)."
+            ));
+            return;
+        }
+        self.push_bookmark_undo_snapshot();
+        self.bookmarks = bookmark::build_tree(&kept);
+        self.bookmarks_dirty = true;
+        self.status_message = Some(if skipped > 0 {
+            format!(
+                "{format_label}에서 북마크 {}개를 가져왔습니다 (파일명 불일치 {skipped}행 제외).",
+                kept.len()
+            )
+        } else {
+            format!("{format_label}에서 북마크 {}개를 가져왔습니다.", kept.len())
+        });
     }
 
     const BOOKMARK_UNDO_LIMIT: usize = 20;

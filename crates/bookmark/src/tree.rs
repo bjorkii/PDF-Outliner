@@ -51,6 +51,9 @@ pub fn flatten_tree(nodes: &[BookmarkNode], filename: &str) -> Vec<BookmarkRow> 
 fn flatten_rec(nodes: &[BookmarkNode], filename: &str, depth: u32, out: &mut Vec<BookmarkRow>) {
     for node in nodes {
         out.push(BookmarkRow {
+            // 1-based 일련번호 — import 시 이 값으로 정렬해 트리를 복원하므로(model.rs
+            // 참고) depth-first 나열 순서 그대로 매겨져야 한다.
+            order: out.len() as u32 + 1,
             filename: filename.to_string(),
             depth,
             title: node.title.clone(),
@@ -58,6 +61,22 @@ fn flatten_rec(nodes: &[BookmarkNode], filename: &str, depth: u32, out: &mut Vec
         });
         flatten_rec(&node.children, filename, depth + 1, out);
     }
+}
+
+/// import된 행들을 트리로 만들기 전 정리(2026-07-19 요청): (1) '파일명' 컬럼이 현재 열린
+/// 파일명과 일치하는 행만 남기고, (2) 남은 행을 '순서' 컬럼 기준으로 정렬한다 — 사용자가
+/// Excel에서 행을 뒤섞거나 다른 문서의 행이 섞인 파일을 가져와도 안전하다.
+/// 반환: (정리된 행들, 파일명 불일치로 걸러진 행 수).
+pub fn prepare_imported_rows(
+    mut rows: Vec<BookmarkRow>,
+    current_filename: &str,
+) -> (Vec<BookmarkRow>, usize) {
+    let before = rows.len();
+    rows.retain(|r| r.filename == current_filename);
+    let skipped = before - rows.len();
+    // 같은 순서값이 중복돼 있어도(손으로 편집하다 실수) 원래 행 순서를 보존하도록 stable sort.
+    rows.sort_by_key(|r| r.order);
+    (rows, skipped)
 }
 
 fn children_at_path_mut<'a>(
@@ -328,6 +347,7 @@ mod tests {
 
     fn row(filename: &str, depth: u32, title: &str, page: u32) -> BookmarkRow {
         BookmarkRow {
+            order: 0,
             filename: filename.to_string(),
             depth,
             title: title.to_string(),
@@ -371,7 +391,38 @@ mod tests {
         ];
         let tree = build_tree(&rows);
         let flattened = flatten_tree(&tree, "doc.pdf");
-        assert_eq!(rows, flattened);
+        // flatten은 depth-first 순서대로 1-based 일련번호(order)를 새로 매긴다.
+        let expected: Vec<BookmarkRow> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| BookmarkRow { order: i as u32 + 1, ..r.clone() })
+            .collect();
+        assert_eq!(expected, flattened);
+    }
+
+    #[test]
+    fn prepare_imported_rows_sorts_by_order_and_filters_filename() {
+        // 행이 뒤섞여 있고 다른 문서의 행이 섞인 파일 — '순서'로 정렬되고 파일명 불일치는
+        // 걸러져야 한다(2026-07-19 요구사항 그대로).
+        let mk = |order: u32, filename: &str, title: &str| BookmarkRow {
+            order,
+            filename: filename.to_string(),
+            depth: 0,
+            title: title.to_string(),
+            page: 1,
+        };
+        let rows = vec![
+            mk(3, "test.pdf", "셋째"),
+            mk(1, "test.pdf", "첫째"),
+            mk(2, "other.pdf", "남의 것"),
+            mk(2, "test.pdf", "둘째"),
+        ];
+        let (kept, skipped) = prepare_imported_rows(rows, "test.pdf");
+        assert_eq!(skipped, 1);
+        assert_eq!(
+            kept.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(),
+            vec!["첫째", "둘째", "셋째"]
+        );
     }
 
     #[test]
