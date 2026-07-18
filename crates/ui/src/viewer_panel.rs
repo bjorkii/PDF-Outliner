@@ -313,6 +313,13 @@ fn show_continuous(
         || ctx.input(|i| i.smooth_scroll_delta.y != 0.0);
     let scroll_render_width = (target_width / 2).max(400).min(target_width);
 
+    // 쪽 단위 모드와 픽셀 단위로 같은 가로 중앙 위치를 쓰기 위해, ScrollArea에 들어가기
+    // 전에 패널 기준 왼쪽 끝을 잡아둔다 — 안쪽 clip 폭 기반으로 계산했더니 쪽 단위 대비
+    // 8pt 오른쪽으로 치우쳤음(스크린샷 픽셀 실측, 2026-07-18 리포트). 쪽 단위 모드의
+    // `Rect::from_center_size(rect.center(), ...)`와 동일하게 "패널 전체 폭의 중앙"을
+    // 기준으로 삼는다(페이지가 패널보다 넓으면 좌우 대칭으로 넘침 — 이것도 쪽 단위와 동일).
+    let outer_left = ui.available_rect_before_wrap().min.x;
+
     let mut scroll_area = egui::ScrollArea::vertical()
         .id_salt("continuous_scroll_area")
         .auto_shrink([false, false]);
@@ -324,11 +331,14 @@ fn show_continuous(
             ui.set_width(page_width_pts);
             ui.set_height(total_height);
 
-            // 페이지가 패널보다 좁으면(축소 배율/스크롤바 폭만큼) 가로 중앙 정렬 — 이
-            // 오프셋을 origin에 접어 넣어서 히트테스트(page_at)/클릭 영역/그리기/스크롤
-            // 타깃이 전부 같은 좌표를 쓰게 한다(왼쪽에 붙어 보이던 문제, 2026-07-18 리포트).
-            let x_center_offset = ((ui.clip_rect().width() - page_width_pts) / 2.0).max(0.0);
-            let origin = ui.max_rect().min + egui::vec2(x_center_offset, 0.0);
+            // 가로 중앙 정렬 — 쪽 단위 모드와 동일하게 "패널 전체 폭"(outer_left +
+            // available.x) 기준으로 중앙을 계산한다(안쪽 clip 폭 기준으로 했더니 8pt
+            // 오른쪽으로 치우침 — 위 outer_left 주석 참고). 이 x를 origin에 접어 넣어
+            // 히트테스트(page_at)/클릭 영역/그리기가 전부 같은 좌표를 쓰게 한다.
+            let origin = egui::pos2(
+                outer_left + (available.x - page_width_pts) / 2.0,
+                ui.max_rect().min.y,
+            );
 
             // 전체 문서 영역 하나에 클릭+드래그를 건다 — 페이지별로 따로 Response를 만들지
             // 않고 이 하나로 클릭(포커스/링크)·드래그(텍스트 선택)를 전부 처리한다.
