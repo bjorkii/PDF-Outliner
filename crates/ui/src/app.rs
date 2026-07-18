@@ -215,6 +215,14 @@ pub struct PdfViewerApp {
     /// 요청 범위가 "앱 재실행 시"로 한정됨(2026-07-14).
     pub scroll_sidebar_to_active_once: bool,
 
+    /// 페이지가 실제로 바뀐 프레임에 세우는 1회성 플래그 — 사이드바가 이를 받아, 자동
+    /// 동기화된 선택 북마크가 스크롤 영역 밖에 있으면(사용자가 사이드바를 딴 데로 스크롤해
+    /// 둔 경우) 부드럽게 중앙으로 다시 보이게 한다(2026-07-18 요청). 위
+    /// `scroll_sidebar_to_active_once`(무조건 중앙 스크롤)와 달리, 이미 보이는 항목은
+    /// 건드리지 않아 화살표로 페이지를 연달아 넘길 때 사이드바가 계속 들썩이지 않는다
+    /// (`sidebar.rs`의 `DragState::scroll_selected_into_view`로 이어짐 — 같은 검사 로직).
+    pub sidebar_reveal_selected_once: bool,
+
     /// 열린 파일이 같은 폴더 안에서 이름이 바뀌면(Finder에서 rename 등) `current_file`이
     /// 자동으로 그 새 이름을 따라가게 하기 위한 감시 상태 — macOS 전용(inode 개념이 있는
     /// 유닉스 계열에서만 신뢰할 수 있음). 다른 폴더로 옮겨진 경우나, 같은 폴더 안이라도
@@ -315,6 +323,7 @@ impl PdfViewerApp {
             last_opened_page,
             recent_files,
             scroll_sidebar_to_active_once: false,
+            sidebar_reveal_selected_once: false,
             #[cfg(target_os = "macos")]
             file_watcher: None,
             #[cfg(target_os = "macos")]
@@ -1044,6 +1053,12 @@ impl PdfViewerApp {
 
     fn set_current_page(&mut self, page: u32) {
         let clamped = page.clamp(1, self.total_pages.max(1));
+        // 페이지가 실제로 바뀔 때만: 사이드바가 밀려나 있으면 활성 북마크를 다시 보이게
+        // 한다(sidebar_reveal_selected_once 문서 참고). clamp로 같은 페이지에 머무는
+        // 경우(예: 1페이지에서 ← 연타)엔 세우지 않아 사이드바가 공연히 움직이지 않는다.
+        if clamped != self.current_page {
+            self.sidebar_reveal_selected_once = true;
+        }
         self.current_page = clamped;
         self.page_number_input = clamped.to_string();
         // 페이지 전환 시 확대/스크롤 상태 초기화 (Sumatra 관례와 동일)
@@ -1087,6 +1102,10 @@ impl PdfViewerApp {
         self.selected_bookmark = bookmark::active_bookmark_for_page(&self.bookmarks, clamped);
         self.selection_is_explicit = false;
         self.page_aspect = self.page_aspects.get((clamped as usize).saturating_sub(1)).copied();
+        // 연속 스크롤로 페이지 경계를 넘을 때도 사이드바가 밀려나 있으면 활성 북마크를
+        // 다시 보이게 한다(뷰어를 스크롤하는 중엔 사이드바를 동시에 스크롤할 수 없으므로
+        // 사용자 조작과 싸울 일 없음).
+        self.sidebar_reveal_selected_once = true;
     }
 
     /// 문서를 열 때 한 번, 전체 페이지의 높이/폭 비율을 미리 읽어둔다(렌더링 없이 페이지

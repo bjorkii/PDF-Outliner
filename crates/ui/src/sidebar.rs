@@ -152,6 +152,19 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 }
             }
 
+            // 페이지가 바뀐 프레임(app.rs의 set_current_page/note_visible_page_during_scroll):
+            // 사이드바가 다른 곳으로 스크롤돼 활성 북마크가 안 보이는 상태면 부드럽게 중앙으로
+            // 되돌린다(2026-07-18 요청). scroll_selected_into_view는 "화면 밖일 때만" 스크롤
+            // 하므로, 이미 보이는 항목은 건드리지 않아 화살표 페이지 연타 중에 들썩이지 않는다.
+            if std::mem::take(&mut app.sidebar_reveal_selected_once) {
+                if let Some(id) = current_selected {
+                    for ancestor in ancestors_of(&app.bookmarks, id) {
+                        drag_state.collapsed.remove(&ancestor);
+                    }
+                    drag_state.scroll_selected_into_view = true;
+                }
+            }
+
             egui::ScrollArea::vertical().show(ui, |ui| {
                 render_nodes(
                     ui,
