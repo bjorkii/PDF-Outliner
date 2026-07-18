@@ -698,6 +698,22 @@ impl PdfViewerApp {
             .unwrap_or_default()
     }
 
+    /// 내보내기 저장 대화상자의 기본 파일명 — 열린 파일명을 붙여 "bookmark-<원본이름>.<확장자>"
+    /// (예: test.pdf → bookmark-test.xlsx, 2026-07-19 요청). 열린 파일이 없으면 예전
+    /// 기본값 "bookmarks.<확장자>"로 폴백.
+    pub(crate) fn export_default_filename(&self, ext: &str) -> String {
+        let name = self.current_filename_for_export();
+        let stem = std::path::Path::new(&name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if stem.is_empty() {
+            format!("bookmarks.{ext}")
+        } else {
+            format!("bookmark-{stem}.{ext}")
+        }
+    }
+
     pub fn export_bookmarks_csv(&mut self, path: PathBuf) {
         let rows = bookmark::flatten_tree(&self.bookmarks, &self.current_filename_for_export());
         match import_export::export_csv(&rows, &path) {

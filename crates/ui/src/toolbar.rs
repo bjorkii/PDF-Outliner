@@ -149,7 +149,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 if ui.button("CSV로 내보내기").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("CSV", &["csv"])
-                        .set_file_name("bookmarks.csv")
+                        .set_file_name(app.export_default_filename("csv"))
                         .save_file()
                     {
                         app.export_bookmarks_csv(path);
@@ -159,7 +159,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 if ui.button("Excel로 내보내기").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("Excel", &["xlsx"])
-                        .set_file_name("bookmarks.xlsx")
+                        .set_file_name(app.export_default_filename("xlsx"))
                         .save_file()
                     {
                         app.export_bookmarks_xlsx(path);
