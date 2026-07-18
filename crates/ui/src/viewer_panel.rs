@@ -289,6 +289,7 @@ fn show_continuous(
     // 애니메이션으로 중간 페이지들을 경유하는 모습이 보이지 않는다('C' 진입 시 다른
     // 페이지를 스쳤다가 돌아오던 증상의 해결책, 2026-07-18 리포트).
     let scroll_id = ui.make_persistent_id(egui::Id::new("continuous_scroll_area"));
+    let scroll_state = egui::containers::scroll_area::State::load(ui.ctx(), scroll_id);
     let mut override_offset: Option<f32> = None;
     if let Some(target_page) = app.scroll_to_page_once.take() {
         // 북마크 클릭/검색 이동/페이지 입력/'C' 진입 — 그 페이지 상단으로 즉시 이동.
@@ -297,10 +298,20 @@ fn show_continuous(
             override_offset = Some(top);
         }
     } else if width_changed {
-        if let Some(state) = egui::containers::scroll_area::State::load(ui.ctx(), scroll_id) {
+        if let Some(state) = &scroll_state {
             override_offset = Some(state.offset.y * (page_width_pts / last_width));
         }
     }
+
+    // 스크롤이 진행 중인지(손가락 스크롤 이벤트 또는 관성 스크롤 감속 중). 페이지 경계에서
+    // 새 페이지를 원해상도로 동기 렌더링하면 그 프레임이 길어져 스크롤이 한 번 "덜컹"하는
+    // 문제(2026-07-18 리포트)의 완화책: 스크롤 중엔 반해상도(픽셀 1/4)로 빠르게 렌더링해
+    // 프레임 시간을 줄이고, 멎은 뒤에 프레임당 1장씩 원해상도로 다시 그린다(정지 상태에서
+    // 여러 장을 한 프레임에 업그레이드하면 그때 또 덜컹하므로 분할). PDFium은 메인 스레드
+    // 제약(§7)이 있어 백그라운드 렌더링으로는 풀 수 없다.
+    let scrolling = scroll_state.as_ref().is_some_and(|s| s.velocity().y.abs() > 50.0)
+        || ctx.input(|i| i.smooth_scroll_delta.y != 0.0);
+    let scroll_render_width = (target_width / 2).max(400).min(target_width);
 
     let mut scroll_area = egui::ScrollArea::vertical()
         .id_salt("continuous_scroll_area")
@@ -455,6 +466,8 @@ fn show_continuous(
                 idx >= keep_lo && idx <= keep_hi
             });
 
+            // 정지 상태에서의 원해상도 업그레이드는 프레임당 1장(아래 재렌더링 정책 참고).
+            let mut upgraded_this_frame = false;
             for i in first_visible..=last_visible {
                 let page_number = (i + 1) as u32;
                 let page_rect = egui::Rect::from_min_size(
@@ -463,21 +476,35 @@ fn show_continuous(
                 )
                 .translate(origin.to_vec2());
 
-                // 재렌더링 스로틀(위 width_changed 주석 참고): 폭이 변하는 중엔 해상도가
-                // 안 맞는 기존 텍스처라도 늘려서 그리고(아래 image()는 page_rect에 맞춰
-                // 알아서 스케일함), 텍스처가 아예 없는 페이지만 즉시 렌더링한다(빈 화면
-                // 방지). 줌이 멎으면 다음 프레임에 width_changed=false가 되어 해상도가
-                // 어긋난 페이지들이 한 번에 선명하게 재렌더링된다.
-                let cached = app.continuous_textures.get(&page_number);
-                let needs_render = match cached {
-                    None => true,
-                    Some((_, w)) => *w != target_width && !width_changed,
+                // 재렌더링 정책(위 width_changed/scrolling 주석 참고):
+                // - 텍스처가 아예 없는 페이지: 즉시 렌더링(빈 화면 방지) — 단 스크롤 중엔
+                //   반해상도로 빠르게(페이지 경계 덜컹 완화), 정지 상태면 원해상도로.
+                // - 해상도가 안 맞는 캐시(반해상도 잔재/줌 변경): 늘려서 그리다가, 줌도
+                //   스크롤도 멎은 뒤 프레임당 1장씩만 원해상도로 업그레이드(여러 장을 한
+                //   프레임에 하면 그때 또 덜컹하므로 분할 — upgraded_this_frame).
+                let cached_width = app.continuous_textures.get(&page_number).map(|(_, w)| *w);
+                let (needs_render, render_width) = match cached_width {
+                    None => (
+                        true,
+                        if scrolling { scroll_render_width } else { target_width },
+                    ),
+                    Some(w) => (
+                        w != target_width && !width_changed && !scrolling && !upgraded_this_frame,
+                        target_width,
+                    ),
                 };
                 if needs_render {
-                    if let Ok(texture) = app.render_page_texture(ctx, page_number, target_width) {
-                        app.continuous_textures
-                            .insert(page_number, (texture, target_width));
+                    if cached_width.is_some() {
+                        upgraded_this_frame = true;
                     }
+                    if let Ok(texture) = app.render_page_texture(ctx, page_number, render_width) {
+                        app.continuous_textures
+                            .insert(page_number, (texture, render_width));
+                    }
+                    // 업그레이드가 남아 있을 수 있으니 다음 프레임을 강제로 깨운다 —
+                    // egui는 입력이 없으면 리페인트하지 않아 마지막 스크롤 후 업그레이드가
+                    // 다음 마우스 조작까지 멈춰 보일 수 있다(§7의 즉시모드 함정과 동일).
+                    ctx.request_repaint();
                 }
 
                 if let Some((texture, _)) = app.continuous_textures.get(&page_number) {
