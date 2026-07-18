@@ -2,7 +2,7 @@ use bookmark::BookmarkNode;
 use egui::Key;
 use pdf_engine::PdfEngine;
 use pdfium_render::prelude::*;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -97,6 +97,11 @@ pub struct PdfViewerApp {
 
     /// 텍스트 선택 상태: 좌표가 아니라 인덱스로 관리 (pdf_engine::selection 설계 참고)
     pub selection: Option<pdf_engine::selection::TextSelectionRange>,
+    /// `selection`이 속한 페이지 번호 — 쪽 단위 모드에선 항상 `current_page`와 같지만,
+    /// 연속 스크롤 모드는 선택한 뒤 다른 페이지로 스크롤해도 선택이 유지되므로(2026-07-18
+    /// 요청 — "연속 모드에서도 텍스트 선택/복사가 상식적으로 되어야 함") `current_page`와
+    /// 갈라질 수 있어 별도로 기억해야 한다.
+    pub selection_page: Option<u32>,
     pub selection_drag_start_index: Option<i32>,
 
     /// 툴바 검색창에 입력 중인 검색어.
@@ -140,6 +145,36 @@ pub struct PdfViewerApp {
     pub page_aspect: Option<f32>,
     /// 이번 프레임에 페이지 이미지가 그려진 화면 좌표(rect). 클릭 좌표 변환에 사용.
     pub image_rect: Option<egui::Rect>,
+
+    /// 쪽 단위 보기(false) / 연속 스크롤 보기(true) — 단축키 'C'로 전환(2026-07-18 추가).
+    /// 연속 스크롤 모드는 현재 검색 하이라이트/텍스트 선택/링크 클릭을 지원하지 않는다
+    /// (범위 밖 — 필요하면 'C'로 쪽 단위 모드로 돌아가서 사용).
+    pub continuous_scroll: bool,
+    /// 문서를 열 때 한 번 계산해두는 페이지별 높이/폭 비율(`compute_page_aspects`) —
+    /// 연속 스크롤 모드가 전체 페이지를 렌더링하지 않고도 각 페이지가 차지할 세로 공간을
+    /// 미리 알아야 스크롤 총 높이/가상화 범위를 계산할 수 있어서 필요하다.
+    pub page_aspects: Vec<f32>,
+    /// 연속 스크롤 모드에서 화면에 보이는(+여유분) 페이지만 렌더링해 텍스처로 캐싱한다
+    /// (페이지 번호 → (텍스처, 렌더링에 쓴 target_width)). 매 프레임 보이는 범위 밖의
+    /// 항목은 정리해 메모리를 무한정 쓰지 않게 한다.
+    pub continuous_textures: HashMap<u32, (egui::TextureHandle, i32)>,
+    /// 연속 스크롤 모드에서 "이 페이지로 스크롤해줘"라는 1회성 요청(북마크 클릭/검색
+    /// 이동/페이지 번호 입력 등 명시적 이동에서 세워짐, `set_current_page` 참고) — 스크롤
+    /// 위치로 현재 페이지를 그냥 추적만 하는 경우(`note_visible_page_during_scroll`)엔
+    /// 세우지 않는다. 안 그러면 사용자가 스크롤하는 동안 계속 원래 자리로 끌려간다.
+    pub scroll_to_page_once: Option<u32>,
+    /// 툴바 "쪽 맞춤" 버튼이 세우는 1회성 요청 — 실제 계산은 그 프레임의 패널 높이를 아는
+    /// viewer_panel.rs에서 처리한다(page_aspect처럼 렌더링 시점에만 정확한 값이라 toolbar.rs
+    /// 자체에서는 계산할 수 없음).
+    pub request_fit_page: bool,
+    /// 연속 스크롤 모드가 직전 프레임에 레이아웃한 페이지 폭(pt). 0.0 = 아직 없음.
+    /// 줌/창 크기 변화로 폭이 바뀐 프레임을 감지하는 데 쓴다 — (1) 전체 레이아웃 높이가
+    /// 비례해서 변하므로 스크롤 오프셋도 같은 비율로 재조정해야 보던 위치가 유지되고
+    /// (안 하면 확대=앞쪽, 축소=뒤쪽 페이지로 점프 — 2026-07-18 리포트), (2) 그 프레임은
+    /// pdfium 재렌더링을 건너뛰고 기존 텍스처를 늘려 그려야 핀치 줌 중 매 프레임
+    /// 재렌더링으로 인한 심한 버벅임을 피할 수 있다(줌이 멎으면 다음 프레임에 한 번만
+    /// 선명하게 재렌더링).
+    pub continuous_last_page_width: f32,
 
     /// 다른 문서를 열려고 했는데 현재 북마크에 저장 안 된 변경사항이 있어 확인을 기다리는 중.
     pub pending_open_path: Option<PathBuf>,
@@ -250,6 +285,7 @@ impl PdfViewerApp {
             page_back_history: Vec::new(),
             page_forward_history: Vec::new(),
             selection: None,
+            selection_page: None,
             selection_drag_start_index: None,
             search_query: String::new(),
             search_matches: Vec::new(),
@@ -266,6 +302,12 @@ impl PdfViewerApp {
             max_texture_side: None,
             page_aspect: None,
             image_rect: None,
+            continuous_scroll: false,
+            page_aspects: Vec::new(),
+            continuous_textures: HashMap::new(),
+            scroll_to_page_once: None,
+            request_fit_page: false,
+            continuous_last_page_width: 0.0,
             pending_open_path: None,
             pending_recovery,
             quit_confirmation_pending: false,
@@ -449,6 +491,10 @@ impl PdfViewerApp {
                 self.page_back_history.clear();
                 self.page_forward_history.clear();
                 self.document = Some(document);
+                self.compute_page_aspects();
+                self.continuous_textures.clear();
+                self.scroll_to_page_once = None;
+                self.continuous_last_page_width = 0.0;
                 self.remember_recent_file(&path);
                 self.current_file = Some(path);
                 #[cfg(target_os = "macos")]
@@ -456,6 +502,7 @@ impl PdfViewerApp {
                 self.page_texture = None;
                 self.rendered_for = None;
                 self.selection = None;
+                self.selection_page = None;
                 self.selection_drag_start_index = None;
                 // 이전 문서의 검색 결과는 새 문서에서 의미가 없다.
                 self.search_matches.clear();
@@ -813,9 +860,12 @@ impl PdfViewerApp {
         let (Some(document), Some(range)) = (self.document.as_ref(), self.selection) else {
             return;
         };
+        // 연속 스크롤 모드에서는 선택한 뒤 다른 페이지로 스크롤할 수 있어 current_page와
+        // 선택이 속한 페이지가 다를 수 있다 — selection_page가 진실의 원천이다.
+        let selection_page = self.selection_page.unwrap_or(self.current_page);
         let Ok(page) = document
             .pages()
-            .get((self.current_page - 1) as PdfPageIndex)
+            .get((selection_page - 1) as PdfPageIndex)
         else {
             return;
         };
@@ -929,6 +979,11 @@ impl PdfViewerApp {
         };
         self.search_current_index = index;
         self.go_to_page(m.page);
+        // 검색 결과를 순회할 때마다 그 페이지의 활성 북마크(go_to_page가 이미
+        // set_current_page를 통해 selected_bookmark로 동기화해둠)가 사이드바에서 실제로
+        // 보이는 위치까지 스크롤되게 한다 — 안 그러면 하이라이트/선택 상태는 바뀌어도
+        // 사이드바가 스크롤 밖에 있으면 사용자가 알아챌 방법이 없다(2026-07-18 요청).
+        self.scroll_sidebar_to_active_once = true;
     }
 
     /// 다음 결과로 이동(검색창 Enter, ▶ 버튼). 마지막 결과에서는 처음으로 순환한다.
@@ -994,6 +1049,7 @@ impl PdfViewerApp {
         // 페이지 전환 시 확대/스크롤 상태 초기화 (Sumatra 관례와 동일)
         self.viewport.pan_offset = egui::Vec2::ZERO;
         self.selection = None;
+        self.selection_page = None;
         self.selection_drag_start_index = None;
         // 페이지가 바뀌면 사이드바 선택도 그 페이지의 활성 북마크로 자동 동기화한다
         // (2026-07-17 재설계 — "순회 중인 북마크가 곧 선택된 북마크", 최초 구동 시에도
@@ -1003,6 +1059,85 @@ impl PdfViewerApp {
         // 페이지에 북마크가 여러 개여도 명시적 선택이 항상 이긴다.
         self.selected_bookmark = bookmark::active_bookmark_for_page(&self.bookmarks, clamped);
         self.selection_is_explicit = false;
+        // page_aspect는 원래 render_current_page(쪽 단위 모드)가 렌더링 시점에 채웠는데,
+        // 연속 스크롤 모드는 그 함수를 안 타므로 여기서도 미리 계산해둔 page_aspects에서
+        // 동기화한다 — GPU 텍스처 한도 줌 상한/쪽 맞춤 계산이 모드와 무관하게 항상 정확한
+        // 값을 보게 하기 위함.
+        self.page_aspect = self.page_aspects.get((clamped as usize).saturating_sub(1)).copied();
+        // 연속 스크롤 모드에서는 "페이지 이동"이 뷰어 스크롤 위치를 직접 바꾸는 게 아니라
+        // 이 1회성 요청을 세우는 것뿐 — 실제 스크롤은 viewer_panel.rs가 그 페이지의 rect로
+        // scroll_to_rect를 부르면서 소비한다.
+        if self.continuous_scroll {
+            self.scroll_to_page_once = Some(clamped);
+        }
+    }
+
+    /// 연속 스크롤 모드에서 화면에 보이는 페이지로 `current_page`만 조용히 따라가게 한다
+    /// (viewer_panel.rs가 매 프레임 호출). `set_current_page`와 달리 페이지 이동
+    /// 히스토리·텍스트 선택·팬 오프셋·`scroll_to_page_once`는 건드리지 않는다 — 스크롤
+    /// 한 번에 여러 페이지를 훑고 지나가는 건 "의도적 이동"이 아니라서, 매번 히스토리에
+    /// 쌓거나 선택을 지우면 스크롤하는 동안 계속 방해가 된다.
+    pub(crate) fn note_visible_page_during_scroll(&mut self, page: u32) {
+        let clamped = page.clamp(1, self.total_pages.max(1));
+        if clamped == self.current_page {
+            return;
+        }
+        self.current_page = clamped;
+        self.page_number_input = clamped.to_string();
+        self.selected_bookmark = bookmark::active_bookmark_for_page(&self.bookmarks, clamped);
+        self.selection_is_explicit = false;
+        self.page_aspect = self.page_aspects.get((clamped as usize).saturating_sub(1)).copied();
+    }
+
+    /// 문서를 열 때 한 번, 전체 페이지의 높이/폭 비율을 미리 읽어둔다(렌더링 없이 페이지
+    /// 크기 메타데이터만 조회 — 수백 페이지 문서에서도 비용이 작다). 연속 스크롤 모드가
+    /// 아직 렌더링하지 않은 페이지의 세로 공간을 미리 알아야 스크롤 총 높이/가상화 범위를
+    /// 계산할 수 있어서 필요하다.
+    fn compute_page_aspects(&mut self) {
+        self.page_aspects.clear();
+        let Some(document) = &self.document else { return };
+        for i in 0..self.total_pages {
+            let aspect = document
+                .pages()
+                .get(i as PdfPageIndex)
+                .map(|page| page.height().value / page.width().value.max(1.0))
+                .unwrap_or(1.0);
+            self.page_aspects.push(aspect);
+        }
+    }
+
+    /// 임의 페이지를 지정한 target_width로 렌더링해 텍스처로 반환한다(연속 스크롤 모드
+    /// 전용 — `render_current_page`와 달리 `page_texture`/`rendered_for` 등 쪽 단위 모드
+    /// 전용 상태를 건드리지 않아서 여러 페이지를 동시에 그려도 서로 덮어쓰지 않는다).
+    pub(crate) fn render_page_texture(
+        &self,
+        ctx: &egui::Context,
+        page_number: u32,
+        target_width: i32,
+    ) -> anyhow::Result<egui::TextureHandle> {
+        use anyhow::Context as _;
+        let document = self.document.as_ref().context("열린 문서가 없음")?;
+        let page = document
+            .pages()
+            .get((page_number - 1) as PdfPageIndex)
+            .context("페이지 조회 실패")?;
+        let render_width = clamped_render_width(
+            target_width,
+            page.width().value,
+            page.height().value,
+            self.max_texture_side.unwrap_or(8192),
+        );
+        let config = PdfRenderConfig::new().set_target_width(render_width);
+        let bitmap = page.render_with_config(&config).context("페이지 렌더링 실패")?;
+        let width = bitmap.width() as usize;
+        let height = bitmap.height() as usize;
+        let rgba = bitmap.as_rgba_bytes();
+        let color_image = egui::ColorImage::from_rgba_unmultiplied([width, height], &rgba);
+        Ok(ctx.load_texture(
+            format!("pdf_page_continuous_{page_number}"),
+            color_image,
+            egui::TextureOptions::LINEAR,
+        ))
     }
 
     fn handle_page_navigation_keys(&mut self, ctx: &egui::Context) {
@@ -1024,6 +1159,21 @@ impl PdfViewerApp {
                         self.go_to_page_delta(-1);
                     }
                 });
+            }
+
+            // C — 쪽 단위/연속 스크롤 보기 전환(2026-07-18). 다른 조합키가 전혀 없는 순수
+            // "C" 키만 본다 — Cmd+C(복사)는 egui-winit이 raw Key::C 자체를 안 만들고
+            // `Event::Copy`로 바꿔치기해서(위 copy_pressed 참고) 원래 안 겹치지만, Windows
+            // Ctrl+C는 플랫폼에 따라 raw 키가 같이 올 수도 있어 modifiers가 하나라도 있으면
+            // 무시하도록 방어적으로 막는다.
+            if ctx.input(|i| i.key_pressed(Key::C) && i.modifiers.is_none()) {
+                self.continuous_scroll = !self.continuous_scroll;
+                // 연속 스크롤로 들어갈 때 지금 보던 페이지로 스크롤해야 한다 — 안 그러면
+                // 스크롤 영역의 예전(또는 초기 0) 위치가 그대로 남아 있어서 엉뚱한
+                // 페이지로 "점프"한 것처럼 보인다(2026-07-18 리포트).
+                if self.continuous_scroll {
+                    self.scroll_to_page_once = Some(self.current_page);
+                }
             }
         }
 

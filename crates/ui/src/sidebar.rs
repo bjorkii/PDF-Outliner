@@ -25,6 +25,13 @@ pub struct DragState {
     /// 밖(위/아래)이면 부드럽게 중앙으로 스크롤해 달라는 1회성 요청(2026-07-17 요청).
     /// 클릭 선택에는 세우지 않는다 — 클릭된 행은 정의상 이미 화면 안에 있다.
     pub scroll_selected_into_view: bool,
+    /// `scroll_to_me` 호출 직후 이 시각까지는 매 프레임 강제로 다시 그리게 한다. egui는
+    /// 기본적으로 입력 이벤트가 있을 때만 다시 그리는 즉시모드라(§7 문서 검색 폴링과 같은
+    /// 사정), scroll_to_me가 세운 애니메이션 목표가 있어도 사용자가 마우스를 안 움직이면
+    /// 프레임이 불규칙하게만 진행돼 "부드럽게"가 아니라 "덜컹거리며" 움직인다(실측 리포트,
+    /// 2026-07-18) — 애니메이션 지속시간(egui 기본 0.1~0.3초) 동안 강제로 매 프레임을
+    /// 깨워야 실제로 매끄럽게 보인다.
+    pub scroll_animation_until: Option<std::time::Instant>,
 }
 
 /// 재귀 전체에 걸쳐 누적되는 결과. 재귀 호출마다 지역 변수를 새로 선언하면 하위 노드의
@@ -253,6 +260,16 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 }
             }
 
+            // scroll_to_me 애니메이션이 아직 진행 중일 시각이면 강제로 다음 프레임을 깨워
+            // 매끄럽게 움직이게 한다(DragState::scroll_animation_until 문서 참고) — 다
+            // 지났으면 더 깨울 필요 없으니 필드를 비운다.
+            if let Some(deadline) = drag_state.scroll_animation_until {
+                if std::time::Instant::now() < deadline {
+                    ctx.request_repaint();
+                } else {
+                    drag_state.scroll_animation_until = None;
+                }
+            }
             ctx.data_mut(|d| d.insert_temp(drag_id, drag_state));
 
             if let Some(page) = outcome.jump_page {
@@ -290,6 +307,14 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
         ))
         .rect_stroke(panel_rect.shrink(1.0), 2.0_f32, stroke);
     }
+}
+
+/// `scroll_to_me` 호출 직후마다 부르는 헬퍼 — 애니메이션 지속시간(egui 기본 최대 0.3초)
+/// 동안 매 프레임 강제로 다시 그리도록 마감 시각을 세운다(DragState::scroll_animation_until
+/// 문서 참고).
+fn request_scroll_animation_repaint(drag_state: &mut DragState) {
+    drag_state.scroll_animation_until =
+        Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
 }
 
 /// "+"버튼과 Cmd+B가 공유하는 로직: 선택된 항목의 자식(없으면 최상위)으로 새 북마크를
@@ -367,6 +392,11 @@ fn render_nodes(
                     // 밖에 있을 수 있으니 편집 필드가 보이는 위치까지 스크롤한다 — 사이드바가
                     // 꽉 찬 상태에서 Cmd+B로 추가하면 새 항목이 안 보이던 문제.
                     edit_response.scroll_to_me(Some(egui::Align::Center));
+                    // `buffer`가 drag_state.editing을 통째로 빌리고 있어 여기서 함수
+                    // 호출(&mut drag_state 전체)을 못 하므로, 서로 겹치지 않는 필드는
+                    // 직접 대입해 우회한다(request_scroll_animation_repaint와 동일 내용).
+                    drag_state.scroll_animation_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
                     // 텍스트 전체를 선택 상태로 둬서, 새로 만든 placeholder("새 북마크")나
                     // F2/재클릭으로 연 기존 제목을 바로 타이핑해서 덮어쓸 수 있게 한다 —
                     // request_focus만으로는 커서만 옮겨갈 뿐 선택은 안 돼서 매번 수동으로
@@ -437,6 +467,7 @@ fn render_nodes(
                 // 안 그러면 트리가 길 때 강조된 항목이 스크롤 밖에 있어도 알 방법이 없다.
                 if is_selected && scroll_to_active_once {
                     label_response.scroll_to_me(Some(egui::Align::Center));
+                    request_scroll_animation_repaint(drag_state);
                 }
 
                 // 화살표 키 순회로 선택이 방금 바뀐 경우(1회성 플래그): 새 선택 행이
@@ -451,6 +482,7 @@ fn render_nodes(
                     let rect = label_response.rect;
                     if rect.top() < clip.top() || rect.bottom() > clip.bottom() {
                         label_response.scroll_to_me(Some(egui::Align::Center));
+                        request_scroll_animation_repaint(drag_state);
                     }
                 }
 

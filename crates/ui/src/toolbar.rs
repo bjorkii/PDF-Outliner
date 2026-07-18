@@ -11,6 +11,68 @@ fn modifier_label() -> &'static str {
     }
 }
 
+/// 아이콘 버튼 한 변 크기 — 옆의 ➖/➕ 텍스트 버튼과 높이가 어울리게 잡은 값.
+const ICON_BUTTON_SIZE: f32 = 22.0;
+
+/// 커스텀 벡터 아이콘을 그리는 버튼. `egui::Button`은 텍스트(WidgetText)만 받고 임의
+/// 도형을 못 그리므로, 사이드바 폴드 아이콘(sidebar.rs)과 같은 방식으로 직접 rect를
+/// 할당하고 그 위에 수동으로 그린다 — `ui.style().interact(&response)`로 실제 버튼과
+/// 동일한 hover/눌림 배경·테두리를 얻어 다른 버튼들과 시각적으로 어울리게 한다.
+fn icon_button(
+    ui: &mut egui::Ui,
+    draw: impl FnOnce(&egui::Painter, egui::Rect, egui::Color32),
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact(&response);
+        ui.painter()
+            .rect(rect, visuals.rounding, visuals.weak_bg_fill, visuals.bg_stroke);
+        draw(ui.painter(), rect.shrink(4.0), visuals.fg_stroke.color);
+    }
+    response
+}
+
+/// "폭 맞춤"(페이지 너비를 뷰어 폭에 맞춤, 이 앱의 줌 100%와 동일) — 문서 사각형 좌우로
+/// 바깥을 향한 화살표를 그려 "폭에 맞춘다"는 뜻을 표현한다. flat/simple 스타일
+/// (2026-07-18 요청).
+fn draw_fit_width_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.3_f32, color);
+    let page = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width() * 0.42, rect.height()));
+    painter.rect_stroke(page, 1.0, stroke);
+
+    let mid_y = rect.center().y;
+    let arrow_len = rect.width() * 0.26;
+    let head = 2.6;
+    for sign in [-1.0_f32, 1.0] {
+        let start_x = if sign < 0.0 { page.left() } else { page.right() };
+        let tip = egui::pos2(start_x + sign * arrow_len, mid_y);
+        painter.line_segment([egui::pos2(start_x, mid_y), tip], stroke);
+        painter.line_segment([tip, tip + egui::vec2(-sign * head, -head)], stroke);
+        painter.line_segment([tip, tip + egui::vec2(-sign * head, head)], stroke);
+    }
+}
+
+/// "쪽 맞춤"(페이지 전체가 뷰어 안에 들어오게 맞춤) — 카메라 뷰파인더처럼 네 모서리에
+/// 꺾쇠를 그리고 그 안에 작은 페이지 사각형을 둬 "전체가 프레임 안에 들어온다"는 뜻을
+/// 표현한다. flat/simple 스타일(2026-07-18 요청).
+fn draw_fit_page_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.3_f32, color);
+    let arm = rect.width().min(rect.height()) * 0.34;
+    let corners: [(egui::Pos2, egui::Vec2, egui::Vec2); 4] = [
+        (rect.left_top(), egui::vec2(arm, 0.0), egui::vec2(0.0, arm)),
+        (rect.right_top(), egui::vec2(-arm, 0.0), egui::vec2(0.0, arm)),
+        (rect.left_bottom(), egui::vec2(arm, 0.0), egui::vec2(0.0, -arm)),
+        (rect.right_bottom(), egui::vec2(-arm, 0.0), egui::vec2(0.0, -arm)),
+    ];
+    for (corner, dx, dy) in corners {
+        painter.line_segment([corner, corner + dx], stroke);
+        painter.line_segment([corner, corner + dy], stroke);
+    }
+    let page = rect.shrink2(egui::vec2(rect.width() * 0.24, rect.height() * 0.14));
+    painter.rect_stroke(page, 1.0, egui::Stroke::new(1.1_f32, color));
+}
+
 pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
@@ -116,6 +178,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                             (format!("{m}+["), "이전 화면"),
                             (format!("{m}+]"), "다음 화면"),
                             ("Tab".to_string(), "북마크↔뷰어"),
+                            ("C".to_string(), "쪽 단위/연속 스크롤 전환"),
                         ] {
                             ui.label(key);
                             ui.label(desc);
@@ -134,8 +197,19 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             if ui.button("➕").on_hover_text("확대").clicked() {
                 app.viewport.zoom_by(1.25);
             }
-            if ui.button("100%").clicked() {
+            if icon_button(ui, draw_fit_width_icon)
+                .on_hover_text("폭 맞춤 (100%)")
+                .clicked()
+            {
                 app.viewport.zoom = 1.0;
+            }
+            if icon_button(ui, draw_fit_page_icon)
+                .on_hover_text("쪽 맞춤")
+                .clicked()
+            {
+                // 실제 계산은 그 프레임의 패널 높이를 아는 viewer_panel.rs에서 처리한다
+                // (app::request_fit_page 문서 참고).
+                app.request_fit_page = true;
             }
 
             ui.separator();
