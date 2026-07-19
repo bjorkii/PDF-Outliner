@@ -268,6 +268,14 @@ CSV/Excel 컬럼 순서 동일, 헤더는 한글, CSV는 UTF-8 BOM 적용(§2).
 - 저장 안 된 북마크 변경사항이 있을 때 앱 종료(창 닫기/Cmd+Q) 시도 시 저장/저장안함/취소 확인창(`crates/ui/src/app.rs`의 `handle_close_request`/`show_quit_confirmation_dialog`) — 2026-07-13 신규. `ctx.input(|i| i.viewport().close_requested())`를 보고 `ViewportCommand::CancelClose`로 일단 종료를 취소한 뒤, 사용자가 확인창에서 저장/저장안함을 고르면 `ViewportCommand::Close`를 다시 보내 실제로 닫는 방식(eframe `on_exit` 문서에 명시된 관례) — 새 문서를 열 때의 `show_unsaved_changes_dialog`와 동일한 문구/구성. 구현 직후 바로 검색 기능 요청으로 넘어가 사용자가 실 점검으로 짚어볼 기회가 없었을 뿐 — 다음 세션에서 먼저 확인 권장
 
 ### 남은 작업 (우선순위 낮음, 전부 미착수)
+- [ ] **⭐ 폴더 일괄 북마크 import & 저장 (2026-07-19 사용자 예약 — 다음 세션 착수 예정)**: 폴더와 북마크 csv/xlsx 하나를 선택하면 폴더 안의 모든 PDF를 **recursive하게** 순회하며 북마크를 import해 각 PDF에 저장. 원본은 `filename.pdf.backup`으로 rename하고 결과는 원래 이름(`filename.pdf`)으로 생성. 설계 메모(이번 세션에서 미리 정리):
+  - **기반이 이미 갖춰짐**: 2026-07-19에 넣은 스키마('순서' 컬럼 + '파일명' 필터, `bookmark::prepare_imported_rows`)가 핵심 — csv/xlsx 하나에 여러 문서의 행이 섞여 있어도 파일명별로 골라낼 수 있고, xlsx는 모든 탭을 순회 수집함(`import_xlsx`). 일괄 처리 = "PDF마다 자기 파일명으로 `prepare_imported_rows` → `build_tree` → 저장" 반복.
+  - **pdfium 불필요**: 이 파이프라인은 렌더링이 없다 — 행 파싱(import_export) + 트리 구성(bookmark) + 디스크 쓰기(`pdf_outline_writer::write_bookmarks_incremental`, lopdf가 경로에서 직접 읽고 씀)만으로 완결. §7의 pdfium 스레드 제약과 무관하므로 이론상 백그라운드 스레드 처리도 가능(단 UI 진행 표시는 메인에서).
+  - **파일별 처리 순서**: (1) 원본 `x.pdf` → `x.pdf.backup` rename, (2) `.backup`을 `x.pdf`로 **복사**, (3) 그 `x.pdf`에 lopdf incremental로 북마크 기록. 이미 `x.pdf.backup`이 존재하면 정책 필요 — 덮어쓰기/건너뛰기/중단 중 사용자에게 확인(안전하게는 "이미 백업 있음 = 이전 실행 흔적"으로 보고 그 파일 skip + 결과 보고).
+  - **매칭 정책**: csv/xlsx의 '파일명' 컬럼 == 각 PDF의 파일명(NFC 정규화 — `display_filename`과 동일하게 맞춰야 macOS NFD 파일명이 안 어긋남). 매칭 행이 없는 PDF는 건드리지 않고 skip 집계만.
+  - **UI**: 툴바 메뉴(예: "북마크 가져오기" 아래 "폴더 일괄 적용…") → `rfd::FileDialog::pick_folder` + csv/xlsx pick → 확인 다이얼로그(대상 파일 수 표시) → 진행/결과 요약(처리 N, skip M, 실패 목록). 현재 앱에 열려 있는 파일이 대상에 포함되면 충돌 주의 — 열린 파일은 제외하거나, 처리 후 자동 재로드.
+  - **recursive 순회**: `walkdir` 크레이트(이미 notify의 의존성으로 워크스페이스에 존재)나 `std::fs::read_dir` 재귀 — 확장자 `.pdf`(대소문자 무시)만. `.backup` 붙은 파일은 순회에서 제외.
+  - 관련 배경: 이 앱의 PDF들은 웹서비스 파이프라인용(메모리 web_service_pdf_pipeline 참고) — 일괄 처리는 그 방향의 첫 기능.
 - [ ] SQLite 스키마/마이그레이션 — 북마크 저장은 이제 PDF 자체 outline이 1차 수단이라 우선순위 낮음(CSV/Excel처럼 보조·백업 용도로만 필요할 수도). 크래시 복구 용도로도 검토했으나 데이터 모델이 "열린 문서 하나짜리 트리 스냅샷"뿐이라 관계형 쿼리가 필요 없어 기각 — JSON 자동저장으로 대체(§4)
 - [ ] 유료 Apple Developer ID 서명 + notarization, Windows 코드서명 인증서 (§5 — 사용자가 현재는 의도적으로 미적용 결정)
 - [ ] macOS `.pkg`화, Windows `.msi`화 (§5 — 현재는 zip 배포로 충분하다고 판단)
