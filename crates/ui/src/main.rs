@@ -10,6 +10,7 @@
 
 mod app;
 mod autosave;
+mod batch_import;
 mod fonts;
 #[cfg(target_os = "macos")]
 mod macos_open_file;

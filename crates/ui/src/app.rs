@@ -240,6 +240,10 @@ pub struct PdfViewerApp {
     /// 저장" 플로우, §7 "열린 파일 외부 변경 추적" 참고).
     pub save_as_requested: bool,
 
+    /// 폴더 일괄 북마크 적용 잡(`batch_import` 모듈). Some인 동안 뷰어 영역이 진행/로그
+    /// 화면으로 전환되고, 매 프레임 `batch_import::poll`이 1파일씩 진행시킨다.
+    pub batch_import: Option<crate::batch_import::BatchImportJob>,
+
     pub status_message: Option<String>,
 }
 
@@ -331,6 +335,7 @@ impl PdfViewerApp {
             #[cfg(target_os = "macos")]
             watched_file_inode: None,
             save_as_requested: false,
+            batch_import: None,
             last_window_title: None,
             prev_focused_widget: None,
             status_message,
@@ -742,6 +747,26 @@ impl PdfViewerApp {
             Ok(rows) => self.apply_imported_rows(rows, "Excel"),
             Err(err) => self.status_message = Some(format!("Excel 가져오기 실패: {err}")),
         }
+    }
+
+    /// 폴더 일괄 북마크 적용 시작 — 잡 준비(파싱/PDF 수집)까지만 하고, 실제 처리는
+    /// 뷰어 영역의 확인 화면에서 "시작"을 눌러야 진행된다(`batch_import` 모듈 참고).
+    pub fn start_batch_import(&mut self, folder: PathBuf, sheet_path: PathBuf) {
+        match crate::batch_import::prepare_job(folder, sheet_path) {
+            Ok(job) => self.batch_import = Some(job),
+            Err(msg) => self.status_message = Some(format!("폴더 일괄 적용 취소: {msg}")),
+        }
+    }
+
+    /// 매 프레임 일괄 처리 잡을 1파일씩 진행 — 즉시모드 UI를 살리는 프레임 분할 패턴
+    /// (poll_search_job과 동일한 이유). 잡을 잠시 꺼내(take) 처리하는 이유는 engine/
+    /// current_file을 동시에 빌려야 해서(부분 borrow 회피).
+    fn poll_batch_import(&mut self, ctx: &egui::Context) {
+        let Some(mut job) = self.batch_import.take() else {
+            return;
+        };
+        crate::batch_import::poll(&mut job, self.engine.as_ref(), self.current_file.as_deref(), ctx);
+        self.batch_import = Some(job);
     }
 
     /// CSV/Excel import 공통 정책(2026-07-19): '파일명' 컬럼이 현재 열린 파일과 일치하는
@@ -1651,6 +1676,7 @@ impl eframe::App for PdfViewerApp {
         self.handle_dropped_files(ctx);
         self.handle_close_request(ctx);
         self.poll_search_job(ctx);
+        self.poll_batch_import(ctx);
         #[cfg(target_os = "macos")]
         self.poll_file_rename(ctx);
         #[cfg(target_os = "macos")]

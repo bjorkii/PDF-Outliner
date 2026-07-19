@@ -187,6 +187,24 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     }
                     ui.close_menu();
                 }
+                ui.separator();
+                // 폴더 일괄 적용(2026-07-19 예약 작업) — 폴더 하나 + csv/xlsx 하나를 골라
+                // 안의 모든 PDF에 북마크를 저장한다(batch_import 모듈). 진행 중 재진입 방지.
+                let batch_running = app.batch_import.as_ref().is_some_and(|j| j.is_running());
+                let batch_button = ui
+                    .add_enabled(!batch_running, egui::Button::new("폴더 일괄 적용…"))
+                    .on_hover_text("폴더 안 모든 PDF에 북마크 파일(CSV/Excel)을 일괄 적용 — 원본은 .backup으로 보존");
+                if batch_button.clicked() {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        if let Some(sheet) = rfd::FileDialog::new()
+                            .add_filter("북마크 파일 (CSV/Excel)", &["csv", "xlsx"])
+                            .pick_file()
+                        {
+                            app.start_batch_import(folder, sheet);
+                        }
+                    }
+                    ui.close_menu();
+                }
             });
 
             // 정보성 툴팁이라 on_hover_ui로 충분 — egui 툴팁은 원래 마우스가 벗어나면

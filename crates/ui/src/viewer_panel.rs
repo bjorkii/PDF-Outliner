@@ -9,6 +9,13 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
     handle_scroll_zoom(ctx, &mut app.viewport);
 
     egui::CentralPanel::default().show(ctx, |ui| {
+        // 폴더 일괄 북마크 적용이 진행 중(확인 대기/처리/완료)이면 뷰어 대신 그 화면을
+        // 그린다 — 실시간 로그를 뷰어 영역으로 전환해 보여주는 스펙 1순위안.
+        if app.batch_import.is_some() {
+            crate::batch_import::show_panel(ui, app);
+            return;
+        }
+
         if app.document.is_none() {
             ui.centered_and_justified(|ui| {
                 ui.label("PDF 파일을 열어주세요 (파일 열기 버튼 또는 드래그 앤 드롭)");
