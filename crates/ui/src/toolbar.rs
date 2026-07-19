@@ -188,20 +188,21 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     ui.close_menu();
                 }
                 ui.separator();
-                // 폴더 일괄 적용(2026-07-19 예약 작업) — 폴더 하나 + csv/xlsx 하나를 골라
-                // 안의 모든 PDF에 북마크를 저장한다(batch_import 모듈). 진행 중 재진입 방지.
+                // 폴더 일괄 적용(2026-07-19 예약 작업) — 다이얼로그는 폴더 선택 하나뿐.
+                // 북마크 파일(xlsx/csv)은 그 폴더 안에서 자동 인식된다(처음엔 폴더 → 파일
+                // 다이얼로그를 연달아 띄웠는데 macOS 네이티브 패널엔 제목이 안 보여서
+                // 두 번째가 "잘못 뜬 개별 파일 선택"으로 오인됨 — 사용자 리포트 후 자동
+                // 인식 방식으로 변경, batch_import::prepare_job 참고). 진행 중 재진입 방지.
                 let batch_running = app.batch_import.as_ref().is_some_and(|j| j.is_running());
                 let batch_button = ui
                     .add_enabled(!batch_running, egui::Button::new("폴더 일괄 적용…"))
                     .on_hover_text("폴더 안 모든 PDF에 북마크 파일(CSV/Excel)을 일괄 적용 — 원본은 .backup으로 보존");
                 if batch_button.clicked() {
-                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        if let Some(sheet) = rfd::FileDialog::new()
-                            .add_filter("북마크 파일 (CSV/Excel)", &["csv", "xlsx"])
-                            .pick_file()
-                        {
-                            app.start_batch_import(folder, sheet);
-                        }
+                    if let Some(folder) = rfd::FileDialog::new()
+                        .set_title("일괄 적용할 PDF 폴더 선택")
+                        .pick_folder()
+                    {
+                        app.start_batch_import(folder);
                     }
                     ui.close_menu();
                 }

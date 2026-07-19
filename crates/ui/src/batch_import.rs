@@ -74,12 +74,19 @@ pub struct Stats {
 
 pub struct BatchImportJob {
     pub folder: PathBuf,
-    pub sheet_path: PathBuf,
+    /// 폴더에서 자동 인식된 북마크 파일들 — **읽은 순서대로**(xlsx 전부 → csv 전부,
+    /// 각각 경로순. 2026-07-19 사용자 지정 우선순위). 별도 선택 다이얼로그는 없다.
+    pub sheet_files: Vec<PathBuf>,
     /// 재귀 수집된 처리 대상 PDF 목록(경로순 정렬).
     pub files: Vec<PathBuf>,
     /// NFC 정규화한 파일명 → 그 파일의 행들('순서' 정렬 완료). 한 csv/xlsx에 여러
     /// 문서의 행이 섞여 있는 스키마(2026-07-19)를 그대로 받아 파일명별로 골라둔 것.
+    /// 여러 북마크 파일이 같은 PDF의 행을 담고 있으면 **먼저 읽은 파일이 이긴다**
+    /// (뒤의 것은 건너뛰고 setup_notes에 기록).
     rows_by_filename: HashMap<String, Vec<BookmarkRow>>,
+    /// 준비 단계에서 생긴 안내(읽기 실패한 북마크 파일, 중복으로 건너뛴 행 등) —
+    /// 확인 화면과 .log 파일에 그대로 실린다.
+    pub setup_notes: Vec<String>,
     /// 확인 화면에 보여줄, 매칭 행이 있는 파일 수(prepare 시 1회 계산).
     pub matched_count: usize,
     pub next_index: usize,
@@ -87,6 +94,10 @@ pub struct BatchImportJob {
     pub phase: JobPhase,
     /// 완료 후 로그 파일 경로 안내(또는 저장 실패 사유).
     pub log_file_note: Option<String>,
+    /// 배치를 시작한 시점에 앱에 열려 있던 (PDF 경로, 보던 페이지) — 완료 화면의
+    /// "되돌아가기" 버튼이 이 자리로 복귀시킨다(2026-07-19 요청). 열린 문서가 없었으면
+    /// None이고 버튼은 "닫기"로 표시된다. `start_batch_import`(app.rs)가 채운다.
+    pub return_to: Option<(PathBuf, u32)>,
     started_at: chrono::DateTime<chrono::Local>,
 }
 
@@ -108,38 +119,77 @@ impl BatchImportJob {
     }
 }
 
-/// 폴더/시트를 받아 잡을 준비한다(아직 아무 파일도 건드리지 않음 — 확인 대기 상태).
-/// csv/xlsx 파싱 실패나 빈 폴더 등은 Err 문자열로 돌려 호출측이 status_message로 안내한다.
-pub fn prepare_job(folder: PathBuf, sheet_path: PathBuf) -> Result<BatchImportJob, String> {
-    let is_xlsx = sheet_path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("xlsx"));
-    let rows = if is_xlsx {
-        import_export::import_xlsx(&sheet_path).map_err(|e| format!("Excel 읽기 실패: {e}"))?
-    } else {
-        import_export::import_csv(&sheet_path, None).map_err(|e| format!("CSV 읽기 실패: {e}"))?
-    };
-    if rows.is_empty() {
-        return Err("북마크 파일에 행이 없습니다.".to_string());
-    }
-
-    // '파일명'을 NFC로 정규화해 그룹핑 — macOS 디스크의 NFD 파일명(display_filename도
-    // NFC로 맞춰 비교)과 Excel에서 입력한 조합형 한글이 어긋나지 않게 한다.
-    let mut rows_by_filename: HashMap<String, Vec<BookmarkRow>> = HashMap::new();
-    for row in rows {
-        let key: String = row.filename.nfc().collect();
-        rows_by_filename.entry(key).or_default().push(row);
-    }
-    for group in rows_by_filename.values_mut() {
-        // 단일 파일 import(prepare_imported_rows)와 같은 규칙: '순서' 기준 stable 정렬.
-        group.sort_by_key(|r| r.order);
-    }
-
+/// 폴더 하나만 받아 잡을 준비한다(아직 아무 파일도 건드리지 않음 — 확인 대기 상태).
+/// 북마크 파일은 따로 묻지 않고 폴더 안(하위 폴더 포함)의 모든 xlsx/csv를 자동 인식해
+/// **xlsx 전부 → csv 전부** 순으로 읽는다(2026-07-19 사용자 지정). 같은 PDF의 행이
+/// 여러 북마크 파일에 있으면 먼저 읽은 파일이 이기고, 뒤의 것은 건너뛰어 기록만 남긴다.
+/// PDF나 북마크 파일이 하나도 없으면 Err(호출측이 status_message로 안내).
+pub fn prepare_job(folder: PathBuf) -> Result<BatchImportJob, String> {
     let mut files = Vec::new();
-    collect_pdfs(&folder, &mut files);
+    let mut sheet_files = Vec::new();
+    collect_files(&folder, &mut files, &mut sheet_files);
     files.sort();
     if files.is_empty() {
         return Err("선택한 폴더(하위 폴더 포함)에서 PDF를 찾지 못했습니다.".to_string());
+    }
+    if sheet_files.is_empty() {
+        return Err("폴더(하위 폴더 포함)에서 북마크 파일(xlsx/csv)을 찾지 못했습니다.".to_string());
+    }
+    // 우선순위: xlsx 전부 → csv 전부, 각각 경로순(사전순) — sort key의 bool이
+    // xlsx=false < csv=true 로 정렬돼 xlsx가 앞에 온다.
+    sheet_files.sort_by_key(|p| (!is_ext(p, "xlsx"), p.clone()));
+
+    let mut rows_by_filename: HashMap<String, Vec<BookmarkRow>> = HashMap::new();
+    // 각 PDF 파일명을 어느 북마크 파일이 선점했는지(중복 안내문에 쓸 정보).
+    let mut source_of: HashMap<String, PathBuf> = HashMap::new();
+    let mut setup_notes = Vec::new();
+
+    for sheet in &sheet_files {
+        let parsed = if is_ext(sheet, "xlsx") {
+            import_export::import_xlsx(sheet)
+        } else {
+            import_export::import_csv(sheet, None)
+        };
+        let rows = match parsed {
+            Ok(rows) => rows,
+            Err(err) => {
+                // 스키마가 다른 무관한 엑셀/CSV가 섞여 있을 수 있다 — 전체를 중단하지
+                // 않고 그 파일만 건너뛰며 알린다.
+                setup_notes.push(format!(
+                    "[경고] 북마크 파일 '{}' 읽기 실패 — 무시함: {err}",
+                    rel_display(sheet, &folder)
+                ));
+                continue;
+            }
+        };
+
+        // '파일명'을 NFC로 정규화해 이 북마크 파일 안에서 먼저 그룹핑 — macOS 디스크의
+        // NFD 파일명(display_filename도 NFC로 맞춰 비교)과 Excel에서 입력한 조합형
+        // 한글이 어긋나지 않게 한다. BTreeMap이라 중복 안내문 순서도 결정적이다.
+        let mut per_file: std::collections::BTreeMap<String, Vec<BookmarkRow>> =
+            std::collections::BTreeMap::new();
+        for row in rows {
+            let key: String = row.filename.nfc().collect();
+            per_file.entry(key).or_default().push(row);
+        }
+
+        for (name, mut group) in per_file {
+            if let Some(first_source) = source_of.get(&name) {
+                // 이미 앞선(우선순위 높은) 북마크 파일이 이 PDF의 행을 제공함 — 중복은
+                // 적용하지 않고 건너뛴다(2026-07-19 사용자 지정).
+                setup_notes.push(format!(
+                    "[중복] '{}'의 '{name}' 행 {}개 건너뜀 — 먼저 읽은 '{}'의 행을 적용",
+                    rel_display(sheet, &folder),
+                    group.len(),
+                    rel_display(first_source, &folder)
+                ));
+                continue;
+            }
+            // 단일 파일 import(prepare_imported_rows)와 같은 규칙: '순서' 기준 stable 정렬.
+            group.sort_by_key(|r| r.order);
+            rows_by_filename.insert(name.clone(), group);
+            source_of.insert(name, sheet.clone());
+        }
     }
 
     let matched_count = files
@@ -149,22 +199,29 @@ pub fn prepare_job(folder: PathBuf, sheet_path: PathBuf) -> Result<BatchImportJo
 
     Ok(BatchImportJob {
         folder,
-        sheet_path,
+        sheet_files,
         files,
         rows_by_filename,
+        setup_notes,
         matched_count,
         next_index: 0,
         log: Vec::new(),
         phase: JobPhase::AwaitingConfirmation,
         log_file_note: None,
+        return_to: None,
         started_at: chrono::Local::now(),
     })
 }
 
-/// `.pdf`(대소문자 무시)만 재귀 수집. `x.pdf.backup`은 확장자가 backup이라 자연히
-/// 제외된다. 심볼릭 링크 디렉토리는 따라가지 않는다(순환 방지 — entry의 file_type은
-/// 링크를 해석하지 않으므로 is_dir가 false).
-fn collect_pdfs(dir: &Path, out: &mut Vec<PathBuf>) {
+fn is_ext(path: &Path, ext: &str) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))
+}
+
+/// 처리 대상 `.pdf`와 북마크 파일 `.xlsx`/`.csv`(전부 대소문자 무시)를 한 번의 재귀
+/// 순회로 수집. `x.pdf.backup`은 확장자가 backup이라 자연히 제외된다. 숨김 파일과
+/// Excel이 열려 있는 동안 만드는 잠금 파일(`~$*.xlsx`)은 건너뛴다. 심볼릭 링크
+/// 디렉토리는 따라가지 않는다(순환 방지 — entry의 file_type은 링크를 해석하지 않음).
+fn collect_files(dir: &Path, pdfs: &mut Vec<PathBuf>, sheets: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -174,11 +231,18 @@ fn collect_pdfs(dir: &Path, out: &mut Vec<PathBuf>) {
         };
         let path = entry.path();
         if file_type.is_dir() {
-            collect_pdfs(&path, out);
-        } else if file_type.is_file()
-            && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
-        {
-            out.push(path);
+            collect_files(&path, pdfs, sheets);
+        } else if file_type.is_file() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') || name.starts_with("~$") {
+                continue;
+            }
+            if is_ext(&path, "pdf") {
+                pdfs.push(path);
+            } else if is_ext(&path, "xlsx") || is_ext(&path, "csv") {
+                sheets.push(path);
+            }
         }
     }
 }
@@ -301,7 +365,13 @@ fn finish(job: &mut BatchImportJob) {
     text.push_str("PDF Outliner — 폴더 일괄 북마크 적용 로그\n");
     text.push_str(&format!("실행 시각: {}\n", job.started_at.format("%Y-%m-%d %H:%M:%S")));
     text.push_str(&format!("대상 폴더: {}\n", job.folder.to_string_lossy().nfc().collect::<String>()));
-    text.push_str(&format!("북마크 파일: {}\n", job.sheet_path.to_string_lossy().nfc().collect::<String>()));
+    for sheet in &job.sheet_files {
+        text.push_str(&format!("북마크 파일(읽은 순서): {}\n", rel_display(sheet, &job.folder)));
+    }
+    for note in &job.setup_notes {
+        text.push_str(note);
+        text.push('\n');
+    }
     text.push_str("----\n");
     for entry in &job.log {
         text.push_str(&format!("[{}] {} — {}\n", entry.outcome.label(), entry.rel_path, entry.outcome.detail()));
@@ -328,10 +398,15 @@ pub fn show_panel(ui: &mut egui::Ui, app: &mut crate::app::PdfViewerApp) {
     ui.heading("폴더 일괄 북마크 적용");
     ui.add_space(6.0);
     ui.label(format!("대상 폴더: {}", job.folder.to_string_lossy().nfc().collect::<String>()));
-    ui.label(format!(
-        "북마크 파일: {}",
-        crate::app::display_filename(&job.sheet_path)
-    ));
+    // 자동 인식된 북마크 파일들 — 어떤 파일이 어떤 순서로 적용되는지 사용자가 확인
+    // 화면에서 바로 볼 수 있어야 한다(선택 다이얼로그가 없으므로 여기가 유일한 안내).
+    ui.label(format!("자동 인식된 북마크 파일 {}개 (xlsx → csv 순으로 적용):", job.sheet_files.len()));
+    for sheet in &job.sheet_files {
+        ui.label(format!("    • {}", rel_display(sheet, &job.folder)));
+    }
+    for note in &job.setup_notes {
+        ui.colored_label(ui.visuals().warn_fg_color, note);
+    }
     ui.add_space(6.0);
 
     let mut close = false;
@@ -372,7 +447,10 @@ pub fn show_panel(ui: &mut egui::Ui, app: &mut crate::app::PdfViewerApp) {
                 ui.label(note.clone());
             }
             ui.add_space(8.0);
-            if ui.button("닫기").clicked() {
+            // 배치 전에 보던 문서가 있으면 그 자리로 복귀하는 버튼(2026-07-19 요청),
+            // 없으면 그냥 닫기 — 실제 복귀 처리는 아래 close 블록에서.
+            let label = if job.return_to.is_some() { "되돌아가기" } else { "닫기" };
+            if ui.button(label).clicked() {
                 close = true;
             }
         }
@@ -401,7 +479,17 @@ pub fn show_panel(ui: &mut egui::Ui, app: &mut crate::app::PdfViewerApp) {
     }
 
     if close {
-        app.batch_import = None;
+        let return_to = app.batch_import.take().and_then(|job| job.return_to);
+        if let Some((path, page)) = return_to {
+            // 열린 파일은 배치 대상에서 제외되므로(SkippedOpenFile) 문서는 보통 그대로
+            // 열려 있다 — 그 경우 페이지만 복원하면 된다. 배치 중에 사용자가 다른
+            // 문서를 열었거나 닫았으면 원래 파일을 다시 연다(북마크 변경사항이 있으면
+            // request_open_file의 저장 확인 플로우를 그대로 탄다).
+            if app.current_file.as_deref() != Some(path.as_path()) {
+                app.request_open_file(path);
+            }
+            app.go_to_page(page);
+        }
     }
 }
 
@@ -430,6 +518,44 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../pdf-samples/{name}"))
     }
 
+    /// 북마크 파일 자동 인식: 폴더에 xlsx/csv가 없으면 Err. 같은 PDF의 행이 xlsx와
+    /// csv 양쪽에 있으면 xlsx가 이기고(우선순위 xlsx → csv), 뒤의 중복은 건너뛰며
+    /// setup_notes에 기록된다.
+    #[test]
+    fn sheets_are_autodetected_xlsx_wins_over_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::copy(sample("KKZ000160_01.pdf"), root.join("a.pdf")).unwrap();
+        assert!(prepare_job(root.to_path_buf()).is_err(), "북마크 파일 없음 = Err");
+
+        let xlsx_rows = vec![BookmarkRow {
+            order: 1,
+            filename: "a.pdf".to_string(),
+            depth: 0,
+            title: "엑셀에서 온 장".to_string(),
+            page: 1,
+        }];
+        import_export::export_xlsx(&xlsx_rows, &root.join("우선.xlsx")).unwrap();
+        std::fs::write(
+            root.join("나중.csv"),
+            "\u{FEFF}순서,파일명,계층,북마크명,페이지번호\n1,a.pdf,0,CSV에서 온 장,1\n2,a.pdf,1,CSV 절,1\n",
+        )
+        .unwrap();
+
+        let job = prepare_job(root.to_path_buf()).unwrap();
+        assert_eq!(job.sheet_files.len(), 2);
+        assert!(is_ext(&job.sheet_files[0], "xlsx"), "xlsx가 먼저 와야 함");
+        assert_eq!(job.matched_count, 1);
+        // xlsx의 행(1개)이 채택되고, csv의 중복 행 2개는 건너뛴 기록이 남는다.
+        assert_eq!(job.rows_by_filename["a.pdf"].len(), 1);
+        assert_eq!(job.rows_by_filename["a.pdf"][0].title, "엑셀에서 온 장");
+        assert!(
+            job.setup_notes.iter().any(|n| n.contains("[중복]") && n.contains("나중.csv")),
+            "{:?}",
+            job.setup_notes
+        );
+    }
+
     /// 전체 파이프라인 실 구동: 하위 폴더 포함 재귀 수집 → 매칭 파일 처리(원본은
     /// .backup으로 rename, 결과는 원래 이름) → 손상 PDF는 실패 후 원본 복원 → 매칭 행
     /// 없는 파일은 건너뜀 → 폴더 루트에 타임스탬프 .log 파일 + 통계.
@@ -454,7 +580,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut job = prepare_job(root.to_path_buf(), csv).unwrap();
+        let mut job = prepare_job(root.to_path_buf()).unwrap();
+        assert_eq!(job.sheet_files, vec![csv]);
         assert_eq!(job.files.len(), 4);
         assert_eq!(job.matched_count, 3);
 
@@ -503,7 +630,7 @@ mod tests {
         let csv = root.join("bookmarks.csv");
         std::fs::write(&csv, "\u{FEFF}순서,파일명,계층,북마크명,페이지번호\n1,a.pdf,0,장,1\n").unwrap();
 
-        let mut job = prepare_job(root.to_path_buf(), csv).unwrap();
+        let mut job = prepare_job(root.to_path_buf()).unwrap();
         job.phase = JobPhase::Running;
         let ctx = egui::Context::default();
         let open = root.join("a.pdf");

@@ -240,8 +240,8 @@ pub struct PdfViewerApp {
     /// 저장" 플로우, §7 "열린 파일 외부 변경 추적" 참고).
     pub save_as_requested: bool,
 
-    /// 폴더 일괄 북마크 적용 잡(`batch_import` 모듈). Some인 동안 뷰어 영역이 진행/로그
-    /// 화면으로 전환되고, 매 프레임 `batch_import::poll`이 1파일씩 진행시킨다.
+    /// 폴더 일괄 북마크 적용 잡(`batch_import` 모듈). Some인 동안 뷰어 영역이 확인/진행/
+    /// 로그 화면으로 전환되고, 매 프레임 `batch_import::poll`이 1파일씩 진행시킨다.
     pub batch_import: Option<crate::batch_import::BatchImportJob>,
 
     pub status_message: Option<String>,
@@ -749,11 +749,16 @@ impl PdfViewerApp {
         }
     }
 
-    /// 폴더 일괄 북마크 적용 시작 — 잡 준비(파싱/PDF 수집)까지만 하고, 실제 처리는
-    /// 뷰어 영역의 확인 화면에서 "시작"을 눌러야 진행된다(`batch_import` 모듈 참고).
-    pub fn start_batch_import(&mut self, folder: PathBuf, sheet_path: PathBuf) {
-        match crate::batch_import::prepare_job(folder, sheet_path) {
-            Ok(job) => self.batch_import = Some(job),
+    /// 폴더 일괄 북마크 적용 시작 — 폴더만 받으면 안의 xlsx/csv를 자동 인식해 잡을
+    /// 준비하고(파싱/PDF 수집까지만, 파일은 안 건드림) 뷰어 영역이 확인 화면으로
+    /// 전환된다. 실제 처리는 거기서 "시작"을 눌러야 진행된다(`batch_import` 모듈 참고).
+    pub fn start_batch_import(&mut self, folder: PathBuf) {
+        match crate::batch_import::prepare_job(folder) {
+            Ok(mut job) => {
+                // 완료 화면의 "되돌아가기"가 복귀할 자리 — 배치 직전에 보던 문서/페이지.
+                job.return_to = self.current_file.clone().map(|p| (p, self.current_page));
+                self.batch_import = Some(job);
+            }
             Err(msg) => self.status_message = Some(format!("폴더 일괄 적용 취소: {msg}")),
         }
     }
