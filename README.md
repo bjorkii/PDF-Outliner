@@ -44,12 +44,17 @@ PDF 북마크(목차) 조작 기능과 빠르고 편리한 내용 조회를 목�
 
 ## 다운로드
 
-[Releases](https://github.com/bjorkii/PDF-Outliner/releases)에서 플랫폼에 맞는 zip을
-받아 압축을 풀고 실행하세요.
+[Releases](https://github.com/bjorkii/PDF-Outliner/releases)에서 플랫폼에 맞는 설치 파일을 받으세요.
+
+- **macOS**: Apple Silicon은 `...-macos-arm64.dmg`, Intel은 `...-macos-x64.dmg`를 열고 `PDF Outliner`를 `Applications` 폴더로 끌어다 놓습니다.
+- **Windows**: `...-windows-x64-setup.exe`를 실행해 설치합니다.
 
 개발자 등록 없이 배포하므로 최초 실행시 경고 문구가 출력됩니다. 다음과 같이 조치하면 이후 정상 실행됩니다.
-- **macOS**: 최초 실행시 "확인되지 않은 개발자" 경고 &rarr; 이후 `시스템 설정` > `개인정보 보호 및 보안`으로 이동하여 하단에서 `그래도 열기` 선택 &rarr; 재실행
-- **Windows**: 최초 실행시 "'알 수 없는 게시자' 또는 'PC가 보호되었습니다' 경고 &rarr; `추가 정보` 선택 &rarr; `실행` 선택
+- **macOS**: 처음 실행하기 전에 한 번, 터미널에서 아래 명령을 입력한 뒤 실행
+  ```bash
+  xattr -dr com.apple.quarantine "/Applications/PDF Outliner.app"
+  ```
+- **Windows**: 설치 파일 실행 시 "Windows의 PC 보호" 경고 &rarr; `추가 정보` 선택 &rarr; `실행` 선택
 
 ## 소스에서 빌드
 
@@ -59,12 +64,18 @@ cd PDF-Outliner
 cargo build --workspace --release
 ```
 
-pdfium 동적 라이브러리가 런타임에 필요합니다(릴리스 zip에는 이미 동봉됨). 직접 빌드해
+pdfium 동적 라이브러리가 런타임에 필요합니다(릴리스 설치 파일에는 이미 동봉됨). 직접 빌드해
 실행할 때는 `PDFIUM_DYLIB_PATH` 환경변수로 경로를 지정하세요 —
 [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries)에서 플랫폼별
 바이너리를 받을 수 있습니다.
 
 ## What's New
+
+### v0.2.1 (2026-09-14)
+- **확대/축소/스크롤 렌더링 속도개선** - 보조프로세스 운용, 지연시간 개선, 확대/축소 단계 및 배율 조정
+- **검색 목록 사이드바** 기능 추가
+- **라이브 업데이트** 기능 추가 - 현재 열린 문서의 파일명, 내용 등이 변경된 경우 자동 갱신해서 보여줌.
+- 북마크 생성시 클립보드 내용 자동 채우기
 
 ### v0.2.0 (2026-07-19)
 - **폴더 일괄 북마크 적용** 추가

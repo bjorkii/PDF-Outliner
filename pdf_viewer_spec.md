@@ -38,6 +38,11 @@ pdfium dylib 탐색 순서(`crates/ui/src/app.rs`의 `create_engine()`, 2026-07-
 - `cargo run --example dump_chars -p pdf_engine -- <pdfium_dylib> <pdf> <page_0based>` — 페이지 내 문자별 좌표/회전각 출력
 - `cargo run --example render_crop -p pdf_engine -- <pdfium_dylib> <pdf> <page_0based> <out.png> [char_index]` — 렌더링 결과를 PNG로 저장해 Read 툴로 육안 확인(화면 캡처 안 되는 세션에서 유일한 시각 확인 수단)
 - `cargo run --example smoke_test -p pdf_engine -- <pdfium_dylib> <pdf> [최대_페이지수]` — 임의 PDF 렌더링/텍스트선택 구조적 정상성 확인
+- `cargo run --release --example bench_render -p pdf_engine -- <pdfium_dylib> <pdf> [page_0based] [panel_px]` — 배율별 "페이지 전체 렌더" vs "화면 영역만 렌더" 시간과 픽셀 일치(2026-09-13)
+- `cargo run --release --example bench_tiles -p pdf_engine -- <pdfium_dylib> <pdf> [page_0based]` — 영역 렌더의 /Rotate 일치·타일 경계 이음새(bleed별)·페이지 재로드 비용
+- `cargo run --release --example bench_tile_schedule -p pdf_engine -- <pdfium_dylib> <pdf> [page_0based]` — 타일 렌더를 프레임 예산으로 나눴을 때 선명해지기까지 프레임 수·한 장 최대 시간(타일 방식 기각 근거, §7)
+- `cargo run --release --example search_context -p pdf_engine -- <pdfium_dylib> <pdf> <검색어> [최대 출력 수]` — 검색 결과 앞뒤 문맥 추출 검증(일치 문자열이 검색어와 다른 건수)
+- 앱 진단: `PDF_RENDER_WORKER=0`(렌더링 보조 프로세스 끄고 동기 렌더링) / `~/Library/Logs/PDF Outliner/panic.log`(패닉 메시지 + 백트레이스 + 최근 동작 기록 400줄, 1MB 넘으면 `panic.log.1`로 교체) / 함수 이름이 찍히는 진단 빌드: `CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo build --release -p ui`
 - 테스트용 실제 PDF 샘플: `pdf-samples/` 안에 여러 개. **일부는 사용자가 수동 GUI 테스트에 실사용 중이라 자동화 테스트가 함부로 건드리면 안 됨**(§7 "테스트 설계 원칙" 참고) — 자동화 테스트는 항상 pristine 백업을 임시 디렉터리에 복사해서 쓸 것.
   - **⚠️ 이 폴더 전체가 git에서 완전 제거됨(2026-07-17)**: 장차 저장소를 public으로 전환할 때 공개되면 안 되는 자료라서(사용자 결정) `git filter-repo`로 **과거 히스토리까지 전부 퍼지**하고 `.gitignore`에 `pdf-samples/` 추가 — 이 로컬 머신에만 존재하는 로컬 전용 폴더다. `cargo test`가 이 폴더의 특정 파일(BZR001088_01.pdf, KKZ000160_01.pdf, "embeddedoutline 복사본.pdf" 등)을 필요로 하므로 **테스트는 이 머신에서만 통과**하고, 새 클론에서는 해당 테스트가 실패한다(CI는 테스트를 돌리지 않고 빌드만 하므로 릴리스 무관). 퍼지 직전 전체 히스토리 백업: `../PDF-Outliner-history-backup-pre-samples-purge.bundle`(리포 밖, 커밋 금지).
   - `pdf-samples/SQ-main.pdf`(2026-07-13 추가): 358페이지, 링크 3641개, 실제 한글 텍스트를 담은 큰 실사용 문서 — 링크/검색 기능을 대량·현실적 데이터로 검증할 때 이 파일을 씀(§3의 링크·검색 절 전부 이 파일로 검증함).
@@ -217,13 +222,13 @@ CSV/Excel 컬럼 순서 동일, 헤더는 한글, CSV는 UTF-8 BOM 적용(§2).
 ### macOS
 - `.app` 번들: 직접 작성한 `scripts/package-macos.sh`가 `cargo build --release --target <triple>`로 빌드 후 수동으로 `Contents/{MacOS,Frameworks}` 구조 + `Info.plist` 생성(cargo-bundle/cargo-packager 미사용 — 의존성 추가 없이 셸 스크립트로 충분).
 - **ad-hoc 코드서명 적용**(`codesign --sign -`, 무료, 계정 불필요) — Apple Silicon은 서명이 전혀 없는 바이너리는 아예 실행이 안 되기 때문에 기술적으로 필수. 유료 Developer ID 서명·notarization은 미적용 → 다른 기기에서 실행 시 Gatekeeper가 "확인되지 않은 개발자" 경고를 띄우며, 사용자는 우클릭→열기(또는 시스템 설정에서 "그래도 열기")로 우회해야 함. App Store/불특정 다수 배포에는 부적합, 소수 배포용.
-- `.pkg`화(`pkgbuild`/`productbuild`)는 미착수 — zip 배포로 충분하다고 판단.
+- **배포 형식 dmg(2026-09-14, zip에서 변경)**: `package-macos.sh`가 서명한 `.app` + `Applications` 심볼릭 링크 + "처음 실행 전에 읽어주세요.txt"를 `hdiutil create -format UDZO`로 묶음(CI의 간헐적 "Resource busy" 대비 3회 재시도). 첫 실행 안내는 "그래도 열기" 대신 **터미널 `xattr -dr com.apple.quarantine "/Applications/PDF Outliner.app"`**(사용자 결정). `.pkg`는 미착수.
 - **PDF 파일 연결(Finder 더블클릭/"다음으로 열기") 완료 — 사용자 실 점검 확인(2026-07-17)**. 두 층의 수정이 필요했음:
   - (1) `package-macos.sh`의 Info.plist에 `CFBundleDocumentTypes`(`LSItemContentTypes: com.adobe.pdf`, Role Viewer, `LSHandlerRank: Alternate`) 추가 — 이게 없으면 Finder가 "PDF document 포맷을 열 수 없다"며 실행 자체를 거부함.
   - (2) **파일 경로 전달은 argv가 아니라 Apple Event(kAEOpenDocuments)** — macOS는 더블클릭한 파일 경로를 CLI 인자로 주지 않음(실측: argv에는 실행 파일 경로뿐). winit은 이 이벤트를 전혀 지원하지 않고, **콜드 스타트(앱이 안 떠 있을 때 더블클릭)의 이벤트는 NSApplication `finishLaunching` 시퀀스 도중, 즉 `eframe::run_native()` 내부에서 델리게이트로 동기 배달**되므로 앱 코드가 아무리 일찍 `NSAppleEventManager`에 핸들러를 등록해도 절대 못 받음(앱 레벨 등록은 이미 떠 있는 인스턴스로의 재오픈(warm)만 받는 것 실측 확인). **해결: bjorkii/winit 포크(한글 IME 패치와 같은 브랜치)에 `application:openURLs:` 델리게이트 메서드를 직접 추가**(`src/platform_impl/macos/app_state.rs`, 커밋 e5eebad8) — 받은 경로를 프로세스 전역 큐에 쌓고 `winit::platform::macos::take_opened_files()`로 노출. 앱 쪽은 `crates/ui/src/macos_open_file.rs`(얇은 래퍼) + `app.rs`의 `poll_macos_open_file_events`(매 프레임 폴링 — 이미 실행 중일 때 다른 PDF를 열어도 같은 인스턴스로 이벤트가 오므로 시작 시 1회가 아니라 계속 폴링해야 함). 콜드 스타트/웜 재오픈 둘 다 실 점검 확인 완료.
 
 ### Windows
-- exe + `pdfium.dll`을 `scripts/package-windows.ps1`이 zip으로 묶음. `.msi`(`cargo-wix`/`cargo-packager`)는 미착수(우선순위 낮음, zip으로 충분).
+- **배포 형식 setup.exe(2026-09-14, zip에서 변경)**: `scripts/package-windows.ps1`이 exe + `pdfium.dll`을 모은 뒤 **Inno Setup 6**(`scripts/windows-installer.iss`, 러너에 없으면 choco로 설치)으로 설치 파일을 만듦. 관리자 권한 없이 사용자 폴더 설치 가능(`PrivilegesRequired=lowest`, 설치 시 모든 사용자 선택 가능), 시작 메뉴·선택적 바탕화면 아이콘·제거 프로그램, PDF "연결 프로그램" 목록 등록(`OpenWithProgids`, 기본 앱은 안 바꿈). `AppId` GUID는 업그레이드 식별자라 바꾸지 말 것. `.msi`는 미착수.
 - **코드서명 없음** → SmartScreen 경고 뜸(사용자가 감수하기로 함).
 - **"연결 프로그램" 지정 시 앱 이름이 "ui"로 표시되던 버그 수정(2026-07-17, 실물 Windows 실 점검 확인은 대기)**: winres가 `ProductName`/`FileDescription`을 명시하지 않으면 `CARGO_PKG_NAME`(크레이트 이름 "ui")으로 기본 채움(winres 0.1.12 lib.rs로 확인) — `crates/ui/build.rs`에서 `res.set("ProductName", "PDF Outliner")` 등 4개 필드를 명시해 해결. 파일 경로 전달은 macOS와 달리 argv 방식이라 기존 코드로 이미 동작(사용자 확인).
 - **VM(UTM 등) 미지원 — 사용자 확정(2026-07-17)**: UTM(맥 위 Windows 게스트)에서 실행하면 시작 즉시 `Error: Wgpu(NoSuitableAdapterFound)`로 종료(2026-07-13 실측; `WGPU_BACKEND=gl` 강제도 동일 실패 — VM에 3D 가속 자체가 없음). **PDF 조작(pdfium/lopdf)은 전부 CPU 작업이라 wgpu와 무관** — wgpu는 GUI를 화면에 그리는 백엔드일 뿐이고, 창을 만드는 단계에서 그래픽 어댑터를 못 찾아 PDF 코드가 실행되기도 전에 죽는 것. 실물 Windows에선 v0.1.2부터 정상 확인됐으므로 VM 지원은 하지 않기로 확정. 나중에 재검토한다면 아래 두 방향이 후보 — **어느 쪽이든 대상 VM에서 실측이 선행돼야 하며, 검증 수단 없이 폴백 코드를 미리 넣지 않는다는 원칙(2026-07-13 결정) 유지**:
@@ -234,7 +239,7 @@ CSV/Excel 컬럼 순서 동일, 헤더는 한글, CSV는 UTF-8 BOM 적용(§2).
 ### 공통
 - PDFium 동적 라이브러리를 패키지 안에 동봉 완료: CI가 `bblanchon/pdfium-binaries`(태그는 `.github/workflows/release.yml`의 `PDFIUM_TAG_ENCODED`로 고정)에서 플랫폼별 바이너리를 받아 각 패키징 스크립트에 전달.
 - `crates/ui/src/app.rs`의 `create_engine()`이 실행 파일 기준 상대경로(macOS: `../Frameworks/libpdfium.dylib`, Windows: 같은 디렉토리의 `pdfium.dll`)를 최우선으로 탐색하도록 수정 — 기존 이 머신 전용 Homebrew 하드코딩 경로는 개발 편의용 최후 폴백으로만 남김.
-- CI: `.github/workflows/release.yml` — GitHub Actions matrix(`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-pc-windows-msvc`), `v*.*.*` 태그 push 또는 수동 실행(`workflow_dispatch`)으로 트리거, 3개 zip을 GitHub Release에 자동 첨부.
+- CI: `.github/workflows/release.yml` — GitHub Actions matrix(`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-pc-windows-msvc`), `v*.*.*` 태그 push 또는 수동 실행(`workflow_dispatch`)으로 트리거, macOS dmg 2개(arm64/x64) + Windows setup.exe를 GitHub Release에 자동 첨부(릴리스 본문에 설치·첫 실행 안내 포함). 수동 실행은 빌드·패키징만 검증하고 릴리스는 만들지 않는다.
 - 로컬 검증: 이 머신(arm64 mac)에서 `scripts/package-macos.sh aarch64-apple-darwin <pdfium dylib>`로 만든 `.app`을 실제로 실행해 358페이지 샘플 PDF 렌더링 + 북마크 사이드바까지 정상 동작 확인함(2026-07-13). x86_64 mac/Windows 빌드는 이 머신에서 직접 실행 검증 불가 — CI 실행 후 사용자가 실 점검 확인 필요.
 - **앱 아이콘 완료(2026-07-14)**: `assets/icon/icon.svg`(핑크 그라데이션 배경 + 흰 문서 + 책갈피 리본, Inkscape로 1024×1024 PNG 래스터화 후 `sips`+`iconutil`로 `.icns`, Pillow로 `.ico` 생성) → macOS는 `scripts/package-macos.sh`가 `.icns`를 번들에 넣고 `Info.plist`의 `CFBundleIconFile`로 연결, Windows는 `crates/ui/build.rs`(`winres` 크레이트, `[target.'cfg(windows)'.build-dependencies]`)가 컴파일 시 exe에 `.ico`를 리소스로 심음. macOS는 Finder에서 실 점검 확인됨 — Windows는 실물 PC 확보 전이라 exe 아이콘 표시 여부 미확인.
   - **후속 버그 2건 발견 및 수정(2026-07-16, 사용자 실 점검 확인)**: (1) Finder에선 핑크 아이콘이 잘 보이는데 **Dock/Cmd+Tab 전환화면에선 eframe 기본 아이콘("e" 로고)**이 뜨는 문제 — 원인은 `ViewportBuilder`에 `.with_icon(...)`을 안 주면 eframe이 `native/app_icon.rs`의 `AppTitleIconSetter`로 실행 중인 NSApplication 아이콘을 자기 기본값(`load_default_egui_icon`)으로 **런타임에 강제 설정**하기 때문 — Finder는 이 경로와 무관하게 번들 `.icns`만 봄. `crates/ui/src/main.rs`에서 `eframe::icon_data::from_png_bytes(include_bytes!(".../icon-master-1024.png"))`로 우리 아이콘을 직접 `.with_icon()`에 넘겨 해결. (2) 아이콘을 명시적으로 넣고 나니 **다른 앱보다 커 보이는** 문제 발견 — macOS 아이콘 관례(캔버스 가장자리에 ~8% 여백)를 안 지키고 배경이 1024 캔버스 끝까지 꽉 차게 그려져 있던 탓. `icon.svg`를 다시 그리지 않고 기존 내용 전체를 `<g transform="translate(80,80) scale(0.84375)">`로 감싸 축소+중앙정렬만 추가 → `icon-master-1024.png`/`.icns`/`.ico` 전부 재생성. 두 수정 다음 릴리스(v0.1.5)에 반영 예정.
@@ -334,6 +339,15 @@ CSV/Excel 컬럼 순서 동일, 헤더는 한글, CSV는 UTF-8 BOM 적용(§2).
 
 ---
 
+### 뷰어 성능·검색·라이브 업데이트 라운드 (2026-09-13~14, v0.2.1 — 전부 사용자 실 점검 확인)
+- **줌/스크롤**: 확대/축소 버튼은 SumatraPDF 고정 단계표(25~800%, `ViewportState::ZOOM_STEPS`), 핀치·Ctrl+휠은 연속 곱. 연속 스크롤 줌 시 스크롤 보정을 "오프셋×폭비" → 앵커(페이지 i의 f% 지점) 재계산으로 교체(고정 `PAGE_GAP`에도 비율이 곱해져 뒤쪽 페이지일수록 어긋났음, `viewer_panel.rs` `anchor_at`, 왕복 줌 테스트 포함). 줌 중엔 기존 텍스처를 늘려 보여주고 멎은 뒤 재렌더.
+- **렌더링 보조 프로세스**(`render_worker.rs`): 같은 실행 파일을 `--render-worker`로 띄워 pdfium 렌더링만 맡김 — stdin/stdout 이진 프레임, 화면 번호(epoch)로 대기열의 낡은 요청 폐기, 쪽 단위 앞뒤 페이지 선렌더(고배율은 픽셀 수 제한), 페이지 전환 직후 0.3초 직전 화면 유지. 뱅글이·조작 중 버벅임 해소. `PDF_RENDER_WORKER=0` 또는 보조 프로세스 사망 시 동기 렌더링으로 자동 대체.
+- **wgpu "Texture has been destroyed" 크래시 수정**(`texture_cache.rs`): 캐시에서 빠진 텍스처를 다음 프레임 시작 때 해제 + 텍스처 생성은 메인 스레드에서만. 동작 기록 링 버퍼(`trace.rs`)와 `panic.log`(`crash_log.rs`, 1MB 교체) 추가.
+- **검색 결과 사이드바**(`search_panel.rs`): 오른쪽 도킹, 핀 버튼으로 항상 위 분리 창/재도킹. 페이지|결과(앞뒤 문맥 + 일치 하이라이트) 컬럼, 경계 드래그로 폭 조절, 문서 순서, 검색 중에도 찾은 만큼 표시. 포커스 `FocusArea::SearchResults` — Ctrl/Cmd+F·검색창·목록 클릭으로 진입, ↑↓ 선택 이동, Tab은 들어오기 직전 영역으로(뷰어↔북마크 체인 유지). 선택 결과를 좌표 계산으로 화면 중앙에(쪽 단위 팬 / 연속 스크롤 세로 오프셋 + 가로 이동 `continuous_pan_x`, 트랙패드 좌우 스와이프도 지원). ×·검색어 지움 = 검색 모드 해제. 뷰어 하이라이트: 선택 결과만 채움, 나머지는 테두리만(채움이 원문을 흐리게 함), 연속 스크롤에서도 표시.
+- **라이브 업데이트**(`file_watch.rs`, SumatraPDF 방식·같은 상수): 폴더 감시 → 마지막 이벤트 후 500ms 조용하면 크기·수정 시각 확인, 직전과 다르면 쓰는 중으로 보고 대기, 최대 5초. 자기 저장은 "알고 있는 상태"로 무시. 보던 화면(페이지·배율·팬·스크롤·모드) 유지, 보던 페이지가 없어지면 첫 페이지, 검색 중이면 목록만 갱신(화면·포커스 유지), 저장 안 한 북마크 편집은 유지, 열기 실패 시 기존 문서 유지. Finder 이름 변경 추적(macOS)과 함께 실 점검 확인.
+- 북마크 추가 시 클립보드 텍스트를 초기 제목으로(공백 정리, 200자 제한, 비었으면 "새 북마크"). 툴바 페이지 입력칸은 숫자 3자리 폭·가운데 정렬.
+- 배포: zip → macOS dmg / Windows Inno Setup setup.exe(§5).
+
 ## 7. 값진 기술적 교훈 (다음 세션이 같은 삽질을 반복하지 않도록)
 
 ### pdfium-render 0.9.2 API가 스펙 작성 당시 가정과 달랐던 것들
@@ -380,6 +394,13 @@ CSV/Excel 컬럼 순서 동일, 헤더는 한글, CSV는 UTF-8 BOM 적용(§2).
 **조치**: 즉시 0.29.1로 롤백(`crates/ui/Cargo.toml`의 `egui`/`eframe` 버전 되돌림 + 그 사이 API 차이 때문에 바꿨던 코드 전부 원복 — `App::update`↔`App::ui`, `SidePanel`/`TopBottomPanel`↔통합 `Panel`, `wants_keyboard_input`↔`egui_wants_keyboard_input`, `close_menu`↔`close`, `rect_stroke` 3인자↔4인자, `FontData` Arc 래핑 등). 이 업그레이드 시도와 별개로 **같은 시점에 진행 중이던 검색 기능 수정(검색창 포커스 관리, Enter 항상 재검색, 결과 다중 하이라이트)은 손대지 않고 그대로 보존**했다 — egui 버전과 무관한 우리 쪽 로직이었기 때문. 롤백 후 `cargo build`/`cargo test` 전부 통과 재확인.
 
 **교훈**: 체인지로그에 정확히 맞아떨어지는 근거(owns_ime_events)가 있어도, 여러 마이너 버전을 한 번에 건너뛰는 GUI 프레임워크 업그레이드는 **이 세션처럼 화면을 볼 수 없는 환경에서 시도하기엔 리스크가 실제로 구현됨** — 다음에 이 IME 버그를 다시 파고들 땐 (a) 사용자가 직접 로컬에서 버전을 올려보고 결과를 알려주는 방식으로 하거나, (b) egui-winit의 IME 관련 소스만 훨씬 좁게 읽어서 우리 코드 레벨에서 뭔가 조정할 여지가 있는지부터 찾는 게 나을 것 — 프레임워크 전체를 통째로 올리는 건 최후의 수단으로 미룰 것.
+
+### 렌더링 아키텍처 결정과 교훈 (2026-09-13~14)
+- **타일(보이는 영역만) 렌더링은 기각**: SumatraPDF RenderCache 방식으로 구현해 보니 pdfium 시간은 10~40배 짧았지만(`bench_render`), UI 스레드 하나에서는 조작 중에 타일을 렌더해 팬·관성 스크롤이 덜컹이고 선명해지기까지 여러 프레임이 걸려 **사용자 체감이 기존보다 나빴다**. 교훈: 문제는 렌더 시간이 아니라 "UI 스레드에서 렌더한다"는 것. 코드는 제거함.
+- **pdfium 병렬화는 스레드가 아니라 프로세스**: 한 프로세스 안 두 스레드의 동시 호출은 세그폴트(§3 검색 절). 프로세스는 메모리가 분리돼 각자 pdfium을 가지므로 안전하고, 같은 실행 파일을 보조 프로세스로 쓰면 패키징 추가물이 없다. 텍스트 선택·링크·검색은 메인 프로세스 pdfium 그대로.
+- **egui-wgpu 0.29.1은 `free_texture`를 `queue.submit` 전에 호출한다**(`winit.rs` `paint_and_update_textures`) → 이번 프레임에 그린 텍스처가 같은 프레임 안에서 마지막 참조를 잃으면 제출 시 "Texture ... has been destroyed" 패닉. release는 `panic = "abort"`라 즉시 종료되고 .app 실행 시 메시지가 어디에도 안 남아 원인 파악이 어려웠음 → `panic.log` 도입. 캐시에서 빠진 텍스처를 한 프레임 보관 후 해제하는 구조로 막았으나 **정확한 해제 경로는 특정하지 못함** — 재발하면 `panic.log`의 동작 기록에서 텍스처 번호(`Managed(N)`)를 대조할 것.
+- **배율 %는 "폭 맞춤 = 100%" 유지**(실제 크기 72dpi 기준은 사용자가 검토 후 기각): 한 문서에 크기가 섞이면 페이지마다 폭이 달라져 연속 스크롤 배치가 애매해짐. 대신 GPU 텍스처 한도(16384px) 때문에 도달 가능한 최대 %가 창 폭에 따라 달라진다(넓은 창의 A4 세로 페이지는 약 394%에서 멈춤).
+- **파일 감시**: 파일이 아니라 폴더를 감시해야 원자적 저장(임시 파일 → rename)도 잡힌다. macOS FSEvents는 파일명을 NFD로 줄 수 있어 NFC로 맞춰 비교. 읽기 이벤트(Access)는 우리 pdfium이 파일을 여는 것도 걸리므로 무시.
 
 ### 테스트/디버깅 설계 원칙
 - headless 예제·테스트로 pdfium·lopdf 로직을 실제 라이브러리로 검증하는 게 화면 캡처 불가 세션에서 유일하게 강한 검증 수단. `render_crop`으로 PNG를 저장해 Read 툴로 육안 확인하는 것도 유효한 시각 검증 방법. GUI 상호작용 버그(호버, 드래그, 키보드 단축키 등) 자체는 headless로 발견 불가능 — 사용자의 실 점검 리포트에 의존할 수밖에 없음.
