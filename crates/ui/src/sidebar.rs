@@ -332,13 +332,37 @@ fn request_scroll_animation_repaint(drag_state: &mut DragState) {
 
 /// "+"버튼과 Cmd+B가 공유하는 로직: 선택된 항목의 자식(없으면 최상위)으로 새 북마크를
 /// 추가하고, 조상 노드를 펼쳐서 보이게 한 뒤, 곧바로 이름 편집 모드로 들어간다.
+///
+/// 제목 초기값은 클립보드의 텍스트다 — 뷰어에서 장·절 제목을 드래그해 복사(Cmd+C)한 뒤
+/// Cmd+B를 누르면 그대로 제목이 된다. 편집 필드는 전체 선택 상태로 열리므로 원치 않으면
+/// 바로 타이핑해 덮어쓰면 된다. 클립보드가 비었거나 텍스트가 아니면 "새 북마크".
+/// 노드 자체도 같은 제목으로 만들어서, Esc로 편집을 취소해도 보이던 제목이 남는다.
 fn add_new_bookmark(app: &mut PdfViewerApp, drag_state: &mut DragState) {
-    let new_id = app.add_bookmark_under_selection();
+    let title = arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.get_text())
+        .ok()
+        .and_then(|text| bookmark_title_from_clipboard(&text))
+        .unwrap_or_else(|| "새 북마크".to_string());
+    let new_id = app.add_bookmark_under_selection(&title);
     for ancestor in ancestors_of(&app.bookmarks, new_id) {
         drag_state.collapsed.remove(&ancestor);
     }
-    drag_state.editing = Some((new_id, "새 북마크".to_string()));
+    drag_state.editing = Some((new_id, title));
     drag_state.focus_editing = true;
+}
+
+/// 북마크 제목으로 쓸 수 있는 최대 글자 수 — 본문을 통째로 복사해 둔 채 추가해도 사이드바가
+/// 한 문단짜리 항목으로 뒤덮이지 않게 자른다.
+const MAX_CLIPBOARD_TITLE_CHARS: usize = 200;
+
+/// 클립보드 텍스트를 한 줄 제목으로 정리한다. PDF에서 복사한 텍스트는 줄바꿈·탭·연속
+/// 공백이 섞여 있기 흔하므로 공백 하나로 합친다. 쓸 내용이 없으면 None.
+fn bookmark_title_from_clipboard(text: &str) -> Option<String> {
+    let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.is_empty() {
+        return None;
+    }
+    Some(title.chars().take(MAX_CLIPBOARD_TITLE_CHARS).collect())
 }
 
 fn render_nodes(
@@ -410,7 +434,7 @@ fn render_nodes(
                     // 직접 대입해 우회한다(request_scroll_animation_repaint와 동일 내용).
                     drag_state.scroll_animation_until =
                         Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
-                    // 텍스트 전체를 선택 상태로 둬서, 새로 만든 placeholder("새 북마크")나
+                    // 텍스트 전체를 선택 상태로 둬서, 새로 만든 항목의 초기 제목(클립보드 내용 또는 "새 북마크")이나
                     // F2/재클릭으로 연 기존 제목을 바로 타이핑해서 덮어쓸 수 있게 한다 —
                     // request_focus만으로는 커서만 옮겨갈 뿐 선택은 안 돼서 매번 수동으로
                     // 전체 선택(Cmd+A)해야 했다.
@@ -683,4 +707,31 @@ fn find_ancestors(nodes: &[BookmarkNode], id: Uuid, path: &mut Vec<Uuid>) -> boo
         path.pop();
     }
     false
+}
+
+#[cfg(test)]
+mod clipboard_title_tests {
+    use super::{bookmark_title_from_clipboard, MAX_CLIPBOARD_TITLE_CHARS};
+
+    /// PDF에서 여러 줄에 걸쳐 복사한 제목은 한 줄로 합쳐진다.
+    #[test]
+    fn line_breaks_and_runs_of_spaces_collapse() {
+        assert_eq!(
+            bookmark_title_from_clipboard("  제3장\n  전시 의료\t지원 체계 \r\n").as_deref(),
+            Some("제3장 전시 의료 지원 체계")
+        );
+    }
+
+    #[test]
+    fn blank_clipboard_falls_back() {
+        assert_eq!(bookmark_title_from_clipboard(""), None);
+        assert_eq!(bookmark_title_from_clipboard(" \n\t "), None);
+    }
+
+    /// 글자(char) 단위로 자르므로 한글 중간에서 바이트가 깨지지 않는다.
+    #[test]
+    fn long_text_is_truncated_by_chars() {
+        let title = bookmark_title_from_clipboard(&"가".repeat(500)).unwrap();
+        assert_eq!(title.chars().count(), MAX_CLIPBOARD_TITLE_CHARS);
+    }
 }

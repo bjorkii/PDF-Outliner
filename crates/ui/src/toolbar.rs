@@ -227,7 +227,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                             (format!("{m}+F"), "내용 검색"),
                             (format!("{m}+["), "이전 화면"),
                             (format!("{m}+]"), "다음 화면"),
-                            ("Tab".to_string(), "북마크↔뷰어"),
+                            ("Tab".to_string(), "북마크↔뷰어 (검색 목록에서는 직전 영역으로)"),
                             ("C".to_string(), "쪽 단위/연속 스크롤 전환"),
                         ] {
                             ui.label(key);
@@ -239,13 +239,14 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
 
             ui.separator();
 
-            // 트랙패드 핀치/마우스 휠 줌과 별개로, 비전문 사용자를 위한 명시적 버튼 병행 배치
+            // 트랙패드 핀치/마우스 휠 줌과 별개로, 비전문 사용자를 위한 명시적 버튼 병행 배치.
+            // 버튼은 고정 단계표로 움직인다(ViewportState::ZOOM_STEPS 문서 참고).
             if ui.button("➖").on_hover_text("축소").clicked() {
-                app.viewport.zoom_by(0.8);
+                app.viewport.zoom_out();
             }
             ui.label(format!("{:.0}%", app.viewport.zoom * 100.0));
             if ui.button("➕").on_hover_text("확대").clicked() {
-                app.viewport.zoom_by(1.25);
+                app.viewport.zoom_in();
             }
             // 폭 맞춤/쪽 맞춤 통합 토글(2026-07-18 요청) — 아이콘은 "누르면 무엇이 되는지"
             // 를 보여준다: 100%(폭 맞춤) 상태면 쪽 맞춤 아이콘을, 그 외에는 폭 맞춤
@@ -287,12 +288,16 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 app.go_to_page(prev);
             }
 
-            // "현재쪽" 입력창 폭을 "전체쪽" 숫자의 자릿수에 맞춘다 — 예전엔 50px 고정이라
-            // 총 페이지가 한 자릿수여도 입력창만 과도하게 넓어 보였다.
-            let digits = app.total_pages.max(1).to_string().len().max(1) as f32;
-            let field_width = digits * 8.0 + 16.0;
+            // "현재쪽" 입력창 — 숫자 3자리가 잘리지 않는 폭(천 쪽 이상 문서는 그 자릿수만큼)에
+            // 가운데 정렬(2026-09-14 요청). 폭은 실제 글꼴의 숫자 폭으로 계산한다.
+            let digits = app.total_pages.max(1).to_string().len().max(3) as f32;
+            let font_id = egui::TextStyle::Body.resolve(ui.style());
+            let digit_width = ui.fonts(|fonts| fonts.glyph_width(&font_id, '0'));
+            let field_width = (digit_width * digits).ceil() + 2.0;
             let response = ui.add(
-                egui::TextEdit::singleline(&mut app.page_number_input).desired_width(field_width),
+                egui::TextEdit::singleline(&mut app.page_number_input)
+                    .desired_width(field_width)
+                    .horizontal_align(egui::Align::Center),
             );
             if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 if let Ok(page) = app.page_number_input.trim().parse::<u32>() {
@@ -384,6 +389,17 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 // 잘못 처리했었음 — 이전 검색어의 결과를 계속 순회하는 버그였음).
                 if search_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     app.execute_search();
+                }
+                // 검색어를 모두 지우면 검색 모드를 끝낸다 — 결과·뷰어 하이라이트·결과 패널까지
+                // (2026-09-14 요청). 새 검색어를 입력하고 Enter를 누르면 다시 시작된다.
+                let search_active = !app.search_matches.is_empty()
+                    || app.search_running.is_some()
+                    || app.search_panel_open;
+                if search_response.changed() && app.search_query.trim().is_empty() && search_active {
+                    app.clear_search();
+                } else if search_response.gained_focus() || search_response.clicked() {
+                    // 검색창을 클릭하면(Ctrl/Cmd+F는 app.rs에서) 검색 결과 목록이 포커스를 갖는다.
+                    app.focus_search_results();
                 }
             });
         });

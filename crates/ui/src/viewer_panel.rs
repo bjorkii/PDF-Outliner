@@ -5,6 +5,99 @@ use pdf_engine::links::LinkTarget;
 use pdf_engine::selection::TextSelectionRange;
 use pdfium_render::prelude::*;
 
+/// 줌이 멎은 뒤 쪽 단위 모드가 재렌더링하기까지 기다리는 시간(초). 배율 표시와 화면상
+/// 크기는 즉시 바뀌고(기존 텍스처를 목표 크기로 늘려 그림) pdfium 렌더만 미룬다.
+const ZOOM_RENDER_DEBOUNCE_SECS: f64 = 0.12;
+/// 연속 스크롤 모드의 원해상도 업그레이드 디바운스(초). 보이는 페이지가 여러 장이라
+/// 업그레이드 비용이 커서 쪽 단위보다 조금 더 기다린다.
+const CONTINUOUS_RESCALE_DEBOUNCE_SECS: f64 = 0.2;
+/// 연속 스크롤 모드의 페이지 사이 간격(pt). 배율과 무관한 상수라 스크롤 보정을 비율
+/// 곱셈으로 하면 안 되는 이유가 된다(`anchor_at` 참고).
+const PAGE_GAP: f32 = 8.0;
+/// 쪽 단위 보기에서 페이지를 넘긴 직후 새 페이지 렌더 결과가 아직 없을 때, 직전 화면을 그대로
+/// 두는 시간(초). 동기 렌더링 시절 "렌더가 끝날 때까지 이전 화면이 남아 있던" 모습과 같게 해
+/// 흰 화면 깜빡임을 피한다. 이보다 오래 걸리면 흰 페이지로 자리만 잡는다.
+const PAGE_SWITCH_GRACE_SECS: f64 = 0.3;
+/// 앞뒤 페이지 미리 렌더링의 텍스처 크기 상한(픽셀 수, RGBA 약 96MB). 고배율에서 이웃까지
+/// 원해상도로 만들면 한 장에 수백 MB라, 넘기는 순간 보여줄 만큼만 만들고 넘긴 뒤 원해상도를
+/// 다시 요청한다.
+const PREFETCH_MAX_PIXELS: f32 = 24_000_000.0;
+
+/// 이웃 페이지를 미리 렌더링할 폭 — 현재 배율 폭을 넘지 않고, 픽셀 수 상한 안에서.
+fn prefetch_width(target_width: i32, aspect: f32) -> i32 {
+    let cap = (PREFETCH_MAX_PIXELS / aspect.max(0.01)).sqrt();
+    (target_width as f32).min(cap).max(50.0) as i32
+}
+
+/// 검색 결과 `index`의 페이지 번호와, 그 검색어(줄바꿈으로 나뉘면 사각형들을 합친 영역) 중심의
+/// 페이지 안 위치(페이지 좌상단 기준, 화면 pt). 페이지 좌표→화면 좌표 변환은 뷰어의 검색
+/// 하이라이트(`draw_search_highlight`)와 같은 pdfium 변환이라 /Rotate 페이지에서도 하이라이트와
+/// 같은 자리를 가리킨다.
+fn search_match_center(
+    app: &PdfViewerApp,
+    index: usize,
+    target_width: i32,
+    pixels_per_point: f32,
+) -> Option<(u32, egui::Vec2)> {
+    let search_match = app.search_matches.get(index)?;
+    let (left, right, bottom, top) = search_match.rects.iter().fold(
+        (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
+        |(left, right, bottom, top), rect| {
+            (
+                left.min(rect.left().value),
+                right.max(rect.right().value),
+                bottom.min(rect.bottom().value),
+                top.max(rect.top().value),
+            )
+        },
+    );
+    if left > right || bottom > top {
+        return None;
+    }
+    let document = app.document.as_ref()?;
+    let page = document
+        .pages()
+        .get((search_match.page - 1) as PdfPageIndex)
+        .ok()?;
+    let config = PdfRenderConfig::new().set_target_width(target_width);
+    let (px, py) = page
+        .points_to_pixels(
+            PdfPoints::new((left + right) / 2.0),
+            PdfPoints::new((bottom + top) / 2.0),
+            &config,
+        )
+        .ok()?;
+    Some((
+        search_match.page,
+        egui::vec2(px as f32, py as f32) / pixels_per_point.max(0.01),
+    ))
+}
+
+/// 쪽 단위 보기: 페이지 안의 점(페이지 좌상단 기준 pt)이 화면 중앙에 오게 하는 팬 오프셋.
+/// 화면상 페이지 중심 = 패널 중심 + 팬이므로, 점의 화면 위치 = 패널 중심 + 팬 − 페이지/2 + 점.
+fn pan_to_center(page_size: egui::Vec2, point: egui::Vec2) -> egui::Vec2 {
+    page_size / 2.0 - point
+}
+
+/// 연속 스크롤: 페이지 상단 y에 있는 페이지 안의 점(높이 point_y)이 화면 세로 중앙에 오는 스크롤 오프셋.
+fn scroll_offset_to_center(page_top: f32, point_y: f32, view_height: f32) -> f32 {
+    (page_top + point_y - view_height / 2.0).max(0.0)
+}
+
+/// 연속 스크롤: 페이지 안의 점(가로 point_x)이 화면 가로 중앙에 오는 가로 이동. 페이지가 패널보다
+/// 좁으면 움직일 수 없으므로 0, 넓으면 페이지 가장자리를 넘지 않게 제한한다.
+fn pan_x_to_center(page_width: f32, point_x: f32, view_width: f32) -> f32 {
+    let max_pan = ((page_width - view_width) / 2.0).max(0.0);
+    (page_width / 2.0 - point_x).clamp(-max_pan, max_pan)
+}
+
+fn page_aspect_of(page_aspects: &[f32], page: u32) -> f32 {
+    page_aspects
+        .get((page as usize).saturating_sub(1))
+        .copied()
+        .unwrap_or(1.414)
+}
+
 pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
     handle_scroll_zoom(ctx, &mut app.viewport);
 
@@ -82,6 +175,15 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
         let target_width =
             ((available.x * app.viewport.zoom * pixels_per_point).round() as i32).max(50);
 
+        // 배율(또는 패널 폭)이 바뀐 시각 — 두 모드 모두 이 시각 기준으로 재렌더링을
+        // 디바운스한다(app::zoom_changed_at 문서 참고). 첫 프레임은 변화로 치지 않는다.
+        if target_width != app.last_target_width {
+            if app.last_target_width != 0 {
+                app.zoom_changed_at = ctx.input(|i| i.time);
+            }
+            app.last_target_width = target_width;
+        }
+
         if app.continuous_scroll {
             show_continuous(ctx, app, ui, available, target_width);
         } else {
@@ -90,9 +192,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
     });
 }
 
-/// 쪽 단위 보기(기본 모드) — 한 번에 페이지 하나만 렌더링해 보여준다. 검색 결과
-/// 하이라이트는 아직 이 모드에서만 지원한다(연속 스크롤 모드는 텍스트 선택/링크 클릭까지는
-/// 지원하지만 검색 하이라이트는 범위 밖 — `show_continuous` 문서 참고).
+/// 쪽 단위 보기(기본 모드) — 한 번에 페이지 하나만 렌더링해 보여준다.
 fn show_single_page(
     ctx: &egui::Context,
     app: &mut PdfViewerApp,
@@ -102,24 +202,88 @@ fn show_single_page(
     target_width: i32,
 ) {
     {
-        if app.rendered_for != Some((app.current_page, target_width)) {
-            if let Err(err) = app.render_current_page(ctx, target_width) {
-                app.status_message = Some(format!("렌더링 실패: {err}"));
+        let (rect, response) = ui.allocate_exact_size(available, Sense::click_and_drag());
+
+        // 링크 클릭으로 이번 프레임 중간에 current_page가 바뀔 수 있어, 렌더 요청·그리기는
+        // 프레임 시작 시점의 페이지로 일관되게 한다(새 페이지는 다음 프레임부터).
+        let page_number = app.current_page;
+        let now = ctx.input(|i| i.time);
+        let waited = now - app.zoom_changed_at;
+        let zoom_settling = waited < ZOOM_RENDER_DEBOUNCE_SECS;
+        if app.single_view_page != Some(page_number) {
+            app.single_view_page = Some(page_number);
+            app.single_view_switched_at = now;
+        }
+
+        // 보조 프로세스 대기열의 기준 — 페이지나 배율이 바뀌면 옛 요청은 렌더링되지 않고 버려진다.
+        app.set_render_view((false, page_number, page_number, target_width));
+        // 현재 페이지와 앞뒤 한 쪽 텍스처만 남긴다(넘기는 순간 보여줄 이웃). 그리기 전이라 해제 안전.
+        app.page_textures
+            .retain(|page| page + 1 >= page_number && page <= page_number + 1);
+
+        // 렌더 요청. 보조 프로세스가 있으면 요청만 보내고 결과는 다음 프레임 이후 도착한다
+        // (app::request_page_texture) — 그동안 기존 텍스처를 늘려 보여주므로 UI가 멈추지 않는다.
+        let cached_width = app.page_textures.width(page_number);
+        match cached_width {
+            None => app.request_page_texture(ctx, page_number, target_width),
+            // 같은 페이지의 배율만 바뀐 경우: 기존 텍스처를 목표 크기로 늘려 보여주다가, 배율이
+            // 디바운스 시간 동안 멎은 뒤에 요청한다 — 핀치 중 스쳐 가는 중간 배율 렌더로
+            // 대기열을 채우지 않기 위해.
+            Some(width) if width != target_width => {
+                if zoom_settling {
+                    // 입력이 없으면 egui가 리페인트하지 않으므로, 줌이 멎은 뒤 요청이 다음
+                    // 마우스 조작까지 밀리지 않게 깨울 시각을 예약한다.
+                    ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                        ZOOM_RENDER_DEBOUNCE_SECS - waited,
+                    ));
+                } else {
+                    app.request_page_texture(ctx, page_number, target_width);
+                }
+            }
+            // 현재 페이지가 준비됐으면 앞뒤 페이지를 미리 렌더링해 둔다 — 보조 프로세스가 있을
+            // 때만(UI 스레드에서 동기로 하면 그만큼 멈추므로).
+            Some(_) => {
+                if app.render_worker_active() && !zoom_settling {
+                    for neighbor in [page_number + 1, page_number.saturating_sub(1)] {
+                        if neighbor == 0 || neighbor > app.total_pages {
+                            continue;
+                        }
+                        let wanted =
+                            prefetch_width(target_width, page_aspect_of(&app.page_aspects, neighbor));
+                        let have = app.page_textures.width(neighbor);
+                        if have.map_or(true, |width| width < wanted) {
+                            app.request_page_texture(ctx, neighbor, wanted);
+                        }
+                    }
+                }
             }
         }
 
-        let (rect, response) = ui.allocate_exact_size(available, Sense::click_and_drag());
-
-        let Some(texture) = app.page_texture.clone() else {
-            app.image_rect = None;
-            return;
-        };
-
-        let tex_size = texture.size_vec2() / pixels_per_point;
-        app.viewport.clamp_pan(tex_size, available);
+        // 화면상 페이지 크기(pt) — 렌더 결과와 무관하게 페이지 종횡비로 정한다. 기다리는 동안
+        // 옛 텍스처가 이 크기로 늘어나 보이다가 결과가 오면 같은 자리에서 선명하게 교체된다.
+        // 히트테스트/하이라이트는 image_rect.width()와 target_width의 비율로 좌표를 환산하므로
+        // 텍스처 해상도와 무관하게 화면과 일치한다.
+        let display_width = target_width as f32 / pixels_per_point;
+        let page_size = egui::vec2(
+            display_width,
+            display_width * page_aspect_of(&app.page_aspects, page_number),
+        );
+        // 검색 결과를 골랐으면 그 검색어 위치가 화면 중앙에 오게 팬을 맞춘다(페이지 경계를
+        // 넘지 않게 바로 아래 clamp_pan이 제한). 결과 선택이 go_to_page로 현재 페이지를 이미
+        // 옮겨 두므로 같은 프레임에 소비된다.
+        if let Some(index) = app.search_center_request.take() {
+            if let Some((match_page, point)) =
+                search_match_center(app, index, target_width, pixels_per_point)
+            {
+                if match_page == page_number {
+                    app.viewport.pan_offset = pan_to_center(page_size, point);
+                }
+            }
+        }
+        app.viewport.clamp_pan(page_size, available);
 
         let image_rect =
-            egui::Rect::from_center_size(rect.center() + app.viewport.pan_offset, tex_size);
+            egui::Rect::from_center_size(rect.center() + app.viewport.pan_offset, page_size);
 
         // 마우스가 링크 위에 있으면 손가락(Pointer) 커서, 문자 위에 있으면 텍스트
         // 커서(I-beam)로 바꿔 각각 클릭/선택 가능함을 알려준다. 링크가 텍스트 위에 겹쳐
@@ -197,22 +361,51 @@ fn show_single_page(
             } else {
                 // 문자 위에서 드래그가 시작되지 않았으면 화면 이동(pan)으로 처리.
                 app.viewport.pan_offset += response.drag_delta();
-                app.viewport.clamp_pan(tex_size, available);
+                app.viewport.clamp_pan(page_size, available);
             }
         }
         if response.drag_stopped() {
             app.selection_drag_start_index = None;
         }
 
-        ui.painter().image(
-            texture.id(),
-            image_rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            egui::Color32::WHITE,
-        );
+        // 새 페이지 결과가 아직 없으면 잠깐(PAGE_SWITCH_GRACE_SECS) 직전에 그린 화면을 그대로
+        // 두고, 그래도 없으면 흰 페이지로 자리만 잡는다.
+        let fresh = app.page_textures.get(page_number).map(|(texture, _)| texture.clone());
+        let texture = match fresh {
+            Some(texture) => {
+                app.page_textures.set_shown(&texture);
+                Some(texture)
+            }
+            None => {
+                let since_switch = now - app.single_view_switched_at;
+                if since_switch < PAGE_SWITCH_GRACE_SECS {
+                    ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                        PAGE_SWITCH_GRACE_SECS - since_switch,
+                    ));
+                    app.page_textures.shown().cloned()
+                } else {
+                    None
+                }
+            }
+        };
+        app.page_textures
+            .note_painted(texture.as_ref().map(egui::TextureHandle::id).as_slice());
+        match texture {
+            Some(texture) => {
+                ui.painter().image(
+                    texture.id(),
+                    image_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+            None => {
+                ui.painter().rect_filled(image_rect, 0.0, egui::Color32::WHITE);
+            }
+        }
 
         draw_selection_highlight(ui, app, image_rect, target_width, app.current_page);
-        draw_search_highlight(ui, app, image_rect, target_width);
+        draw_search_highlight(ui, app, image_rect, target_width, page_number);
 
         app.image_rect = Some(image_rect);
 
@@ -228,10 +421,10 @@ fn show_single_page(
 ///
 /// 텍스트 선택/복사, 문서 내 링크 클릭은 쪽 단위 모드와 동일하게 지원한다(2026-07-18
 /// 요청 — "상식적으로 되어야 한다"). 선택은 한 페이지 안에서만 이어진다(드래그가 다른
-/// 페이지로 넘어가면 그 프레임은 무시 — `app.selection_page`가 앵커 페이지 기준). **범위
-/// 밖**: 검색 결과 하이라이트는 아직 이 모드에서 안 보인다(선택과 달리 요청받지 않음 —
-/// 필요하면 'C'로 쪽 단위 모드로). 트랙패드 두 손가락 드래그로 확대해 패널보다 넓어지면
-/// 페이지가 가로 중앙 정렬된 채 양옆이 잘린다(가로 팬 미지원).
+/// 페이지로 넘어가면 그 프레임은 무시 — `app.selection_page`가 앵커 페이지 기준). 검색 결과
+/// 하이라이트도 쪽 단위 모드와 똑같이 보인다(2026-09-14). 확대해 페이지가 패널보다 넓어지면
+/// 트랙패드 좌우 스와이프로 가로 이동하고(`app.continuous_pan_x`), 검색 결과를 고르면 그
+/// 검색어가 가로·세로 모두 화면 중앙에 오게 맞춘다.
 fn show_continuous(
     ctx: &egui::Context,
     app: &mut PdfViewerApp,
@@ -239,8 +432,6 @@ fn show_continuous(
     available: egui::Vec2,
     target_width: i32,
 ) {
-    const PAGE_GAP: f32 = 8.0;
-
     let total_pages = app.total_pages.max(1) as usize;
     // 줌을 반영해야 한다 — 예전엔 `available.x`를 그대로 써서 배율과 무관하게 항상 폭
     // 맞춤으로 보이고, 확대/축소해도 텍스처(target_width, 줌 반영됨)만 해상도가 바뀌고
@@ -249,20 +440,20 @@ fn show_continuous(
     // 동일하게 "줌 1.0 == 페이지 폭이 패널 폭과 같다"는 의미를 유지한다.
     let page_width_pts = available.x * app.viewport.zoom;
 
-    // 각 페이지의 화면상 높이(pt)와 누적 y 오프셋(페이지 사이 간격 포함)을 미리 계산한다
-    // — page_aspects(문서를 열 때 1회 계산, app.rs 참고)가 있으면 그 페이지의 실제
-    // 비율을, 아직 없으면 A4 비슷한 기본값으로 대체한다.
-    let mut offsets = Vec::with_capacity(total_pages);
-    let mut heights = Vec::with_capacity(total_pages);
-    let mut cursor = 0.0_f32;
-    for i in 0..total_pages {
-        let aspect = app.page_aspects.get(i).copied().unwrap_or(1.414);
-        let height = page_width_pts * aspect;
-        offsets.push(cursor);
-        heights.push(height);
-        cursor += height + PAGE_GAP;
-    }
-    let total_height = (cursor - PAGE_GAP).max(0.0);
+    let (offsets, heights, total_height) =
+        continuous_layout(&app.page_aspects, total_pages, page_width_pts);
+
+    // 가로 이동 — 확대로 페이지가 패널보다 넓을 때만 가능. 트랙패드 좌우 스와이프(Ctrl+휠
+    // 줌과 겹치지 않게 Ctrl 제외)로 움직이고, 세로 스크롤은 ScrollArea가 맡는다.
+    let max_pan_x = ((page_width_pts - available.x) / 2.0).max(0.0);
+    let horizontal_swipe = ctx.input(|i| {
+        if i.modifiers.ctrl {
+            0.0
+        } else {
+            i.smooth_scroll_delta.x
+        }
+    });
+    app.continuous_pan_x = (app.continuous_pan_x + horizontal_swipe).clamp(-max_pan_x, max_pan_x);
 
     // 화면 좌표 → (페이지 번호, 그 페이지의 화면 rect). 클릭/드래그/호버 히트테스트가 전부
     // 이 하나로 통일된다 — 가상화 범위와 무관하게(오프셋 계산은 항상 전체 페이지에 대해
@@ -288,16 +479,24 @@ fn show_continuous(
         None
     };
 
-    // 페이지 폭이 직전 프레임과 달라졌는지(줌/창 크기 변화). 두 가지에 쓰인다 —
-    // (1) 스크롤 오프셋 비율 재조정: 전체 레이아웃이 폭에 비례해 커지고 작아지므로
-    //     오프셋을 그대로 두면 같은 y가 다른 페이지를 가리켜 확대=앞쪽/축소=뒤쪽으로
-    //     점프한다(2026-07-18 리포트). 폭 비율만큼 오프셋을 곱해 보던 위치를 유지한다.
-    // (2) 재렌더링 스로틀: 핀치 줌 중 매 프레임 pdfium 재렌더링하면 심하게 버벅이므로,
-    //     폭이 변하는 동안은 기존 텍스처를 늘려 그리고 줌이 멎은 다음 프레임에 한 번만
-    //     선명하게 재렌더링한다(app::continuous_last_page_width 문서 참고).
+    // 페이지 폭이 직전 프레임과 달라졌는지(줌/창 크기 변화). 전체 레이아웃이 폭에 따라
+    // 커지고 작아지므로 오프셋을 그대로 두면 같은 y가 다른 페이지를 가리켜 확대=앞쪽/
+    // 축소=뒤쪽으로 점프한다(2026-07-18 리포트) — 아래에서 앵커로 보정한다.
     let last_width = app.continuous_last_page_width;
     let width_changed = last_width > 0.0 && (page_width_pts - last_width).abs() > 0.5;
     app.continuous_last_page_width = page_width_pts;
+
+    // 재렌더링 디바운스: 핀치 줌 중 pdfium 재렌더링을 하면 심하게 버벅이므로, 배율이 바뀐
+    // 뒤 일정 시간 동안은 기존 텍스처를 늘려 그리고, 멎은 뒤에야 원해상도로 업그레이드한다.
+    // (예전엔 "폭이 바뀐 바로 그 프레임"만 건너뛰어서, 핀치 도중 한 프레임만 쉬어도
+    // 중간 배율로 렌더링이 시작돼 곧 버려졌다.)
+    let since_zoom = ctx.input(|i| i.time) - app.zoom_changed_at;
+    let zoom_settling = since_zoom < CONTINUOUS_RESCALE_DEBOUNCE_SECS;
+    if zoom_settling {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+            CONTINUOUS_RESCALE_DEBOUNCE_SECS - since_zoom,
+        ));
+    }
 
     // 스크롤 오프셋을 프레임 시작 전에 직접 지정해야 하는 두 경우를 계산한다.
     // vertical_scroll_offset은 이번 프레임 그리기 "전에" 적용되므로 scroll_to_rect처럼
@@ -314,7 +513,32 @@ fn show_continuous(
         }
     } else if width_changed {
         if let Some(state) = &scroll_state {
-            override_offset = Some(state.offset.y * (page_width_pts / last_width));
+            // 비율 곱셈(offset × 새폭/옛폭)으로 보정하면 안 된다 — 전체 높이는
+            // Σ(페이지 높이) + PAGE_GAP × 간격 수인데, 배율과 무관한 뒤쪽 상수항에도 비율이
+            // 곱해져 `간격 × 위쪽 페이지 수 × (비율 − 1)`만큼 어긋난다(뒤쪽 페이지일수록
+            // 크게). 대신 뷰포트 중앙이 가리키던 "페이지 i의 f% 지점"을 옛 레이아웃에서
+            // 구하고 새 레이아웃에서 다시 계산한다 — 재계산이라 오차가 섞이지 않는다.
+            let (old_offsets, old_heights, _) =
+                continuous_layout(&app.page_aspects, total_pages, last_width);
+            let half_view = available.y / 2.0;
+            let anchor = anchor_at(&old_offsets, &old_heights, state.offset.y + half_view);
+            override_offset =
+                Some((y_for_anchor(&offsets, &heights, anchor) - half_view).max(0.0));
+        }
+    }
+
+    // 검색 결과를 골랐으면 페이지 상단 대신 그 검색어 위치가 화면 중앙에 오게 한다 — 세로는
+    // 스크롤 오프셋, 가로는 continuous_pan_x(패널보다 넓게 확대된 경우만 움직임).
+    if let Some(index) = app.search_center_request.take() {
+        if let Some((match_page, point)) =
+            search_match_center(app, index, target_width, ctx.pixels_per_point())
+        {
+            let idx = (match_page as usize).saturating_sub(1);
+            if let Some(&page_top) = offsets.get(idx) {
+                override_offset = Some(scroll_offset_to_center(page_top, point.y, available.y));
+                app.continuous_pan_x =
+                    pan_x_to_center(page_width_pts, point.x, available.x);
+            }
         }
     }
 
@@ -322,8 +546,9 @@ fn show_continuous(
     // 새 페이지를 원해상도로 동기 렌더링하면 그 프레임이 길어져 스크롤이 한 번 "덜컹"하는
     // 문제(2026-07-18 리포트)의 완화책: 스크롤 중엔 반해상도(픽셀 1/4)로 빠르게 렌더링해
     // 프레임 시간을 줄이고, 멎은 뒤에 프레임당 1장씩 원해상도로 다시 그린다(정지 상태에서
-    // 여러 장을 한 프레임에 업그레이드하면 그때 또 덜컹하므로 분할). PDFium은 메인 스레드
-    // 제약(§7)이 있어 백그라운드 렌더링으로는 풀 수 없다.
+    // 여러 장을 한 프레임에 업그레이드하면 그때 또 덜컹하므로 분할). 렌더링 보조 프로세스
+    // (render_worker)가 있으면 렌더링이 UI 스레드를 막지 않으므로 이 완화책은 쓰지 않고,
+    // 보조 프로세스가 없을 때의 대체 경로에서만 쓴다.
     let scrolling = scroll_state.as_ref().is_some_and(|s| s.velocity().y.abs() > 50.0)
         || ctx.input(|i| i.smooth_scroll_delta.y != 0.0);
     let scroll_render_width = (target_width / 2).max(400).min(target_width);
@@ -351,7 +576,7 @@ fn show_continuous(
             // 오른쪽으로 치우침 — 위 outer_left 주석 참고). 이 x를 origin에 접어 넣어
             // 히트테스트(page_at)/클릭 영역/그리기가 전부 같은 좌표를 쓰게 한다.
             let origin = egui::pos2(
-                outer_left + (available.x - page_width_pts) / 2.0,
+                outer_left + (available.x - page_width_pts) / 2.0 + app.continuous_pan_x,
                 ui.max_rect().min.y,
             );
 
@@ -485,17 +710,71 @@ fn show_continuous(
             }
             app.note_visible_page_during_scroll((tracked_page + 1) as u32);
 
+            // 보조 프로세스 대기열의 기준 — 보이는 페이지 범위나 배율이 바뀌면 옛 요청은 버려진다.
+            app.set_render_view((
+                true,
+                (first_visible + 1) as u32,
+                (last_visible + 1) as u32,
+                target_width,
+            ));
+
             // 보이는 범위(+한 페이지 여유) 밖의 텍스처는 버려서 큰 문서에서도 메모리를
             // 무한정 쓰지 않게 한다 — 드롭되는 즉시 egui 텍스처 매니저가 GPU 메모리도 해제.
             let keep_lo = first_visible.saturating_sub(1);
             let keep_hi = (last_visible + 1).min(total_pages.saturating_sub(1));
-            app.continuous_textures.retain(|&page_number, _| {
+            app.page_textures.retain(|page_number| {
                 let idx = (page_number as usize).saturating_sub(1);
                 idx >= keep_lo && idx <= keep_hi
             });
 
-            // 정지 상태에서의 원해상도 업그레이드는 프레임당 1장(아래 재렌더링 정책 참고).
+            // 재렌더링 정책:
+            // - 보조 프로세스가 있으면(render_worker) 렌더링이 UI를 막지 않으므로, 필요한
+            //   페이지를 화면 중앙에 가까운 순으로 곧바로 요청한다(배율이 바뀌는 중에만 기다림).
+            // - 없으면(대체 경로, 위 scrolling 주석): 텍스처가 없는 페이지는 스크롤/줌 중엔
+            //   반해상도로 빠르게, 해상도가 안 맞는 캐시는 줌도 스크롤도 멎은 뒤 프레임당 1장씩만
+            //   원해상도로 업그레이드(여러 장을 한 프레임에 하면 그때 또 덜컹하므로 분할).
+            let async_render = app.render_worker_active();
+            let mut render_order: Vec<usize> = (first_visible..=last_visible).collect();
+            render_order.sort_by(|&a, &b| {
+                let distance = |i: usize| (offsets[i] + heights[i] / 2.0 - center_y).abs();
+                distance(a).total_cmp(&distance(b))
+            });
             let mut upgraded_this_frame = false;
+            for i in render_order {
+                let page_number = (i + 1) as u32;
+                let cached_width = app.page_textures.width(page_number);
+                let (needs_render, render_width) = match cached_width {
+                    None => (
+                        true,
+                        if !async_render && (scrolling || zoom_settling) {
+                            scroll_render_width
+                        } else {
+                            target_width
+                        },
+                    ),
+                    Some(w) => (
+                        w != target_width
+                            && !zoom_settling
+                            && (async_render || (!scrolling && !upgraded_this_frame)),
+                        target_width,
+                    ),
+                };
+                if needs_render {
+                    if !async_render {
+                        if cached_width.is_some() {
+                            upgraded_this_frame = true;
+                        }
+                        // 업그레이드가 남아 있을 수 있으니 다음 프레임을 강제로 깨운다 —
+                        // egui는 입력이 없으면 리페인트하지 않아 마지막 스크롤 후 업그레이드가
+                        // 다음 마우스 조작까지 멈춰 보일 수 있다(§7의 즉시모드 함정과 동일).
+                        // (보조 프로세스 경로는 결과가 도착할 때 응답 스레드가 깨운다.)
+                        ctx.request_repaint();
+                    }
+                    app.request_page_texture(ctx, page_number, render_width);
+                }
+            }
+
+            let mut painted_ids = Vec::new();
             for i in first_visible..=last_visible {
                 let page_number = (i + 1) as u32;
                 let page_rect = egui::Rect::from_min_size(
@@ -504,48 +783,26 @@ fn show_continuous(
                 )
                 .translate(origin.to_vec2());
 
-                // 재렌더링 정책(위 width_changed/scrolling 주석 참고):
-                // - 텍스처가 아예 없는 페이지: 즉시 렌더링(빈 화면 방지) — 단 스크롤 중엔
-                //   반해상도로 빠르게(페이지 경계 덜컹 완화), 정지 상태면 원해상도로.
-                // - 해상도가 안 맞는 캐시(반해상도 잔재/줌 변경): 늘려서 그리다가, 줌도
-                //   스크롤도 멎은 뒤 프레임당 1장씩만 원해상도로 업그레이드(여러 장을 한
-                //   프레임에 하면 그때 또 덜컹하므로 분할 — upgraded_this_frame).
-                let cached_width = app.continuous_textures.get(&page_number).map(|(_, w)| *w);
-                let (needs_render, render_width) = match cached_width {
-                    None => (
-                        true,
-                        if scrolling { scroll_render_width } else { target_width },
-                    ),
-                    Some(w) => (
-                        w != target_width && !width_changed && !scrolling && !upgraded_this_frame,
-                        target_width,
-                    ),
-                };
-                if needs_render {
-                    if cached_width.is_some() {
-                        upgraded_this_frame = true;
+                // 렌더 결과를 기다리는 페이지는 흰 페이지로 자리만 잡아 둔다.
+                match app.page_textures.get(page_number) {
+                    Some((texture, _)) => {
+                        painted_ids.push(texture.id());
+                        ui.painter().image(
+                            texture.id(),
+                            page_rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
                     }
-                    if let Ok(texture) = app.render_page_texture(ctx, page_number, render_width) {
-                        app.continuous_textures
-                            .insert(page_number, (texture, render_width));
+                    None => {
+                        ui.painter().rect_filled(page_rect, 0.0, egui::Color32::WHITE);
                     }
-                    // 업그레이드가 남아 있을 수 있으니 다음 프레임을 강제로 깨운다 —
-                    // egui는 입력이 없으면 리페인트하지 않아 마지막 스크롤 후 업그레이드가
-                    // 다음 마우스 조작까지 멈춰 보일 수 있다(§7의 즉시모드 함정과 동일).
-                    ctx.request_repaint();
-                }
-
-                if let Some((texture, _)) = app.continuous_textures.get(&page_number) {
-                    ui.painter().image(
-                        texture.id(),
-                        page_rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
                 }
 
                 draw_selection_highlight(ui, app, page_rect, target_width, page_number);
+                draw_search_highlight(ui, app, page_rect, target_width, page_number);
             }
+            app.page_textures.note_painted(&painted_ids);
 
             // (북마크 클릭/검색 이동 등 명시적 페이지 이동(scroll_to_page_once)은
             // ScrollArea를 만들기 전에 vertical_scroll_offset으로 소비된다 — 위 참고.
@@ -553,6 +810,58 @@ fn show_continuous(
             // 문서 끝으로 붙어버리는 버그를 만들었고, (b) 고쳐도 애니메이션이 중간
             // 페이지들을 스쳐 지나가는 게 보여서 즉시 점프 방식으로 교체했다.)
         });
+}
+
+/// 연속 스크롤 레이아웃 — 페이지별 상단 y·높이(pt)와 전체 높이. 크기를 이 한 식으로만
+/// 정하므로 그리기·히트테스트·가상화 범위·스크롤 보정이 서로 어긋날 수 없다.
+/// page_aspects(문서를 열 때 1회 계산, app.rs 참고)가 아직 없으면 A4 비슷한 기본값을 쓴다.
+fn continuous_layout(
+    page_aspects: &[f32],
+    total_pages: usize,
+    page_width: f32,
+) -> (Vec<f32>, Vec<f32>, f32) {
+    let mut offsets = Vec::with_capacity(total_pages);
+    let mut heights = Vec::with_capacity(total_pages);
+    let mut cursor = 0.0_f32;
+    for i in 0..total_pages {
+        let height = page_width * page_aspects.get(i).copied().unwrap_or(1.414);
+        offsets.push(cursor);
+        heights.push(height);
+        cursor += height + PAGE_GAP;
+    }
+    (offsets, heights, (cursor - PAGE_GAP).max(0.0))
+}
+
+/// 배율과 무관한 스크롤 기준점 — "몇 번째(0-based) 페이지의 몇 % 지점".
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ScrollAnchor {
+    page: usize,
+    fraction: f32,
+}
+
+/// 레이아웃 y → 앵커. 페이지 사이 간격에 있는 y는 바로 위 페이지의 아래 끝(100%)으로
+/// 붙인다 — 간격은 배율과 무관하게 고정이라 비율로 표현할 수 없어서다(최대 PAGE_GAP만큼
+/// 한 번 움직일 뿐, 반복 줌에서 쌓이지 않는다).
+fn anchor_at(offsets: &[f32], heights: &[f32], y: f32) -> ScrollAnchor {
+    let page = offsets.partition_point(|&top| top <= y).saturating_sub(1);
+    let (top, height) = (
+        offsets.get(page).copied().unwrap_or(0.0),
+        heights.get(page).copied().unwrap_or(0.0),
+    );
+    let fraction = if height > 0.0 {
+        ((y - top) / height).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    ScrollAnchor { page, fraction }
+}
+
+/// 앵커 → 주어진 레이아웃에서의 y.
+fn y_for_anchor(offsets: &[f32], heights: &[f32], anchor: ScrollAnchor) -> f32 {
+    match (offsets.get(anchor.page), heights.get(anchor.page)) {
+        (Some(top), Some(height)) => top + height * anchor.fraction,
+        _ => 0.0,
+    }
 }
 
 /// 화면 좌표(스크린 픽셀) → 렌더링에 쓰인 PdfRenderConfig 기준 비트맵 픽셀 → PDF 포인트 →
@@ -685,8 +994,12 @@ fn draw_search_highlight(
     app: &PdfViewerApp,
     image_rect: egui::Rect,
     target_width: i32,
+    page_number: u32,
 ) {
-    if app.search_matches.is_empty() {
+    // 결과는 페이지 순이라 이 페이지의 첫 결과를 이진 탐색으로 찾는다 — 결과가 수천 건이어도
+    // 보이는 페이지마다 전체를 훑지 않게.
+    let first = app.search_matches.partition_point(|m| m.page < page_number);
+    if app.search_matches.get(first).map(|m| m.page) != Some(page_number) {
         return;
     }
     let Some(document) = app.document.as_ref() else {
@@ -694,7 +1007,7 @@ fn draw_search_highlight(
     };
     let Ok(page) = document
         .pages()
-        .get((app.current_page - 1) as PdfPageIndex)
+        .get((page_number - 1) as PdfPageIndex)
     else {
         return;
     };
@@ -712,20 +1025,25 @@ fn draw_search_highlight(
         ))
     };
 
-    let current_fill = egui::Color32::from_rgba_unmultiplied(255, 165, 0, 70);
-    let current_stroke = egui::Color32::from_rgb(255, 140, 0);
-    let other_fill = egui::Color32::from_rgba_unmultiplied(255, 235, 59, 60);
-    let other_stroke = egui::Color32::from_rgb(255, 213, 79);
+    // 지금 선택된 결과만 진한 주황색으로 채워 도드라지게 하고, 같은 페이지의 나머지 일치는
+    // 테두리만 그린다 — 반투명 배경을 칠하면 글자 위에 색이 덮여 원문이 흐려 보인다는
+    // 피드백(2026-09-14). 페이지 텍스처가 불투명 이미지라 "글자 아래에만" 칠할 방법이 없어서
+    // 채움을 빼는 것이 원문 선명도를 지키는 유일한 방법이다.
+    let current_fill = egui::Color32::from_rgba_unmultiplied(255, 140, 0, 110);
+    let current_stroke = egui::Color32::from_rgb(230, 90, 0);
+    let other_fill = egui::Color32::TRANSPARENT;
+    let other_stroke = egui::Color32::from_rgb(245, 166, 35);
 
     let painter = ui.painter();
-    for (index, m) in app.search_matches.iter().enumerate() {
-        if m.page != app.current_page {
-            continue;
+    for (offset, m) in app.search_matches[first..].iter().enumerate() {
+        if m.page != page_number {
+            break;
         }
-        let (fill, stroke) = if index == app.search_current_index {
-            (current_fill, current_stroke)
+        let index = first + offset;
+        let (fill, stroke, stroke_width) = if index == app.search_current_index {
+            (current_fill, current_stroke, 2.5_f32)
         } else {
-            (other_fill, other_stroke)
+            (other_fill, other_stroke, 1.8_f32)
         };
 
         for rect in &m.rects {
@@ -738,9 +1056,153 @@ fn draw_search_highlight(
                 // 튀어나와 보인다는 리포트(2026-07-18) — 사방으로 살짝 넓혀서 시각적으로
                 // 보이는 글자를 확실히 덮게 한다.
                 let screen_rect = egui::Rect::from_two_pos(top_left, bottom_right).expand(2.0);
-                painter.rect_filled(screen_rect, 2.0, fill);
-                painter.rect_stroke(screen_rect, 2.0, egui::Stroke::new(2.0_f32, stroke));
+                if fill != egui::Color32::TRANSPARENT {
+                    painter.rect_filled(screen_rect, 2.0, fill);
+                }
+                painter.rect_stroke(screen_rect, 2.0, egui::Stroke::new(stroke_width, stroke));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod scroll_anchor_tests {
+    use super::{anchor_at, continuous_layout, y_for_anchor, ScrollAnchor, PAGE_GAP};
+
+    const PAGES: usize = 200;
+    const HALF_VIEW: f32 = 400.0;
+
+    /// 세로형/가로형이 섞인 문서 — 페이지마다 높이가 달라도 성립해야 한다.
+    fn aspects() -> Vec<f32> {
+        (0..PAGES).map(|i| if i % 3 == 0 { 0.773 } else { 1.414 }).collect()
+    }
+
+    /// 폭 `from` 레이아웃의 스크롤 오프셋을 폭 `to` 레이아웃으로 옮긴다(show_continuous와 같은 절차).
+    fn rezoom(aspects: &[f32], scroll: f32, from: f32, to: f32) -> f32 {
+        let (old_offsets, old_heights, _) = continuous_layout(aspects, PAGES, from);
+        let (new_offsets, new_heights, _) = continuous_layout(aspects, PAGES, to);
+        let anchor = anchor_at(&old_offsets, &old_heights, scroll + HALF_VIEW);
+        (y_for_anchor(&new_offsets, &new_heights, anchor) - HALF_VIEW).max(0.0)
+    }
+
+    #[test]
+    fn anchor_roundtrips_within_layout() {
+        let aspects = aspects();
+        let (offsets, heights, _) = continuous_layout(&aspects, PAGES, 700.0);
+        let y = offsets[120] + heights[120] * 0.37;
+        let anchor = anchor_at(&offsets, &heights, y);
+        assert_eq!(anchor.page, 120);
+        assert!((anchor.fraction - 0.37).abs() < 1e-3);
+        assert!((y_for_anchor(&offsets, &heights, anchor) - y).abs() < 0.05);
+    }
+
+    /// 한 번 확대해도 뷰포트 중앙은 같은 페이지의 같은 % 지점에 머문다.
+    #[test]
+    fn zoom_keeps_center_on_same_spot() {
+        let aspects = aspects();
+        let (offsets, heights, _) = continuous_layout(&aspects, PAGES, 700.0);
+        let scroll = offsets[150] + heights[150] * 0.5 - HALF_VIEW;
+        let new_scroll = rezoom(&aspects, scroll, 700.0, 875.0);
+
+        let (new_offsets, new_heights, _) = continuous_layout(&aspects, PAGES, 875.0);
+        let anchor = anchor_at(&new_offsets, &new_heights, new_scroll + HALF_VIEW);
+        assert_eq!(anchor.page, 150);
+        assert!((anchor.fraction - 0.5).abs() < 1e-3);
+    }
+
+    /// 예전 방식(오프셋 × 폭비)은 고정 간격에도 비율이 곱해져 뒤쪽 페이지에서 크게 어긋난다
+    /// — 앵커 방식을 쓰는 이유를 고정해 둔다.
+    #[test]
+    fn ratio_scaling_misplaces_by_gap_error() {
+        let aspects = aspects();
+        let (offsets, heights, _) = continuous_layout(&aspects, PAGES, 700.0);
+        let scroll = offsets[150] + heights[150] * 0.5 - HALF_VIEW;
+        let ratio = 875.0 / 700.0;
+        // 기준점(뷰포트 중앙)은 같게 두고 보정 방식만 비교한다.
+        let naive = (scroll + HALF_VIEW) * ratio - HALF_VIEW;
+        let anchored = rezoom(&aspects, scroll, 700.0, 875.0);
+        let expected_error = PAGE_GAP * 150.0 * (ratio - 1.0);
+        assert!(((naive - anchored).abs() - expected_error).abs() < expected_error * 0.1);
+    }
+
+    /// 확대/축소를 여러 번 왕복해도 원래 위치로 돌아온다.
+    #[test]
+    fn repeated_zoom_roundtrip_does_not_drift() {
+        let aspects = aspects();
+        let widths = [700.0, 875.0, 1050.0, 1400.0, 1050.0, 875.0, 700.0];
+        let (offsets, heights, _) = continuous_layout(&aspects, PAGES, widths[0]);
+        let start = offsets[120] + heights[120] * 0.37 - HALF_VIEW;
+
+        let mut scroll = start;
+        for pair in widths.windows(2) {
+            scroll = rezoom(&aspects, scroll, pair[0], pair[1]);
+        }
+        assert!((scroll - start).abs() < 0.5, "drifted {} pt", scroll - start);
+    }
+
+    /// 페이지 사이 간격에 있는 y는 위 페이지 아래 끝에 붙는다.
+    #[test]
+    fn gap_snaps_to_page_above() {
+        let aspects = aspects();
+        let (offsets, heights, _) = continuous_layout(&aspects, PAGES, 700.0);
+        let y = offsets[5] + heights[5] + PAGE_GAP / 2.0;
+        assert_eq!(anchor_at(&offsets, &heights, y), ScrollAnchor { page: 5, fraction: 1.0 });
+    }
+}
+
+#[cfg(test)]
+mod search_center_tests {
+    use super::{pan_to_center, pan_x_to_center, scroll_offset_to_center};
+
+    /// 쪽 단위: 팬을 적용하면 검색어 점이 정확히 패널 중앙에 온다(viewer의 image_rect 식 그대로 재현).
+    #[test]
+    fn single_page_pan_puts_point_at_panel_center() {
+        let panel_center = egui::pos2(500.0, 400.0);
+        let page_size = egui::vec2(2400.0, 3400.0);
+        let point = egui::vec2(1800.0, 2900.0);
+        let pan = pan_to_center(page_size, point);
+        let image_rect = egui::Rect::from_center_size(panel_center + pan, page_size);
+        let on_screen = image_rect.min + point;
+        assert!((on_screen - panel_center).length() < 1e-3);
+    }
+
+    #[test]
+    fn continuous_scroll_centers_vertically_but_not_above_document_top() {
+        assert_eq!(scroll_offset_to_center(5000.0, 300.0, 800.0), 4900.0);
+        assert_eq!(scroll_offset_to_center(0.0, 100.0, 800.0), 0.0);
+    }
+
+    #[test]
+    fn continuous_pan_x_centers_within_page_edges() {
+        // 2000pt 페이지, 800pt 패널 → 좌우 최대 600pt 이동.
+        assert_eq!(pan_x_to_center(2000.0, 1000.0, 800.0), 0.0);
+        assert_eq!(pan_x_to_center(2000.0, 1300.0, 800.0), -300.0);
+        // 페이지 가장자리 근처는 가장자리를 넘지 않게 제한.
+        assert_eq!(pan_x_to_center(2000.0, 1950.0, 800.0), -600.0);
+        // 페이지가 패널보다 좁으면 움직이지 않는다.
+        assert_eq!(pan_x_to_center(600.0, 50.0, 800.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod prefetch_tests {
+    use super::{prefetch_width, PREFETCH_MAX_PIXELS};
+
+    /// 저배율에서는 현재 배율 그대로 미리 렌더링한다.
+    #[test]
+    fn low_zoom_prefetches_at_current_width() {
+        assert_eq!(prefetch_width(1800, 1.414), 1800);
+    }
+
+    /// 고배율에서는 픽셀 수 상한 안으로 줄인다 — 세로로 긴 페이지일수록 더 좁게.
+    #[test]
+    fn high_zoom_is_capped_by_pixel_budget() {
+        for aspect in [1.414_f32, 9.2] {
+            let width = prefetch_width(11_000, aspect);
+            assert!(width < 11_000);
+            let pixels = width as f32 * width as f32 * aspect;
+            assert!(pixels <= PREFETCH_MAX_PIXELS * 1.001, "aspect {aspect}: {pixels}");
+        }
+        assert!(prefetch_width(11_000, 9.2) < prefetch_width(11_000, 1.414));
     }
 }

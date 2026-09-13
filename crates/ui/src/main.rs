@@ -11,16 +11,32 @@
 mod app;
 mod autosave;
 mod batch_import;
+mod crash_log;
+mod file_watch;
 mod fonts;
 #[cfg(target_os = "macos")]
 mod macos_open_file;
+mod render_worker;
+mod search_panel;
+mod texture_cache;
 mod toolbar;
+mod trace;
 mod viewer_panel;
 mod sidebar;
 
 use app::PdfViewerApp;
 
 fn main() -> eframe::Result<()> {
+    let is_render_worker = std::env::args().nth(1).as_deref() == Some(render_worker::WORKER_FLAG);
+    // 패닉 내용·백트레이스·최근 동작 기록을 panic.log에 남긴다(크기 제한·교체 정책은 crash_log 문서).
+    crash_log::install(if is_render_worker { "render-worker" } else { "app" });
+
+    // 렌더링 보조 프로세스로 실행된 경우(render_worker 모듈 문서) — 창을 만들지 않고 요청만
+    // 처리하다 메인 프로세스가 끝나면(stdin EOF) 종료한다.
+    if is_render_worker {
+        std::process::exit(render_worker::run_worker_process());
+    }
+
     env_logger::init();
 
     // CLI에서 파일 경로를 인자로 넘기면 시작 시 바로 연다(Windows "연결 프로그램"은
