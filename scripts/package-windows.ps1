@@ -1,10 +1,11 @@
-# Builds the ui crate in release mode for x86_64-pc-windows-msvc, bundles the
-# exe together with the given pdfium.dll into a folder, and zips it for
-# distribution. Unsigned (no code-signing certificate) — SmartScreen will warn
-# on first run, which is expected for this deployment tier.
+# Builds the ui crate in release mode for x86_64-pc-windows-msvc, stages the
+# exe together with the given pdfium.dll, and compiles an Inno Setup installer
+# (setup.exe, scripts/windows-installer.iss) for distribution. Unsigned (no
+# code-signing certificate) — SmartScreen warns when the installer runs
+# ("More info" -> "Run anyway"), which is expected for this deployment tier.
 #
 # Usage: package-windows.ps1 -PdfiumDllPath <path-to-pdfium.dll> [-VersionTag v0.1.4]
-#   VersionTag is used in the zip filename. Defaults to "v<Cargo.toml version>"
+#   VersionTag is used in the installer filename. Defaults to "v<Cargo.toml version>"
 #   for convenient local/ad-hoc runs; CI always passes the actual release tag
 #   (the git tag is the single source of truth for release versions —
 #   Cargo.toml's version is not bumped per release and will drift).
@@ -41,8 +42,28 @@ New-Item -ItemType Directory -Path $PkgDir | Out-Null
 Copy-Item (Join-Path $RepoRoot "target\$Target\release\PDF-Outliner.exe") (Join-Path $PkgDir "PDF-Outliner.exe")
 Copy-Item $PdfiumDllPath (Join-Path $PkgDir "pdfium.dll")
 
-$ZipPath = Join-Path $DistDir "PDF-Outliner-$VersionTag-windows-x64.zip"
-if (Test-Path $ZipPath) { Remove-Item $ZipPath }
-Compress-Archive -Path (Join-Path $PkgDir "*") -DestinationPath $ZipPath
+# Distribution format: installer (2026-09-14, was .zip) — Inno Setup 6.
+$Iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+if (-not (Test-Path $Iscc)) {
+    Write-Host "==> Inno Setup not found, installing via Chocolatey"
+    choco install innosetup -y --no-progress
+    if ($LASTEXITCODE -ne 0) { throw "Inno Setup install failed (exit code $LASTEXITCODE)" }
+}
+if (-not (Test-Path $Iscc)) { throw "ISCC.exe not found: $Iscc" }
 
-Write-Host "==> Done: $ZipPath"
+$SetupBaseName = "PDF-Outliner-$VersionTag-windows-x64-setup"
+$SetupPath = Join-Path $DistDir "$SetupBaseName.exe"
+if (Test-Path $SetupPath) { Remove-Item $SetupPath }
+
+Write-Host "==> Compiling installer $SetupBaseName.exe"
+& $Iscc `
+    "/DAppVersion=$($VersionTag.TrimStart('v'))" `
+    "/DSourceDir=$PkgDir" `
+    "/DOutputDir=$DistDir" `
+    "/DOutputBaseFilename=$SetupBaseName" `
+    "/DIconFile=$(Join-Path $RepoRoot 'assets\icon\icon.ico')" `
+    (Join-Path $PSScriptRoot "windows-installer.iss")
+if ($LASTEXITCODE -ne 0) { throw "ISCC failed (exit code $LASTEXITCODE)" }
+if (-not (Test-Path $SetupPath)) { throw "installer not produced: $SetupPath" }
+
+Write-Host "==> Done: $SetupPath"

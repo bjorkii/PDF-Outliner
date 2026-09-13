@@ -4,11 +4,12 @@ set -euo pipefail
 # Builds the ui crate in release mode for <target-triple>, bundles it into
 # "PDF Outliner.app" together with the given pdfium dylib, ad-hoc signs it
 # (free, no Apple Developer ID required — arm64 refuses to launch any binary
-# with zero signature at all), and zips the result for distribution.
+# with zero signature at all), and packs it into a .dmg (drag to Applications,
+# plus a first-run note about clearing the quarantine attribute) for distribution.
 #
 # Usage: package-macos.sh <target-triple> <pdfium-dylib-path> [version-tag]
 #   target-triple: aarch64-apple-darwin | x86_64-apple-darwin
-#   version-tag: e.g. "v0.1.4" — used in the zip filename and (with the
+#   version-tag: e.g. "v0.1.4" — used in the dmg filename and (with the
 #     leading "v" stripped) in Info.plist. Defaults to "v<Cargo.toml version>"
 #     for convenient local/ad-hoc runs; CI always passes the actual release
 #     tag (the git tag is the single source of truth for release versions —
@@ -102,8 +103,41 @@ echo "==> Ad-hoc signing (no paid Apple Developer ID needed)"
 codesign --force --deep --sign - "$APP_DIR"
 codesign --verify --verbose "$APP_DIR"
 
-ZIP_NAME="PDF-Outliner-$VERSION_TAG-macos-$ARCH_LABEL.zip"
-rm -f "$DIST_DIR/$ZIP_NAME"
-ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$DIST_DIR/$ZIP_NAME"
+# Distribution format: .dmg (2026-09-14, was .zip). The volume holds the app, an
+# Applications symlink (drag-and-drop install) and a first-run note — the app is
+# not notarized, so the quarantine attribute must be cleared once before launch.
+DMG_NAME="PDF-Outliner-$VERSION_TAG-macos-$ARCH_LABEL.dmg"
+STAGING_DIR="$DIST_DIR/dmg-staging"
+rm -rf "$STAGING_DIR" "$DIST_DIR/$DMG_NAME"
+mkdir -p "$STAGING_DIR"
+ditto "$APP_DIR" "$STAGING_DIR/PDF Outliner.app"
+ln -s /Applications "$STAGING_DIR/Applications"
+cat > "$STAGING_DIR/처음 실행 전에 읽어주세요.txt" <<'NOTE'
+PDF Outliner 설치 방법
 
-echo "==> Done: $DIST_DIR/$ZIP_NAME"
+1. "PDF Outliner" 아이콘을 옆의 "Applications" 폴더로 끌어다 놓으세요.
+
+2. 이 앱은 Apple 개발자 등록 없이 배포되어, 처음 실행하기 전에 한 번만
+   터미널(응용 프로그램 > 유틸리티 > 터미널)에 아래 명령을 붙여 넣고 Enter를 누르세요.
+
+   xattr -dr com.apple.quarantine "/Applications/PDF Outliner.app"
+
+3. 그다음부터는 평소처럼 실행하면 됩니다.
+NOTE
+
+echo "==> Creating $DMG_NAME"
+# hdiutil occasionally fails with "Resource busy" on CI runners — retry a few times.
+for attempt in 1 2 3; do
+  if hdiutil create -volname "PDF Outliner" -srcfolder "$STAGING_DIR" -ov -format UDZO "$DIST_DIR/$DMG_NAME"; then
+    break
+  fi
+  if [[ "$attempt" == 3 ]]; then
+    echo "hdiutil create failed after $attempt attempts" >&2
+    exit 1
+  fi
+  echo "hdiutil create failed (attempt $attempt), retrying..." >&2
+  sleep 5
+done
+rm -rf "$STAGING_DIR"
+
+echo "==> Done: $DIST_DIR/$DMG_NAME"
