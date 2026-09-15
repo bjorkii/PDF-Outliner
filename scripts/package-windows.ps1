@@ -24,6 +24,10 @@ if (-not (Test-Path $PdfiumDllPath)) {
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
+# 창 제목에 넣을 버전(crates/ui/build.rs) — 인자로 받은 태그만 넘긴다(아래 Cargo.toml 기반 기본값을
+# 채우기 전). 비어 있으면 build.rs가 git describe를 쓴다.
+$env:PDF_OUTLINER_VERSION = $VersionTag
+
 if ([string]::IsNullOrEmpty($VersionTag)) {
     $CargoVersion = (Select-String -Path (Join-Path $RepoRoot "Cargo.toml") -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
     $VersionTag = "v$CargoVersion"

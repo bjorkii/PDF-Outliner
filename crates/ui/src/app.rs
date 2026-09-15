@@ -225,6 +225,10 @@ pub struct PdfViewerApp {
     /// 넓을 때만 의미가 있고 매 프레임 그 범위로 제한된다 — 트랙패드 좌우 스와이프와 검색
     /// 결과 중앙 맞춤이 움직인다.
     pub continuous_pan_x: f32,
+    /// 연속 스크롤 보기에서 우클릭 드래그로 이번 프레임에 쌓인 세로 이동(pt) — 세로 위치는
+    /// ScrollArea 오프셋이라 드래그를 처리하는 시점(ScrollArea 안)엔 바꿀 수 없어, 다음 프레임에
+    /// ScrollArea를 만들기 전에 오프셋에서 뺀다.
+    pub continuous_drag_scroll: f32,
     /// 직전 프레임의 렌더 목표 폭(물리 픽셀 — 줌·패널 폭·화면 배율 반영). 0 = 아직 없음.
     pub last_target_width: i32,
     /// `last_target_width`가 마지막으로 바뀐 시각(`egui::InputState::time`, 초). 핀치/휠
@@ -418,6 +422,7 @@ impl PdfViewerApp {
             request_fit_page: false,
             continuous_last_page_width: 0.0,
             continuous_pan_x: 0.0,
+            continuous_drag_scroll: 0.0,
             last_target_width: 0,
             zoom_changed_at: 0.0,
             render_worker,
@@ -1855,12 +1860,12 @@ impl PdfViewerApp {
 
     /// last_window_title로 값이 안 바뀌었으면 매 프레임 viewport 명령을 안 보내게 막는다.
     fn update_window_title(&mut self, ctx: &egui::Context) {
+        // 버전은 빌드 시 넣은 태그(build.rs `embed_version`) — 예: "PDF Outliner v0.2.1 - 문서.pdf"
+        // (2026-09-15 요청).
+        let app_name = concat!("PDF Outliner ", env!("PDF_OUTLINER_VERSION"));
         let title = match &self.current_file {
-            Some(path) => {
-                let name = display_filename(path);
-                format!("PDF Outliner - {name}")
-            }
-            None => "PDF Outliner".to_string(),
+            Some(path) => format!("{app_name} - {}", display_filename(path)),
+            None => app_name.to_string(),
         };
 
         if self.last_window_title.as_deref() != Some(title.as_str()) {

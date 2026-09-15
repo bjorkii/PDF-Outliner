@@ -166,6 +166,15 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             }
 
             egui::ScrollArea::vertical().show(ui, |ui| {
+                // 북마크 트리 글자를 기본(본문 12.5pt)보다 두 단계(2pt) 키운다(2026-09-15 요청).
+                // 이 스크롤 영역 안에만 적용 — 위쪽 +/-/Undo/Redo 버튼은 그대로. 접기 아이콘
+                // (Small)도 같은 비율로 키워 글자와 어울리게 한다. 행 높이는 interact_size.y(18pt)
+                // 기준이라 14.5pt 글자도 그대로 들어간다.
+                for style in [egui::TextStyle::Body, egui::TextStyle::Button, egui::TextStyle::Small] {
+                    if let Some(font) = ui.style_mut().text_styles.get_mut(&style) {
+                        font.size += 2.0;
+                    }
+                }
                 render_nodes(
                     ui,
                     &mut app.bookmarks,
@@ -304,6 +313,8 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             }
         });
 
+    // 레이어는 PanelResizeLine(패널 위·팝업 아래) — 예전엔 Foreground라 같은 층의 툴바 "최근 파일"
+    // 드롭다운보다 나중에 그려져 목록 위에 테두리가 겹쳤다(2026-09-15 피드백).
     // 포커스가 사이드바일 때 패널 둘레에 테두리를 그려 "지금 화살표 키가 북마크
     // 탐색으로 동작한다"는 걸 시각적으로 알려준다(Tab/클릭으로 전환 — FocusArea 문서
     // 참고). 처음엔 패널 닫기 전에 ui.painter()로 그렸는데, 패널 안의 painter는 패널
@@ -315,7 +326,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
         let panel_rect = panel_response.response.rect;
         let stroke = egui::Stroke::new(2.0_f32, SIDEBAR_ACCENT);
         ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
+            egui::Order::PanelResizeLine,
             Id::new("sidebar_focus_border"),
         ))
         .rect_stroke(panel_rect.shrink(1.0), 2.0_f32, stroke);

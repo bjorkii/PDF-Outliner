@@ -337,18 +337,25 @@ fn show_single_page(
             }
         }
 
-        // 확대 시 drag 탐색: 텍스트 선택 드래그가 아닐 때만 pan으로 처리.
-        // (텍스트 선택은 문자 인덱스가 있을 때만 활성화되므로, 문서에 텍스트 레이어가
-        // 없는 페이지나 클릭이 문자에 닿지 않은 경우 자연히 pan으로 동작한다.)
+        // 드래그 탐색:
+        // - 우클릭 드래그는 어디서 시작하든 화면 이동(pan) — SumatraPDF와 같은 관례이고,
+        //   이동하는 동안 손바닥(움켜쥔) 커서로 바꾼다(2026-09-15 요청). 위의 호버 커서 설정보다
+        //   뒤에 두어야 이 커서가 이긴다. 드래그 없이 뗀 우클릭은 기존대로 복사 메뉴.
+        // - 좌클릭 드래그는 텍스트 선택 드래그가 아닐 때만 pan(텍스트 선택은 문자 인덱스가 있을
+        //   때만 활성화되므로, 텍스트 레이어가 없는 페이지나 문자에 닿지 않은 드래그는 자연히 pan).
         let hit_char = response
             .interact_pointer_pos()
             .and_then(|pos| char_index_at_screen_pos(app, pos, image_rect, target_width, app.current_page));
 
-        if response.drag_started() {
+        if response.dragged_by(egui::PointerButton::Secondary) {
+            app.viewport.pan_offset += response.drag_delta();
+            app.viewport.clamp_pan(page_size, available);
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if response.drag_started_by(egui::PointerButton::Primary) {
             app.selection_drag_start_index = hit_char;
             app.selection = None;
             app.selection_page = hit_char.map(|_| app.current_page);
-        } else if response.dragged() {
+        } else if response.dragged_by(egui::PointerButton::Primary) {
             if let Some(start) = app.selection_drag_start_index {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let current = char_index_at_screen_pos(app, pos, image_rect, target_width, app.current_page)
@@ -364,7 +371,7 @@ fn show_single_page(
                 app.viewport.clamp_pan(page_size, available);
             }
         }
-        if response.drag_stopped() {
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
             app.selection_drag_start_index = None;
         }
 
@@ -542,6 +549,15 @@ fn show_continuous(
         }
     }
 
+    // 지난 프레임의 우클릭 드래그 세로 이동 — 내용이 손을 따라 움직이도록 오프셋에서 뺀다.
+    // 명시적 페이지 이동·검색 중앙 맞춤·줌 보정이 이번 프레임에 이미 오프셋을 정했으면 그쪽이 우선.
+    let drag_scroll = std::mem::take(&mut app.continuous_drag_scroll);
+    if drag_scroll != 0.0 && override_offset.is_none() {
+        if let Some(state) = &scroll_state {
+            override_offset = Some((state.offset.y - drag_scroll).max(0.0));
+        }
+    }
+
     // 스크롤이 진행 중인지(손가락 스크롤 이벤트 또는 관성 스크롤 감속 중). 페이지 경계에서
     // 새 페이지를 원해상도로 동기 렌더링하면 그 프레임이 길어져 스크롤이 한 번 "덜컹"하는
     // 문제(2026-07-18 리포트)의 완화책: 스크롤 중엔 반해상도(픽셀 1/4)로 빠르게 렌더링해
@@ -627,10 +643,23 @@ fn show_continuous(
                 }
             }
 
+            // 우클릭 드래그 = 화면 이동(쪽 단위 모드와 같은 관례, 손바닥 커서). 가로는 곧바로
+            // continuous_pan_x에, 세로는 ScrollArea 오프셋이라 다음 프레임에 반영하도록 쌓아 둔다
+            // (app::continuous_drag_scroll). 텍스트 선택은 좌클릭 드래그만.
+            if full_response.dragged_by(egui::PointerButton::Secondary) {
+                let delta = full_response.drag_delta();
+                let max_pan_x = ((page_width_pts - available.x) / 2.0).max(0.0);
+                app.continuous_pan_x =
+                    (app.continuous_pan_x + delta.x).clamp(-max_pan_x, max_pan_x);
+                app.continuous_drag_scroll += delta.y;
+                ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                ctx.request_repaint();
+            }
+
             // 텍스트 선택 — 드래그가 시작된 페이지(앵커, app.selection_page)를 벗어나면
             // 그 프레임은 갱신하지 않고 무시한다(한 페이지 안에서만 선택 — 문서 상단 docs
             // 참고).
-            if full_response.drag_started() {
+            if full_response.drag_started_by(egui::PointerButton::Primary) {
                 let hit = full_response
                     .interact_pointer_pos()
                     .and_then(|pos| page_at(pos, origin));
@@ -647,7 +676,7 @@ fn show_continuous(
                         }
                     }
                 }
-            } else if full_response.dragged() {
+            } else if full_response.dragged_by(egui::PointerButton::Primary) {
                 if let (Some(start), Some(anchor_page)) =
                     (app.selection_drag_start_index, app.selection_page)
                 {
@@ -669,7 +698,7 @@ fn show_continuous(
                     }
                 }
             }
-            if full_response.drag_stopped() && app.selection.is_none() {
+            if full_response.drag_stopped_by(egui::PointerButton::Primary) && app.selection.is_none() {
                 // 문자 위에서 시작 못 한 드래그(빈 여백 등) — 앵커 페이지도 정리.
                 app.selection_page = None;
             }

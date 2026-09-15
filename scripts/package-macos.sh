@@ -42,7 +42,9 @@ case "$TARGET" in
 esac
 
 echo "==> Building PDF-Outliner release binary for $TARGET"
-cargo build --release --target "$TARGET" -p ui
+# 창 제목에 넣을 버전(crates/ui/build.rs) — 인자로 받은 태그만 넘긴다. 인자가 없는 로컬 실행은
+# 비워 두어 build.rs가 git describe를 쓰게 한다(Cargo.toml 기반 기본값은 실제 버전과 어긋남).
+PDF_OUTLINER_VERSION="${3:-}" cargo build --release --target "$TARGET" -p ui
 
 DIST_DIR="$REPO_ROOT/dist"
 APP_DIR="$DIST_DIR/PDF Outliner.app"

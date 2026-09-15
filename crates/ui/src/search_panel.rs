@@ -38,11 +38,11 @@ pub fn show_docked(ctx: &egui::Context, app: &mut PdfViewerApp) {
         .min_width(200.0)
         .show(ctx, |ui| contents(ui, app, false));
 
-    // 포커스 테두리 — 북마크 사이드바와 같은 방식(패널 밖 Foreground 레이어에 그려야 네 변이
-    // 잘리지 않는다, sidebar.rs 참고).
+    // 포커스 테두리 — 북마크 사이드바와 같은 방식(패널 밖 레이어에 그려야 네 변이 잘리지 않는다,
+    // sidebar.rs 참고). 레이어는 PanelResizeLine(패널 위·팝업 아래)이라 드롭다운·메뉴를 덮지 않는다.
     if app.focus_area == FocusArea::SearchResults {
         ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
+            egui::Order::PanelResizeLine,
             Id::new("search_panel_focus_border"),
         ))
         .rect_stroke(

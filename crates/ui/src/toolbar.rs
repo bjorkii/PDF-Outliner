@@ -208,35 +208,6 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 }
             });
 
-            // 정보성 툴팁이라 on_hover_ui로 충분 — egui 툴팁은 원래 마우스가 벗어나면
-            // 자동으로 닫힌다(사용자가 요청한 "hover 종료되면 창도 꺼지게"가 기본 동작).
-            // \t(tab)만으로는 실제 탭 스톱 정렬이 안 되고 각 줄의 키 텍스트 길이만큼
-            // 들쑥날쑥해진다(egui는 tab을 "고정폭만큼 더 전진"으로만 처리, 열 정렬 개념이
-            // 없음) — 사용자가 원한 표 형태 정렬은 egui::Grid로 컬럼 자체를 나눠야 나온다.
-            let m = modifier_label();
-            ui.label("단축키").on_hover_ui(|ui| {
-                egui::Grid::new("shortcut_help_grid")
-                    .num_columns(2)
-                    .spacing([16.0, 8.0])
-                    .show(ui, |ui| {
-                        for (key, desc) in [
-                            (format!("{m}+B"), "북마크 추가"),
-                            ("F2".to_string(), "북마크 수정"),
-                            ("Delete".to_string(), "북마크 삭제"),
-                            (format!("{m}+S"), "북마크 저장"),
-                            (format!("{m}+F"), "내용 검색"),
-                            (format!("{m}+["), "이전 화면"),
-                            (format!("{m}+]"), "다음 화면"),
-                            ("Tab".to_string(), "북마크↔뷰어 (검색 목록에서는 직전 영역으로)"),
-                            ("C".to_string(), "쪽 단위/연속 스크롤 전환"),
-                        ] {
-                            ui.label(key);
-                            ui.label(desc);
-                            ui.end_row();
-                        }
-                    });
-            });
-
             ui.separator();
 
             // 트랙패드 핀치/마우스 휠 줌과 별개로, 비전문 사용자를 위한 명시적 버튼 병행 배치.
@@ -329,6 +300,16 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             // 오른쪽에 온다 — 그래서 눈에 보이는 순서([검색창][🔍][◀][N/M][▶])와는
             // 반대로 ▶부터 추가한다.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // 단축키 안내 — 툴바 맨 오른쪽(2026-09-15 요청). on_hover_ui는 egui 기본 지연
+                // (tooltip_delay 0.5초 + 마우스가 멈출 때까지 대기)이 있어 1~2초 뒤에야 떴으므로,
+                // 마우스가 올라와 있는 동안 show_tooltip_ui를 직접 불러 즉시 띄운다. 앱 전체
+                // tooltip_delay는 건드리지 않아 다른 버튼 툴팁은 그대로다.
+                let shortcuts = ui.add(egui::Label::new("단축키").sense(egui::Sense::hover()));
+                if shortcuts.hovered() {
+                    shortcuts.show_tooltip_ui(show_shortcut_help);
+                }
+                ui.separator();
+
                 let has_results = !app.search_matches.is_empty();
                 let searching = app.search_running.is_some();
 
@@ -406,6 +387,35 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
     });
 }
 
+/// 단축키 안내 툴팁 내용. \t(tab)만으로는 실제 탭 스톱 정렬이 안 되고 각 줄의 키 텍스트
+/// 길이만큼 들쑥날쑥해진다(egui는 tab을 "고정폭만큼 더 전진"으로만 처리, 열 정렬 개념이 없음) —
+/// 표 형태 정렬은 egui::Grid로 컬럼 자체를 나눠야 나온다.
+fn show_shortcut_help(ui: &mut egui::Ui) {
+    let m = modifier_label();
+    egui::Grid::new("shortcut_help_grid")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            for (key, desc) in [
+                (format!("{m}+B"), "북마크 추가"),
+                ("F2".to_string(), "북마크 수정"),
+                ("Delete".to_string(), "북마크 삭제"),
+                (format!("{m}+S"), "북마크 저장"),
+                (format!("{m}+F"), "내용 검색"),
+                ("↑ / ↓".to_string(), "검색 결과 이동 (검색 목록 포커스 시)"),
+                (format!("{m}+["), "이전 화면"),
+                (format!("{m}+]"), "다음 화면"),
+                ("Tab".to_string(), "북마크↔뷰어 (검색 목록에서는 직전 영역으로)"),
+                ("C".to_string(), "쪽 단위/연속 스크롤 전환"),
+                ("우클릭 드래그".to_string(), "화면 이동"),
+            ] {
+                ui.label(key);
+                ui.label(desc);
+                ui.end_row();
+            }
+        });
+}
+
 /// "파일 열기" 버튼에 마우스를 올리면(클릭 아님) 최근 연 파일 목록을 드롭다운으로 보여준다.
 /// egui의 `on_hover_ui`/`on_hover_text`는 클릭이 안 되는 순수 정보성 툴팁이라(내용 위로
 /// 마우스가 가면 클릭 이벤트가 그 아래 위젯으로 새지 않고 그냥 사라짐) 이 목적엔 못 쓰고,
@@ -429,6 +439,21 @@ fn show_recent_files_dropdown(ui: &mut egui::Ui, app: &mut PdfViewerApp, button:
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(dropdown_width);
+                    // 항목 사이 간격을 기본(3pt)보다 조금 넓힌다 — 두 줄짜리 항목이 붙어 보여
+                    // 구분이 잘 안 된다는 피드백(2026-09-15).
+                    ui.spacing_mut().item_spacing.y = 7.0;
+                    // 경로 줄 색: weak_text_color는 너무 흐려 잘 안 읽힌다는 피드백(2026-09-15) —
+                    // 본문 글자색과 흐린 색의 중간. 둘 다 premultiplied라 성분 평균이 곧 선형 혼합.
+                    let path_color = {
+                        let (strong, weak) = (ui.visuals().text_color(), ui.visuals().weak_text_color());
+                        let mid = |a: u8, b: u8| ((a as u16 + b as u16) / 2) as u8;
+                        egui::Color32::from_rgba_premultiplied(
+                            mid(strong.r(), weak.r()),
+                            mid(strong.g(), weak.g()),
+                            mid(strong.b(), weak.b()),
+                            mid(strong.a(), weak.a()),
+                        )
+                    };
                     for path in &app.recent_files {
                         let filename = crate::app::display_filename(path);
                         // 파일명은 위 줄에 이미 있으니 아래 줄엔 상위 폴더 경로만(파일명
@@ -447,11 +472,15 @@ fn show_recent_files_dropdown(ui: &mut egui::Ui, app: &mut PdfViewerApp, button:
                         // WidgetText로는 안 되고 LayoutJob으로 섹션별 폰트/색을 지정해야 한다.
                         let mut job = egui::text::LayoutJob::default();
                         job.wrap.max_width = dropdown_width;
+                        // 글자 단위로 줄바꿈해 각 줄을 폭 끝까지 채운다 — 기본(단어 단위)은 띄어쓰기
+                        // 없는 긴 한글 경로 조각이 통째로 다음 줄로 넘어가 오른쪽 끝이 들쑥날쑥했음
+                        // (2026-09-15 피드백). egui엔 양쪽 정렬이 없어 이게 가장 고르게 맞추는 방법.
+                        job.wrap.break_anywhere = true;
                         job.append(
                             &filename,
                             0.0,
                             egui::TextFormat {
-                                font_id: egui::FontId::proportional(14.0),
+                                font_id: egui::FontId::proportional(15.0),
                                 color: ui.visuals().text_color(),
                                 ..Default::default()
                             },
@@ -461,8 +490,8 @@ fn show_recent_files_dropdown(ui: &mut egui::Ui, app: &mut PdfViewerApp, button:
                                 &format!("\n{dir_only}"),
                                 0.0,
                                 egui::TextFormat {
-                                    font_id: egui::FontId::proportional(11.0),
-                                    color: ui.visuals().weak_text_color(),
+                                    font_id: egui::FontId::proportional(13.0),
+                                    color: path_color,
                                     ..Default::default()
                                 },
                             );
