@@ -11,3 +11,4 @@ lopdf = "0.44"
 unicode-normalization = "0.1"
 anyhow.workspace = true
 thiserror.workspace = true
+chrono.workspace = true

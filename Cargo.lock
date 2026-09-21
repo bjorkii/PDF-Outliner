@@ -3131,6 +3131,7 @@ name = "pdf_ocr"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "lopdf",
  "thiserror 1.0.69",
  "unicode-normalization",

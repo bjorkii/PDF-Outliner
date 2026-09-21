@@ -330,6 +330,10 @@ pub struct PdfViewerApp {
     pub ocr_export_dialog: Option<crate::ocr_dialogs::ExportDialog>,
     /// 실행 중이거나 결과를 보여 주는 OCR 작업(`ocr_dialogs`, `ocr_worker`).
     pub ocr_job: Option<crate::ocr_dialogs::OcrJob>,
+    /// OCR 전체 삭제 확인 창(분석 결과, `ocr_dialogs`).
+    pub ocr_removal_confirm: Option<crate::ocr_dialogs::RemovalConfirm>,
+    /// OCR 전체 삭제 전에 북마크 저장을 묻는 창.
+    pub ocr_removal_needs_save: bool,
 
     pub status_message: Option<String>,
 }
@@ -455,6 +459,8 @@ impl PdfViewerApp {
             batch_import: None,
             ocr_export_dialog: None,
             ocr_job: None,
+            ocr_removal_confirm: None,
+            ocr_removal_needs_save: false,
             last_window_title: None,
             prev_focused_widget: None,
             status_message,
@@ -597,7 +603,7 @@ impl PdfViewerApp {
     /// 화면은 옮기지 않는다. 저장 안 한 북마크 편집이 있으면 파일의 북마크로 덮어쓰지 않는다.
     /// 열기에 실패하면(아직 쓰는 중이라 깨진 파일 등) 기존 문서를 그대로 두고 다음 변경을
     /// 기다린다 — SumatraPDF와 같이 복구·암호 입력은 시도하지 않는다.
-    fn reload_current_document(&mut self) {
+    pub(crate) fn reload_current_document(&mut self) {
         let Some(path) = self.current_file.clone() else {
             return;
         };

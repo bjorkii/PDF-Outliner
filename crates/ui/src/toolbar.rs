@@ -213,6 +213,14 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             let ocr_available = app.current_file.is_some() && !app.ocr_job.as_ref().is_some_and(|j| j.is_running());
             ui.add_enabled_ui(ocr_available, |ui| {
                 ui.menu_button("OCR", |ui| {
+                    if ui
+                        .button("전체 삭제…")
+                        .on_hover_text("보이지 않는 텍스트(OCR 레이어)를 모두 지웁니다 — 원본은 .backup으로 보존")
+                        .clicked()
+                    {
+                        crate::ocr_dialogs::request_removal(ui.ctx(), app);
+                        ui.close_menu();
+                    }
                     ui.menu_button("내보내기", |ui| {
                         use crate::ocr_worker::ExportFormat;
                         if ui.button("hOCR…").on_hover_text("단어 위치가 담긴 hOCR — OCR 가져오기에 다시 쓸 수 있음").clicked() {

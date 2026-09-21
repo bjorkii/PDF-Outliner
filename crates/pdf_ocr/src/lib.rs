@@ -9,10 +9,17 @@
 //! 대신 바이트 범위를 보존하는 자체 토크나이저(`content::lexer`)로 연산자 위치만 찾고, 편집은
 //! 원본 바이트에서 그 범위만 잘라 바꾼다.
 
+/// ui 크레이트가 같은 버전의 lopdf 타입을 쓰도록 다시 내보낸다.
+pub use lopdf;
+
+pub mod classify;
 pub mod content;
+pub mod fonts;
 pub mod geometry;
 pub mod hocr;
 pub mod layout;
 pub mod preflight;
+pub mod remove;
 pub mod resources;
+pub mod save;
 pub mod txt;

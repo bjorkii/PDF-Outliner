@@ -33,6 +33,67 @@ pub const HOCR_DPI: f64 = 300.0;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Job {
     Export(ExportJob),
+    /// OCR 전체 삭제 전 분석(사전 점검 + 삭제 계획). 파일을 쓰지 않는다.
+    AnalyzeRemoval { pdf: PathBuf },
+    /// OCR 전체 삭제 — 결과를 `temp_output`에 쓰고 검증까지 한다. 원본 교체는 UI가 한다.
+    Remove { pdf: PathBuf, temp_output: PathBuf },
+}
+
+/// 삭제 대상 개수(형태별 표시 연산자 수).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct RemovalCounts {
+    pub invisible_mode: usize,
+    pub zero_size: usize,
+    pub transparent: usize,
+    pub clip_only_kept: usize,
+}
+
+impl RemovalCounts {
+    pub fn removed(&self) -> usize {
+        self.invisible_mode + self.zero_size + self.transparent
+    }
+}
+
+impl From<pdf_ocr::remove::KindCounts> for RemovalCounts {
+    fn from(c: pdf_ocr::remove::KindCounts) -> Self {
+        Self {
+            invisible_mode: c.invisible_mode,
+            zero_size: c.zero_size,
+            transparent: c.transparent,
+            clip_only_kept: c.clip_only_kept,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemovalAnalysis {
+    pub pages: usize,
+    /// 지울 것이 있는 페이지 수.
+    pub pages_with_hidden_text: usize,
+    pub counts: RemovalCounts,
+    /// (페이지 번호, 이유) — 건드리지 않을 페이지.
+    pub skipped: Vec<(usize, String)>,
+    pub notes: Vec<(usize, String)>,
+    pub signed: bool,
+    pub tagged: bool,
+    pub pdfa: Option<String>,
+    pub incremental_updates: usize,
+    pub linearized: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemovalReport {
+    pub analysis: RemovalAnalysis,
+    /// 실제로 바뀐 페이지 수(되돌린 페이지 제외).
+    pub pages_changed: usize,
+    /// (페이지 번호, 이유) — 검증에서 실패해 원래대로 되돌린 페이지.
+    pub rolled_back: Vec<(usize, String)>,
+    /// 공유 Form을 되돌리느라 함께 원래대로 돌아간 페이지.
+    pub also_reverted: Vec<usize>,
+    pub size_before: u64,
+    pub size_after: u64,
+    /// 결과 파일을 만들지 않음(지울 것이 없음).
+    pub nothing_to_do: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,13 +128,18 @@ pub struct ExportReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
+    /// 진행 중인 단계 이름(예: "검증 중").
+    Stage(String),
     Progress { done: usize, total: usize },
     ExportDone(ExportReport),
+    RemovalAnalysis(RemovalAnalysis),
+    RemovalDone(RemovalReport),
     Failed(String),
 }
 
 // ---------------------------------------------------------------- UI 쪽
 
+#[allow(clippy::large_enum_variant)] // 프레임당 몇 번만 오가는 값이라 크기가 문제 되지 않는다
 pub enum WorkerPoll {
     Event(Event),
     Empty,
@@ -171,18 +237,25 @@ pub fn run_worker_process() -> i32 {
         emit(Event::Failed("pdfium 라이브러리를 찾지 못했습니다.".to_string()));
         return 2;
     };
-    match job {
-        Job::Export(job) => match run_export(engine, &job, &mut emit) {
-            Ok(report) => {
-                emit(Event::ExportDone(report));
-                0
+    let result = match &job {
+        Job::Export(export) => run_export(engine, export, &mut emit).map(Event::ExportDone),
+        Job::AnalyzeRemoval { pdf } => analyze_removal(engine, pdf).map(|(analysis, ..)| Event::RemovalAnalysis(analysis)),
+        Job::Remove { pdf, temp_output } => run_removal(engine, pdf, temp_output, &mut emit).map(Event::RemovalDone),
+    };
+    match result {
+        Ok(event) => {
+            emit(event);
+            0
+        }
+        Err(err) => {
+            match &job {
+                Job::Export(export) => drop(std::fs::remove_file(&export.temp_output)),
+                Job::Remove { temp_output, .. } => drop(std::fs::remove_file(temp_output)),
+                Job::AnalyzeRemoval { .. } => {}
             }
-            Err(err) => {
-                let _ = std::fs::remove_file(&job.temp_output);
-                emit(Event::Failed(format!("{err:#}")));
-                1
-            }
-        },
+            emit(Event::Failed(format!("{err:#}")));
+            1
+        }
     }
 }
 
@@ -277,6 +350,130 @@ fn extract_page(page: &pdfium_render::prelude::PdfPage, options: &LayoutOptions)
         .collect();
     let (lines, stats) = build_lines(&chars, options);
     Ok((frame, frame.orient_lines(lines), stats.clamped_chars))
+}
+
+// ---------------------------------------------------------------- OCR 전체 삭제
+
+use pdf_ocr::lopdf::Document;
+use pdf_ocr::remove::{PageStatus, RemovalPlan};
+
+/// 사전 점검 + 삭제 계획. 암호화·손상·페이지 수 불일치면 오류. (분석, lopdf 문서, 계획, 압축 저장 여부)
+fn analyze_removal(engine: PdfEngine, pdf: &Path) -> anyhow::Result<(RemovalAnalysis, Document, RemovalPlan, bool)> {
+    use anyhow::{bail, Context};
+    let raw = std::fs::read(pdf).with_context(|| format!("파일을 읽을 수 없음: {}", pdf.display()))?;
+    let doc = Document::load_mem(&raw).map_err(|e| anyhow::anyhow!("PDF 구조를 읽지 못했습니다(손상 가능): {e}"))?;
+    let preflight = pdf_ocr::preflight::Preflight::inspect(&doc, &raw);
+    drop(raw);
+    if preflight.encrypted {
+        bail!("암호화된 PDF는 아직 지원하지 않습니다. 다시 저장하면 암호화가 풀리거나 바뀔 수 있어서입니다.");
+    }
+    let pdfium_pages = engine.open_document(pdf).map_err(open_error_message)?.pages().len() as usize;
+    if pdfium_pages != preflight.page_count {
+        bail!(
+            "PDF 구조가 손상된 것으로 보입니다(페이지 수 불일치: 화면 {pdfium_pages}쪽, 구조 {}쪽). 원본을 건드리지 않았습니다.",
+            preflight.page_count
+        );
+    }
+    let compact = pdf_ocr::save::uses_object_streams(&doc) && !preflight.pdfa.as_deref().is_some_and(|p| p.starts_with('1'));
+    let plan = pdf_ocr::remove::plan(&doc);
+    let mut analysis = RemovalAnalysis {
+        pages: plan.pages.len(),
+        counts: plan.totals().into(),
+        signed: preflight.signed,
+        tagged: preflight.tagged,
+        pdfa: preflight.pdfa.clone(),
+        incremental_updates: preflight.incremental_updates,
+        linearized: preflight.linearized,
+        ..Default::default()
+    };
+    for page in &plan.pages {
+        match &page.status {
+            PageStatus::Planned => analysis.pages_with_hidden_text += 1,
+            PageStatus::Skipped(reason) => analysis.skipped.push((page.number, reason.clone())),
+            PageStatus::Unchanged => {}
+        }
+        analysis.notes.extend(page.notes.iter().map(|n| (page.number, n.clone())));
+    }
+    Ok((analysis, doc, plan, compact))
+}
+
+fn run_removal(engine: PdfEngine, pdf: &Path, temp_output: &Path, emit: &mut dyn FnMut(Event)) -> anyhow::Result<RemovalReport> {
+    use anyhow::{bail, Context};
+    use std::collections::BTreeSet;
+    emit(Event::Stage("분석 중".to_string()));
+    let (analysis, mut doc, plan, compact) = analyze_removal(engine, pdf)?;
+    let size_before = std::fs::metadata(pdf).map(|m| m.len()).unwrap_or(0);
+    let mut report = RemovalReport { analysis, size_before, ..Default::default() };
+    if !plan.has_changes() {
+        report.nothing_to_do = true;
+        return Ok(report);
+    }
+
+    emit(Event::Stage("삭제·저장 중".to_string()));
+    let mut applied = pdf_ocr::remove::apply(&mut doc, &plan)?;
+    let now = chrono::Local::now().fixed_offset();
+    pdf_ocr::save::save_rewritten(&mut doc, temp_output, now, compact)?;
+
+    let planned: Vec<usize> =
+        plan.pages.iter().enumerate().filter(|(_, p)| p.status == PageStatus::Planned).map(|(i, _)| i).collect();
+    emit(Event::Stage("검증 중(원본과 화면·텍스트 비교)".to_string()));
+    let failures = verify_pages(engine, pdf, temp_output, &planned, emit)?;
+
+    let mut reverted: BTreeSet<usize> = BTreeSet::new();
+    if !failures.is_empty() {
+        let failed: BTreeSet<usize> = failures.iter().map(|(i, _)| *i).collect();
+        let also = applied.rollback(&mut doc, &failed);
+        report.rolled_back = failures.iter().map(|(i, reason)| (i + 1, reason.clone())).collect();
+        report.also_reverted = also.iter().map(|i| i + 1).collect();
+        reverted.extend(failed);
+        reverted.extend(also);
+        emit(Event::Stage("되돌린 페이지 반영해 다시 저장 중".to_string()));
+        pdf_ocr::save::save_rewritten(&mut doc, temp_output, now, compact)?;
+        let again: Vec<usize> = reverted.iter().copied().collect();
+        let still = verify_pages(engine, pdf, temp_output, &again, emit)?;
+        if let Some((page, reason)) = still.first() {
+            bail!("되돌린 {}쪽이 원본과 같지 않습니다({reason}). 원본을 건드리지 않았습니다.", page + 1);
+        }
+    }
+
+    // 결과 파일 전체 구조 확인: 두 라이브러리로 다시 열리고 페이지 수가 같아야 한다.
+    let reopened = Document::load(temp_output).map_err(|e| anyhow::anyhow!("결과 파일을 다시 읽지 못함: {e}"))?;
+    let pdfium_pages = engine.open_document(temp_output).context("결과 파일을 pdfium으로 열지 못함")?.pages().len() as usize;
+    if reopened.get_pages().len() != report.analysis.pages || pdfium_pages != report.analysis.pages {
+        bail!("결과 파일의 페이지 수가 원본과 다릅니다. 원본을 건드리지 않았습니다.");
+    }
+    report.pages_changed = planned.iter().filter(|i| !reverted.contains(i)).count();
+    report.size_after = std::fs::metadata(temp_output).map(|m| m.len()).unwrap_or(0);
+    Ok(report)
+}
+
+/// 페이지들(0부터)을 원본과 비교해 실패한 (페이지, 이유) 목록.
+fn verify_pages(
+    engine: PdfEngine,
+    original: &Path,
+    result: &Path,
+    pages: &[usize],
+    emit: &mut dyn FnMut(Event),
+) -> anyhow::Result<Vec<(usize, String)>> {
+    use anyhow::Context;
+    use pdf_engine::verify::{compare, snapshot};
+    let before = engine.open_document(original).map_err(open_error_message)?;
+    let after = engine.open_document(result).context("결과 파일을 pdfium으로 열지 못함")?;
+    let mut failures = Vec::new();
+    for (done, &index) in pages.iter().enumerate() {
+        let outcome = (|| -> anyhow::Result<Result<(), String>> {
+            let a = snapshot(&before.pages().get(index as i32)?)?;
+            let b = snapshot(&after.pages().get(index as i32)?)?;
+            Ok(compare(&a, &b))
+        })();
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(reason)) => failures.push((index, reason)),
+            Err(err) => failures.push((index, format!("검증 실패({err:#})"))),
+        }
+        emit(Event::Progress { done: done + 1, total: pages.len() });
+    }
+    Ok(failures)
 }
 
 /// pdfium의 열기 오류를 사용자에게 보일 문장으로 바꾼다.

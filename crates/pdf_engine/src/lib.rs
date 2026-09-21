@@ -11,6 +11,7 @@ pub mod search;
 pub mod selection;
 pub mod skew;
 pub mod text_layer;
+pub mod verify;
 
 use anyhow::{Context, Result};
 use pdfium_render::prelude::*;
