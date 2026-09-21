@@ -42,6 +42,9 @@ pdfium dylib 탐색 순서(`crates/ui/src/app.rs`의 `create_engine()`, 2026-07-
 - `cargo run --release --example bench_tiles -p pdf_engine -- <pdfium_dylib> <pdf> [page_0based]` — 영역 렌더의 /Rotate 일치·타일 경계 이음새(bleed별)·페이지 재로드 비용
 - `cargo run --release --example bench_tile_schedule -p pdf_engine -- <pdfium_dylib> <pdf> [page_0based]` — 타일 렌더를 프레임 예산으로 나눴을 때 선명해지기까지 프레임 수·한 장 최대 시간(타일 방식 기각 근거, §7)
 - `cargo run --release --example search_context -p pdf_engine -- <pdfium_dylib> <pdf> <검색어> [최대 출력 수]` — 검색 결과 앞뒤 문맥 추출 검증(일치 문자열이 검색어와 다른 건수)
+- `cargo run --example dump_text_layer -p pdf_engine -- <pdfium_dylib> <pdf> <page_0based> [최대 문자 수]` — OCR 내보내기 입력(문자별 loose box·원점·생성 문자·보이지 않음 판정) 출력
+- `cargo run --release -p pdf_ocr --example survey -- <pdf>...` — 사전 점검(암호화·서명·PDF/A·태그·증분 업데이트)과 콘텐츠 해석기 결과(표시 연산자, `Tr 3` 수, Form 안 여부, 해석 실패 페이지)
+- OCR 작업 프로세스 단독 실행: `printf '{"Export":{"pdf":"<절대경로>","output":"<out.hocr>","temp_output":"<out.hocr.partial>","format":"Hocr","invisible_only":true,"txt_crlf":false,"txt_form_feed":false,"txt_page_labels":true}}' | PDFIUM_DYLIB_PATH=<dylib> target/release/PDF-Outliner --ocr-worker` — stdout에 JSON 이벤트 줄(진행률·결과)
 - 앱 진단: `PDF_RENDER_WORKER=0`(렌더링 보조 프로세스 끄고 동기 렌더링) / `~/Library/Logs/PDF Outliner/panic.log`(패닉 메시지 + 백트레이스 + 최근 동작 기록 400줄, 1MB 넘으면 `panic.log.1`로 교체) / 함수 이름이 찍히는 진단 빌드: `CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo build --release -p ui`
 - 테스트용 실제 PDF 샘플: `pdf-samples/` 안에 여러 개. **일부는 사용자가 수동 GUI 테스트에 실사용 중이라 자동화 테스트가 함부로 건드리면 안 됨**(§7 "테스트 설계 원칙" 참고) — 자동화 테스트는 항상 pristine 백업을 임시 디렉터리에 복사해서 쓸 것.
   - **⚠️ 이 폴더 전체가 git에서 완전 제거됨(2026-07-17)**: 장차 저장소를 public으로 전환할 때 공개되면 안 되는 자료라서(사용자 결정) `git filter-repo`로 **과거 히스토리까지 전부 퍼지**하고 `.gitignore`에 `pdf-samples/` 추가 — 이 로컬 머신에만 존재하는 로컬 전용 폴더다. `cargo test`가 이 폴더의 특정 파일(BZR001088_01.pdf, KKZ000160_01.pdf, "embeddedoutline 복사본.pdf" 등)을 필요로 하므로 **테스트는 이 머신에서만 통과**하고, 새 클론에서는 해당 테스트가 실패한다(CI는 테스트를 돌리지 않고 빌드만 하므로 릴리스 무관). 퍼지 직전 전체 히스토리 백업: `../PDF-Outliner-history-backup-pre-samples-purge.bundle`(리포 밖, 커밋 금지).
@@ -347,6 +350,10 @@ CSV/Excel 컬럼 순서 동일, 헤더는 한글, CSV는 UTF-8 BOM 적용(§2).
 - **라이브 업데이트**(`file_watch.rs`, SumatraPDF 방식·같은 상수): 폴더 감시 → 마지막 이벤트 후 500ms 조용하면 크기·수정 시각 확인, 직전과 다르면 쓰는 중으로 보고 대기, 최대 5초. 자기 저장은 "알고 있는 상태"로 무시. 보던 화면(페이지·배율·팬·스크롤·모드) 유지, 보던 페이지가 없어지면 첫 페이지, 검색 중이면 목록만 갱신(화면·포커스 유지), 저장 안 한 북마크 편집은 유지, 열기 실패 시 기존 문서 유지. Finder 이름 변경 추적(macOS)과 함께 실 점검 확인.
 - 북마크 추가 시 클립보드 텍스트를 초기 제목으로(공백 정리, 200자 제한, 비었으면 "새 북마크"). 툴바 페이지 입력칸은 숫자 3자리 폭·가운데 정렬.
 - 배포: zip → macOS dmg / Windows Inno Setup setup.exe(§5).
+
+### OCR 기능 라운드 (2026-09-21~, 진행 중 — 설계: `plan/ocr_feature_considerations.md`(로컬 전용, gitignore), 계획: M1 내보내기 → M2 삭제 → M3 가져오기)
+- **M0 기반**(`crates/pdf_ocr`, lopdf만 사용): 표시 페이지 프레임(`geometry.rs`, CropBox∩MediaBox·Rotate 정규화·UserUnit·상속), 바이트 범위 보존 토크나이저(`content/lexer.rs` — lopdf `Content::decode`는 인라인 이미지를 잃을 수 있어 편집에 쓰지 않음), 그래픽 상태 해석기(`content/interp.rs`), 참조 횟수·clone-on-write(`resources.rs`), 사전 점검(`preflight.rs`). 샘플 12개 전부 해석 실패 0 — 샘플의 OCR(`Tr 3`)은 전부 Form XObject 안(형태 B).
+- **M1 내보내기**(구현 + headless 검증, GUI 실 점검 미확인): 툴바 `OCR ▸ 내보내기 ▸ hOCR… / txt…` → 옵션 창(보이지 않는 텍스트만/모든 텍스트, txt는 페이지 레이블·CRLF·폼피드) → 저장 대화상자 → `--ocr-worker` 작업 프로세스(`ocr_worker.rs`, JSON 줄 프로토콜, `.partial`에 쓰고 rename) → 진행률·취소·리포트 창(`ocr_dialogs.rs`). 문자 추출은 `pdf_engine::text_layer`(loose box, render mode 3·7/알파 0/면적 0이면 보이지 않음), 줄 구성은 `pdf_ocr::layout`(pdfium 생성 공백·줄바꿈 + 기하 판정, NFC, 소프트 하이픈·폭 없는 문자 제거). `/Rotate` 페이지는 회전 전 프레임에서 줄을 만들고 표시 프레임으로 옮겨 `textangle`을 붙임. loose box 높이가 페이지 중앙값의 4배를 넘는 글자는 기준선 기준으로 보정(`BZR001088_01-mod.pdf` 2쪽에 높이 3,235pt 글자가 실재). 세로쓰기는 글자마다 한 줄로 나옴(1차 범위 밖). 샘플 전체 hOCR XML 검사 통과, 358쪽 1.7초.
 
 ## 7. 값진 기술적 교훈 (다음 세션이 같은 삽질을 반복하지 않도록)
 

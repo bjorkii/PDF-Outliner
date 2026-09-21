@@ -10,6 +10,7 @@ pub mod outline;
 pub mod search;
 pub mod selection;
 pub mod skew;
+pub mod text_layer;
 
 use anyhow::{Context, Result};
 use pdfium_render::prelude::*;

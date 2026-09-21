@@ -1,0 +1,13 @@
+[package]
+name = "pdf_ocr"
+version.workspace = true
+edition.workspace = true
+
+# OCR 텍스트 레이어(삭제·내보내기·가져오기)의 PDF 구조 작업. pdfium을 쓰지 않고 lopdf만으로
+# 동작한다 — pdfium은 스레드 안전하지 않아서(pdf_engine::search 모듈 문서) 렌더 검증처럼
+# pdfium이 꼭 필요한 부분은 ui 크레이트의 작업 프로세스가 따로 맡는다.
+[dependencies]
+lopdf = "0.44"
+unicode-normalization = "0.1"
+anyhow.workspace = true
+thiserror.workspace = true

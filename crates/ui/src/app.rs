@@ -326,6 +326,11 @@ pub struct PdfViewerApp {
     /// 로그 화면으로 전환되고, 매 프레임 `batch_import::poll`이 1파일씩 진행시킨다.
     pub batch_import: Option<crate::batch_import::BatchImportJob>,
 
+    /// OCR 내보내기 옵션 대화상자(열려 있을 때만 Some, `ocr_dialogs`).
+    pub ocr_export_dialog: Option<crate::ocr_dialogs::ExportDialog>,
+    /// 실행 중이거나 결과를 보여 주는 OCR 작업(`ocr_dialogs`, `ocr_worker`).
+    pub ocr_job: Option<crate::ocr_dialogs::OcrJob>,
+
     pub status_message: Option<String>,
 }
 
@@ -448,6 +453,8 @@ impl PdfViewerApp {
             search_keep_view: false,
             save_as_requested: false,
             batch_import: None,
+            ocr_export_dialog: None,
+            ocr_job: None,
             last_window_title: None,
             prev_focused_widget: None,
             status_message,
@@ -2137,6 +2144,7 @@ impl eframe::App for PdfViewerApp {
         self.poll_search_job(ctx);
         self.poll_render_worker(ctx);
         self.poll_batch_import(ctx);
+        crate::ocr_dialogs::poll(self);
         self.poll_file_watch(ctx);
         #[cfg(target_os = "macos")]
         self.poll_macos_open_file_events(ctx);
@@ -2158,6 +2166,7 @@ impl eframe::App for PdfViewerApp {
         show_crash_recovery_dialog(ctx, self);
         show_quit_confirmation_dialog(ctx, self);
         show_search_no_results_dialog(ctx, self);
+        crate::ocr_dialogs::show(ctx, self);
         crate::viewer_panel::show(ctx, self);
         // 분리된 검색 결과 창(항상 위) — 별도 OS 창이라 메인 창 레이아웃과 무관.
         crate::search_panel::show_detached(ctx, self);

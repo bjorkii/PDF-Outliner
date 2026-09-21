@@ -11,3 +11,6 @@
 pdf-samples/
 
 *.pdf
+
+# 설계 검토 메모(로컬 전용)
+plan/

@@ -12,6 +12,7 @@ pdf_engine = { path = "../pdf_engine" }
 bookmark = { path = "../bookmark" }
 import_export = { path = "../import_export" }
 pdf_outline_writer = { path = "../pdf_outline_writer" }
+pdf_ocr = { path = "../pdf_ocr" }
 pdfium-render = { version = "0.9", features = ["thread_safe"] }
 eframe = { version = "0.29", features = ["wgpu", "persistence"] }
 egui = "0.29"

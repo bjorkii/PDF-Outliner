@@ -3127,6 +3127,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf_ocr"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lopdf",
+ "thiserror 1.0.69",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "pdf_outline_writer"
 version = "0.1.0"
 dependencies = [
@@ -4261,6 +4271,7 @@ dependencies = [
  "notify",
  "open",
  "pdf_engine",
+ "pdf_ocr",
  "pdf_outline_writer",
  "pdfium-render",
  "rfd",

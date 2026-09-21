@@ -16,6 +16,8 @@ mod file_watch;
 mod fonts;
 #[cfg(target_os = "macos")]
 mod macos_open_file;
+mod ocr_dialogs;
+mod ocr_worker;
 mod render_worker;
 mod search_panel;
 mod texture_cache;
@@ -27,14 +29,26 @@ mod sidebar;
 use app::PdfViewerApp;
 
 fn main() -> eframe::Result<()> {
-    let is_render_worker = std::env::args().nth(1).as_deref() == Some(render_worker::WORKER_FLAG);
+    let first_arg = std::env::args().nth(1);
+    let is_render_worker = first_arg.as_deref() == Some(render_worker::WORKER_FLAG);
+    let is_ocr_worker = first_arg.as_deref() == Some(ocr_worker::WORKER_FLAG);
     // 패닉 내용·백트레이스·최근 동작 기록을 panic.log에 남긴다(크기 제한·교체 정책은 crash_log 문서).
-    crash_log::install(if is_render_worker { "render-worker" } else { "app" });
+    crash_log::install(if is_render_worker {
+        "render-worker"
+    } else if is_ocr_worker {
+        "ocr-worker"
+    } else {
+        "app"
+    });
 
     // 렌더링 보조 프로세스로 실행된 경우(render_worker 모듈 문서) — 창을 만들지 않고 요청만
     // 처리하다 메인 프로세스가 끝나면(stdin EOF) 종료한다.
     if is_render_worker {
         std::process::exit(render_worker::run_worker_process());
+    }
+    // OCR 작업 프로세스(ocr_worker 모듈 문서) — 작업 하나를 처리하고 끝난다.
+    if is_ocr_worker {
+        std::process::exit(ocr_worker::run_worker_process());
     }
 
     env_logger::init();

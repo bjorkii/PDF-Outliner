@@ -5,6 +5,7 @@ members = [
     "crates/bookmark",
     "crates/import_export",
     "crates/pdf_outline_writer",
+    "crates/pdf_ocr",
     "crates/ui",
 ]
 

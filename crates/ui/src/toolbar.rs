@@ -208,6 +208,25 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 }
             });
 
+            // OCR 텍스트 레이어 작업(plan/ocr_feature_considerations.md). 작업은 별도 프로세스가
+            // 하고(ocr_worker), 한 번에 하나만 돌린다.
+            let ocr_available = app.current_file.is_some() && !app.ocr_job.as_ref().is_some_and(|j| j.is_running());
+            ui.add_enabled_ui(ocr_available, |ui| {
+                ui.menu_button("OCR", |ui| {
+                    ui.menu_button("내보내기", |ui| {
+                        use crate::ocr_worker::ExportFormat;
+                        if ui.button("hOCR…").on_hover_text("단어 위치가 담긴 hOCR — OCR 가져오기에 다시 쓸 수 있음").clicked() {
+                            app.ocr_export_dialog = Some(crate::ocr_dialogs::ExportDialog::new(ExportFormat::Hocr));
+                            ui.close_menu();
+                        }
+                        if ui.button("txt…").on_hover_text("페이지 번호 표기가 붙은 텍스트").clicked() {
+                            app.ocr_export_dialog = Some(crate::ocr_dialogs::ExportDialog::new(ExportFormat::Txt));
+                            ui.close_menu();
+                        }
+                    });
+                });
+            });
+
             ui.separator();
 
             // 트랙패드 핀치/마우스 휠 줌과 별개로, 비전문 사용자를 위한 명시적 버튼 병행 배치.
