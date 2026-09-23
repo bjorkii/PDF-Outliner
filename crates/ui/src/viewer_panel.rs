@@ -1124,14 +1124,10 @@ pub struct EdgeState {
 /// 넘어간다" 리포트로 120 → 320 → 600 → 1200까지 올린 기록을 참고했다. 트랙패드는 한 번 쓸어도
 /// 관성으로 이벤트가 길게 이어져서, 의도적으로 미는 것과 스치는 것을 가르려면 큰 값이 필요하다.
 const FLIP_THRESHOLD: f32 = 1000.0;
-/// 탄성 구간에서 페이지가 따라 나가는 거리(pt) — 처음엔 손가락을 거의 그대로 따라가다 이 값에
-/// 점근한다.
-const MAX_OVERSCROLL: f32 = 80.0;
-/// 점근이 얼마나 빨리 일어나는지(pt) — 작을수록 일찍 뻑뻑해진다.
-const RUBBER_SOFTNESS: f32 = 120.0;
-/// 점근한 뒤에도 계속 기어가는 비율 — 이게 없으면 임계값까지 남은 구간에서 화면이 멈춘 것처럼
-/// 느껴진다(사용자 리포트 2026-09-23). 100pt 밀 때 3pt씩 더 움직인다.
-const CREEP: f32 = 0.03;
+/// 탄성이 점근하는 거리(pt) — 스프링이 늘어날 수 있는 한계처럼 작동한다.
+const RUBBER_LIMIT: f32 = 260.0;
+/// 처음 미는 힘이 얼마나 그대로 전달되는지(0~1). 스프링 상수에 해당한다.
+const RUBBER_START: f32 = 0.55;
 /// 손을 뗐을 때 제자리로 돌아오는 비율(프레임당).
 const SPRING_BACK: f32 = 0.25;
 /// 이 시간(초) 동안 스크롤이 없으면 모아 둔 양을 잊는다.
@@ -1178,11 +1174,15 @@ pub fn edge_step(state: &mut EdgeState, overflow: f32, now: f64, scroll_speed: f
     Some(direction)
 }
 
-/// 민 양(pt) → 페이지가 따라 나가는 거리(pt). 처음엔 거의 그대로 따라가고, 이후에는 둔해지되
-/// 넘어갈 때까지 계속 조금씩 움직인다.
+/// 민 양(pt) → 페이지가 따라 나가는 거리(pt).
+///
+/// iOS의 러버밴드 식과 같은 꼴(`밀린 양 × c ÷ (1 + 밀린 양 × c ÷ 한계)`)이다. 스프링을 늘릴 때처럼
+/// **처음부터 저항이 있고 늘어날수록 저항이 매끄럽게 커진다** — 앞서 쓰던 지수 곡선은 초반에 저항이
+/// 거의 없다가 갑자기 뻣뻣해져서 "복원력이 잠시 0이었다가 갑자기 들어오는 느낌"이라는 리포트를
+/// 받았다(2026-09-23). 어디까지 밀어도 움직임이 0이 되지는 않는다.
 fn rubber_band(push: f32) -> f32 {
-    let magnitude = push.abs();
-    push.signum() * (MAX_OVERSCROLL * (1.0 - (-magnitude / RUBBER_SOFTNESS).exp()) + CREEP * magnitude)
+    let pull = push.abs() * RUBBER_START;
+    push.signum() * pull / (1.0 + pull / RUBBER_LIMIT)
 }
 
 /// 미는 입력이 없을 때 제자리로 돌아온다.
@@ -1246,7 +1246,7 @@ fn draw_ocr_mark(ui: &egui::Ui, app: &PdfViewerApp, image_rect: egui::Rect, targ
 
 #[cfg(test)]
 mod edge_flip_tests {
-    use super::{edge_step, EdgeState, FLIP_THRESHOLD, MAX_OVERSCROLL};
+    use super::{edge_step, EdgeState, FLIP_THRESHOLD};
 
     /// 한 번에 쭉 미는 동작 — 임계값을 넘으면 딱 한 번만 넘어간다.
     #[test]
@@ -1276,7 +1276,7 @@ mod edge_flip_tests {
             assert_eq!(edge_step(&mut state, -30.0, frame as f64 * 0.016, 30.0), None);
         }
         assert!(state.overscroll < 0.0, "페이지가 따라 나간다");
-        assert!(state.overscroll.abs() <= MAX_OVERSCROLL);
+        assert!(state.overscroll.abs() < super::RUBBER_LIMIT);
         for frame in 0..40 {
             edge_step(&mut state, 0.0, 1.0 + frame as f64 * 0.016, 0.0);
         }
@@ -1298,9 +1298,11 @@ mod edge_flip_tests {
             last = state.overscroll;
         }
         assert_eq!(moves, 19, "미는 내내 매 프레임 더 밀려난다");
-        // 초반에는 거의 그대로 따라가고(첫 프레임 50pt 중 상당 부분), 뒤로 갈수록 둔해진다.
-        assert!(super::rubber_band(-50.0).abs() > 25.0, "처음엔 잘 따라온다");
-        assert!(super::rubber_band(-1000.0).abs() > super::rubber_band(-600.0).abs() + 10.0, "끝까지 움직인다");
+        // 스프링처럼 처음부터 저항이 있고(밀린 만큼 그대로 가지 않음) 갈수록 커지되 멈추지는 않는다.
+        let at = |push: f32| super::rubber_band(push).abs();
+        assert!(at(50.0) < 50.0 * super::RUBBER_START + 0.1, "처음부터 저항이 있다");
+        assert!(at(100.0) - at(50.0) < at(50.0), "늘어날수록 같은 힘에 덜 움직인다");
+        assert!(at(1000.0) - at(900.0) > 3.0, "끝까지 움직인다");
     }
 
     /// 한동안 쉬면 모아 둔 양을 잊는다 — 조금씩 여러 번 민 것이 쌓여 갑자기 넘어가지 않게.
