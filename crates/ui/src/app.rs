@@ -339,14 +339,8 @@ pub struct PdfViewerApp {
     /// OCR 결과 창의 "보기"로 뷰어에 표시 중인 자리(`viewer_panel::draw_ocr_mark`).
     pub ocr_mark: Option<crate::ocr_import::ProblemMark>,
 
-    /// 쪽 단위 보기에서 페이지 위·아래 경계에 닿은 뒤 더 민 양(pt). 임계값을 넘으면 페이지를
-    /// 넘긴다(`viewer_panel::flip_page_at_edge`). 위로 밀면 양수(다음 쪽), 아래면 음수.
-    pub edge_push: f32,
-    /// 마지막으로 스크롤 입력이 있었던 시각 — 한참 쉬면 민 양을 잊는다.
-    pub edge_push_at: f64,
-    /// 페이지를 넘긴 뒤, 스크롤이 거의 멈출 때까지 다시 넘기지 않는다(관성 스크롤 한 번에
-    /// 여러 장 넘어가는 것을 막는다).
-    pub edge_push_locked: bool,
+    /// 쪽 단위 보기에서 페이지 경계를 넘겨 밀 때의 상태(탄성·페이지 넘김, `viewer_panel::edge_step`).
+    pub edge: crate::viewer_panel::EdgeState,
 
     pub status_message: Option<String>,
 }
@@ -476,9 +470,7 @@ impl PdfViewerApp {
             ocr_needs_save: None,
             ocr_import_dialog: None,
             ocr_mark: None,
-            edge_push: 0.0,
-            edge_push_at: 0.0,
-            edge_push_locked: false,
+            edge: Default::default(),
             last_window_title: None,
             prev_focused_widget: None,
             status_message,
