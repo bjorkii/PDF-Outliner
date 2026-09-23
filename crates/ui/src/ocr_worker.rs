@@ -37,6 +37,10 @@ pub enum Job {
     AnalyzeRemoval { pdf: PathBuf },
     /// OCR 전체 삭제 — 결과를 `temp_output`에 쓰고 검증까지 한다. 원본 교체는 UI가 한다.
     Remove { pdf: PathBuf, temp_output: PathBuf },
+    /// hOCR 가져오기 전 분석(hOCR 파싱 + 페이지 분류). 파일을 쓰지 않는다.
+    AnalyzeImport { pdf: PathBuf, hocr_files: Vec<PathBuf> },
+    /// hOCR 가져오기 — 결과를 `temp_output`에 쓰고 검증까지 한다.
+    Import(crate::ocr_import::ImportJob),
 }
 
 /// 삭제 대상 개수(형태별 표시 연산자 수).
@@ -68,8 +72,10 @@ impl From<pdf_ocr::remove::KindCounts> for RemovalCounts {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RemovalAnalysis {
     pub pages: usize,
-    /// 지울 것이 있는 페이지 수.
+    /// 지울 것이 있는 페이지 수(앱이 넣은 레이어 포함).
     pub pages_with_hidden_text: usize,
+    /// 앱이 넣은 OCR 레이어가 있는 페이지 수(구조째 떼어 낸다).
+    pub own_layer_pages: usize,
     pub counts: RemovalCounts,
     /// (페이지 번호, 이유) — 건드리지 않을 페이지.
     pub skipped: Vec<(usize, String)>,
@@ -134,6 +140,8 @@ pub enum Event {
     ExportDone(ExportReport),
     RemovalAnalysis(RemovalAnalysis),
     RemovalDone(RemovalReport),
+    ImportAnalysis(crate::ocr_import::ImportAnalysis),
+    ImportDone(crate::ocr_import::ImportReport),
     Failed(String),
 }
 
@@ -239,8 +247,12 @@ pub fn run_worker_process() -> i32 {
     };
     let result = match &job {
         Job::Export(export) => run_export(engine, export, &mut emit).map(Event::ExportDone),
-        Job::AnalyzeRemoval { pdf } => analyze_removal(engine, pdf).map(|(analysis, ..)| Event::RemovalAnalysis(analysis)),
+        Job::AnalyzeRemoval { pdf } => analyze_removal(engine, pdf).map(|prepared| Event::RemovalAnalysis(prepared.analysis)),
         Job::Remove { pdf, temp_output } => run_removal(engine, pdf, temp_output, &mut emit).map(Event::RemovalDone),
+        Job::AnalyzeImport { pdf, hocr_files } => {
+            crate::ocr_import::analyze(engine, pdf, hocr_files, &mut emit).map(Event::ImportAnalysis)
+        }
+        Job::Import(job) => crate::ocr_import::run(engine, job, &mut emit).map(Event::ImportDone),
     };
     match result {
         Ok(event) => {
@@ -251,7 +263,8 @@ pub fn run_worker_process() -> i32 {
             match &job {
                 Job::Export(export) => drop(std::fs::remove_file(&export.temp_output)),
                 Job::Remove { temp_output, .. } => drop(std::fs::remove_file(temp_output)),
-                Job::AnalyzeRemoval { .. } => {}
+                Job::Import(job) => drop(std::fs::remove_file(&job.temp_output)),
+                Job::AnalyzeRemoval { .. } | Job::AnalyzeImport { .. } => {}
             }
             emit(Event::Failed(format!("{err:#}")));
             1
@@ -357,8 +370,17 @@ fn extract_page(page: &pdfium_render::prelude::PdfPage, options: &LayoutOptions)
 use pdf_ocr::lopdf::Document;
 use pdf_ocr::remove::{PageStatus, RemovalPlan};
 
-/// 사전 점검 + 삭제 계획. 암호화·손상·페이지 수 불일치면 오류. (분석, lopdf 문서, 계획, 압축 저장 여부)
-fn analyze_removal(engine: PdfEngine, pdf: &Path) -> anyhow::Result<(RemovalAnalysis, Document, RemovalPlan, bool)> {
+/// 삭제 준비가 끝난 상태: 앱이 넣은 레이어는 이미 떼어 냈고(`applied`에 기록) 나머지는 계획만 있다.
+struct PreparedRemoval {
+    analysis: RemovalAnalysis,
+    doc: Document,
+    plan: RemovalPlan,
+    applied: pdf_ocr::remove::Applied,
+    compact: bool,
+}
+
+/// 파일을 열어 사전 점검한다. 암호화·손상·페이지 수 불일치면 오류. (문서, 사전 점검, 압축 저장 여부)
+pub(crate) fn open_for_edit(engine: PdfEngine, pdf: &Path) -> anyhow::Result<(Document, pdf_ocr::preflight::Preflight, bool)> {
     use anyhow::{bail, Context};
     let raw = std::fs::read(pdf).with_context(|| format!("파일을 읽을 수 없음: {}", pdf.display()))?;
     let doc = Document::load_mem(&raw).map_err(|e| anyhow::anyhow!("PDF 구조를 읽지 못했습니다(손상 가능): {e}"))?;
@@ -375,9 +397,18 @@ fn analyze_removal(engine: PdfEngine, pdf: &Path) -> anyhow::Result<(RemovalAnal
         );
     }
     let compact = pdf_ocr::save::uses_object_streams(&doc) && !preflight.pdfa.as_deref().is_some_and(|p| p.starts_with('1'));
+    Ok((doc, preflight, compact))
+}
+
+/// 사전 점검 + 앱 레이어 떼어 내기(메모리에서) + 삭제 계획.
+fn analyze_removal(engine: PdfEngine, pdf: &Path) -> anyhow::Result<PreparedRemoval> {
+    let (mut doc, preflight, compact) = open_for_edit(engine, pdf)?;
+    let mut applied = pdf_ocr::remove::Applied::default();
+    let stripped = pdf_ocr::insert::strip_own_layers(&mut doc, None, &mut applied)?;
     let plan = pdf_ocr::remove::plan(&doc);
     let mut analysis = RemovalAnalysis {
         pages: plan.pages.len(),
+        own_layer_pages: stripped.len(),
         counts: plan.totals().into(),
         signed: preflight.signed,
         tagged: preflight.tagged,
@@ -386,38 +417,39 @@ fn analyze_removal(engine: PdfEngine, pdf: &Path) -> anyhow::Result<(RemovalAnal
         linearized: preflight.linearized,
         ..Default::default()
     };
-    for page in &plan.pages {
+    for (index, page) in plan.pages.iter().enumerate() {
         match &page.status {
             PageStatus::Planned => analysis.pages_with_hidden_text += 1,
             PageStatus::Skipped(reason) => analysis.skipped.push((page.number, reason.clone())),
+            PageStatus::Unchanged if stripped.contains(&index) => analysis.pages_with_hidden_text += 1,
             PageStatus::Unchanged => {}
         }
         analysis.notes.extend(page.notes.iter().map(|n| (page.number, n.clone())));
     }
-    Ok((analysis, doc, plan, compact))
+    Ok(PreparedRemoval { analysis, doc, plan, applied, compact })
 }
 
 fn run_removal(engine: PdfEngine, pdf: &Path, temp_output: &Path, emit: &mut dyn FnMut(Event)) -> anyhow::Result<RemovalReport> {
     use anyhow::{bail, Context};
     use std::collections::BTreeSet;
     emit(Event::Stage("분석 중".to_string()));
-    let (analysis, mut doc, plan, compact) = analyze_removal(engine, pdf)?;
+    let PreparedRemoval { analysis, mut doc, plan, mut applied, compact } = analyze_removal(engine, pdf)?;
     let size_before = std::fs::metadata(pdf).map(|m| m.len()).unwrap_or(0);
     let mut report = RemovalReport { analysis, size_before, ..Default::default() };
-    if !plan.has_changes() {
+    if !plan.has_changes() && report.analysis.own_layer_pages == 0 {
         report.nothing_to_do = true;
         return Ok(report);
     }
 
     emit(Event::Stage("삭제·저장 중".to_string()));
-    let mut applied = pdf_ocr::remove::apply(&mut doc, &plan)?;
+    pdf_ocr::remove::apply(&mut doc, &plan, &mut applied)?;
     let now = chrono::Local::now().fixed_offset();
     pdf_ocr::save::save_rewritten(&mut doc, temp_output, now, compact)?;
 
-    let planned: Vec<usize> =
-        plan.pages.iter().enumerate().filter(|(_, p)| p.status == PageStatus::Planned).map(|(i, _)| i).collect();
+    let planned: Vec<usize> = applied.changed_pages().into_iter().collect();
     emit(Event::Stage("검증 중(원본과 화면·텍스트 비교)".to_string()));
-    let failures = verify_pages(engine, pdf, temp_output, &planned, emit)?;
+    let no_layer = std::collections::HashMap::new();
+    let failures = verify_pages(engine, pdf, temp_output, &planned, &no_layer, emit)?;
 
     let mut reverted: BTreeSet<usize> = BTreeSet::new();
     if !failures.is_empty() {
@@ -430,7 +462,7 @@ fn run_removal(engine: PdfEngine, pdf: &Path, temp_output: &Path, emit: &mut dyn
         emit(Event::Stage("되돌린 페이지 반영해 다시 저장 중".to_string()));
         pdf_ocr::save::save_rewritten(&mut doc, temp_output, now, compact)?;
         let again: Vec<usize> = reverted.iter().copied().collect();
-        let still = verify_pages(engine, pdf, temp_output, &again, emit)?;
+        let still = verify_pages(engine, pdf, temp_output, &again, &no_layer, emit)?;
         if let Some((page, reason)) = still.first() {
             bail!("되돌린 {}쪽이 원본과 같지 않습니다({reason}). 원본을 건드리지 않았습니다.", page + 1);
         }
@@ -447,12 +479,14 @@ fn run_removal(engine: PdfEngine, pdf: &Path, temp_output: &Path, emit: &mut dyn
     Ok(report)
 }
 
-/// 페이지들(0부터)을 원본과 비교해 실패한 (페이지, 이유) 목록.
-fn verify_pages(
+/// 페이지들(0부터)을 원본과 비교해 실패한 (페이지, 이유) 목록. `expected_layer`에 든 페이지는
+/// 앱이 넣은 텍스트 레이어의 글자가 기대한 글자(정렬된 목록)와 같은지도 확인한다.
+pub(crate) fn verify_pages(
     engine: PdfEngine,
     original: &Path,
     result: &Path,
     pages: &[usize],
+    expected_layer: &std::collections::HashMap<usize, Vec<char>>,
     emit: &mut dyn FnMut(Event),
 ) -> anyhow::Result<Vec<(usize, String)>> {
     use anyhow::Context;
@@ -463,8 +497,22 @@ fn verify_pages(
     for (done, &index) in pages.iter().enumerate() {
         let outcome = (|| -> anyhow::Result<Result<(), String>> {
             let a = snapshot(&before.pages().get(index as i32)?)?;
-            let b = snapshot(&after.pages().get(index as i32)?)?;
-            Ok(compare(&a, &b))
+            let after_page = after.pages().get(index as i32)?;
+            let b = snapshot(&after_page)?;
+            if let Err(reason) = compare(&a, &b) {
+                return Ok(Err(reason));
+            }
+            if let Some(expected) = expected_layer.get(&index) {
+                let actual = pdf_engine::verify::sorted_chars_in_font(&after_page, pdf_ocr::glyphless::FONT_NAME)?;
+                if &actual != expected {
+                    return Ok(Err(format!(
+                        "넣은 텍스트가 기대와 다르게 추출됨(기대 {}자, 추출 {}자)",
+                        expected.len(),
+                        actual.len()
+                    )));
+                }
+            }
+            Ok(Ok(()))
         })();
         match outcome {
             Ok(Ok(())) => {}
@@ -477,7 +525,7 @@ fn verify_pages(
 }
 
 /// pdfium의 열기 오류를 사용자에게 보일 문장으로 바꾼다.
-fn open_error_message(err: anyhow::Error) -> anyhow::Error {
+pub(crate) fn open_error_message(err: anyhow::Error) -> anyhow::Error {
     use pdfium_render::prelude::{PdfiumError, PdfiumInternalError};
     let message = match err.downcast_ref::<PdfiumError>() {
         Some(PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError)) => {

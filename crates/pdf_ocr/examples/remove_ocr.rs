@@ -33,7 +33,7 @@ fn main() -> anyhow::Result<()> {
         println!("지울 텍스트 없음 — 저장하지 않음");
         return Ok(());
     }
-    apply(&mut doc, &plan)?;
+    apply(&mut doc, &plan, &mut pdf_ocr::remove::Applied::default())?;
     save_rewritten(&mut doc, output.as_ref(), chrono::Local::now().fixed_offset(), compact)?;
     println!(
         "{:.2}s, 크기 {} → {} bytes",

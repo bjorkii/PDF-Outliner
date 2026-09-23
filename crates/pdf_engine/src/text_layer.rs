@@ -10,6 +10,7 @@
 //!   render mode 3·7, 채우기 알파 0(채우기 모드일 때), loose box 면적이 사실상 0.
 //!   흰 글씨·이미지 아래 텍스트(G~J)는 판정하지 않는다.
 //! - pdfium이 만들어 넣은 문자(단어 사이 공백, 줄바꿈)는 `generated`로 표시해 구분자로만 쓴다.
+//! - pdfium이 줄 끝 하이픈을 나타내는 U+0002는 `-`로 되돌린다.
 
 use anyhow::{Context, Result};
 use pdfium_render::prelude::*;
@@ -65,6 +66,8 @@ pub fn page_chars(page: &PdfPage) -> Result<Vec<PageChar>> {
         let Some(c) = ch.unicode_char() else {
             continue;
         };
+        // pdfium은 줄 끝 하이픈(단어가 다음 줄로 이어지는 표시로 추정한 것)을 U+0002로 돌려준다.
+        let c = if c == '\u{2}' { '-' } else { c };
         let generated = ch.is_generated().unwrap_or(false);
         let bounds = ch.loose_bounds().map(|r| rect_to_array(&r)).unwrap_or([0.0; 4]);
         let origin = ch.origin().ok().map(|(x, y)| (x.value as f64, y.value as f64));

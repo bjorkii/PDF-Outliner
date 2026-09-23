@@ -413,6 +413,7 @@ fn show_single_page(
 
         draw_selection_highlight(ui, app, image_rect, target_width, app.current_page);
         draw_search_highlight(ui, app, image_rect, target_width, page_number);
+        draw_ocr_mark(ui, app, image_rect, target_width, page_number);
 
         app.image_rect = Some(image_rect);
 
@@ -830,6 +831,7 @@ fn show_continuous(
 
                 draw_selection_highlight(ui, app, page_rect, target_width, page_number);
                 draw_search_highlight(ui, app, page_rect, target_width, page_number);
+                draw_ocr_mark(ui, app, page_rect, target_width, page_number);
             }
             app.page_textures.note_painted(&painted_ids);
 
@@ -1090,6 +1092,35 @@ fn draw_search_highlight(
                 }
                 painter.rect_stroke(screen_rect, 2.0, egui::Stroke::new(stroke_width, stroke));
             }
+        }
+    }
+}
+
+/// OCR 결과 창에서 "보기"로 고른 자리(가져오기 검증에서 문제가 된 단어)를 빨간 테두리로 그린다.
+/// 좌표는 사용자 공간이라 검색 하이라이트와 같은 pdfium 변환을 쓴다(/Rotate 페이지도 맞다).
+fn draw_ocr_mark(ui: &egui::Ui, app: &PdfViewerApp, image_rect: egui::Rect, target_width: i32, page_number: u32) {
+    let Some(mark) = app.ocr_mark.as_ref().filter(|m| m.page as u32 == page_number) else {
+        return;
+    };
+    let Some(document) = app.document.as_ref() else {
+        return;
+    };
+    let Ok(page) = document.pages().get((page_number - 1) as PdfPageIndex) else {
+        return;
+    };
+    let config = PdfRenderConfig::new().set_target_width(target_width);
+    let scale = image_rect.width() / target_width as f32;
+    let to_screen = |x: f64, y: f64| -> Option<egui::Pos2> {
+        let (px, py) = page
+            .points_to_pixels(PdfPoints::new(x as f32), PdfPoints::new(y as f32), &config)
+            .ok()?;
+        Some(egui::pos2(image_rect.left() + px as f32 * scale, image_rect.top() + py as f32 * scale))
+    };
+    let stroke = egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(220, 30, 30));
+    for r in &mark.rects {
+        if let (Some(a), Some(b)) = (to_screen(r[0], r[3]), to_screen(r[2], r[1])) {
+            // 한 글자짜리 자리는 작아서 눈에 띄게 넓혀 그린다.
+            ui.painter().rect_stroke(egui::Rect::from_two_pos(a, b).expand(4.0), 2.0, stroke);
         }
     }
 }

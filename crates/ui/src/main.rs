@@ -17,6 +17,7 @@ mod fonts;
 #[cfg(target_os = "macos")]
 mod macos_open_file;
 mod ocr_dialogs;
+mod ocr_import;
 mod ocr_worker;
 mod render_worker;
 mod search_panel;

@@ -221,6 +221,14 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                         crate::ocr_dialogs::request_removal(ui.ctx(), app);
                         ui.close_menu();
                     }
+                    if ui
+                        .button("가져오기…")
+                        .on_hover_text("hOCR 파일의 텍스트를 보이지 않는 텍스트 레이어로 넣습니다 — 원본은 .backup으로 보존")
+                        .clicked()
+                    {
+                        crate::ocr_dialogs::request_import(ui.ctx(), app);
+                        ui.close_menu();
+                    }
                     ui.menu_button("내보내기", |ui| {
                         use crate::ocr_worker::ExportFormat;
                         if ui.button("hOCR…").on_hover_text("단어 위치가 담긴 hOCR — OCR 가져오기에 다시 쓸 수 있음").clicked() {

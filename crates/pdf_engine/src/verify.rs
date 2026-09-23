@@ -76,3 +76,43 @@ pub fn compare(before: &PageSnapshot, after: &PageSnapshot) -> Result<(), String
     }
     Ok(())
 }
+
+/// 이름에 `font_name`이 들어간 폰트로 그린 글자(공백·생성 문자 제외)와 loose box(사용자 공간
+/// `[left, bottom, right, top]`). 줄 끝 하이픈 표시(U+0002)는 `-`로, 짝 괄호는 한쪽으로 모은다.
+pub fn chars_in_font(page: &PdfPage, font_name: &str) -> Result<Vec<(char, [f64; 4])>> {
+    let text_page = page.text().context("텍스트 페이지 로드 실패")?;
+    Ok(text_page
+        .chars()
+        .iter()
+        .filter(|c| !c.is_generated().unwrap_or(false) && c.font_name().contains(font_name))
+        .filter_map(|c| {
+            let ch = c.unicode_char()?;
+            let ch = fold_mirrored(if ch == '\u{2}' { '-' } else { ch });
+            let b = c.loose_bounds().ok()?;
+            let rect = [b.left().value as f64, b.bottom().value as f64, b.right().value as f64, b.top().value as f64];
+            (!ch.is_whitespace()).then_some((ch, rect))
+        })
+        .collect())
+}
+
+/// [`chars_in_font`]의 글자만 정렬해 돌려준다 — 넣은 텍스트 레이어가 기대한 글자들로 추출되는지
+/// 순서와 무관하게 비교할 때 쓴다.
+pub fn sorted_chars_in_font(page: &PdfPage, font_name: &str) -> Result<Vec<char>> {
+    let mut out: Vec<char> = chars_in_font(page, font_name)?.into_iter().map(|(c, _)| c).collect();
+    out.sort_unstable();
+    Ok(out)
+}
+
+/// 짝을 이루는 괄호를 한쪽으로 모은다. pdfium은 오른쪽에서 왼쪽으로 쓰는 문맥(아랍어 등)에서 괄호를
+/// 거울상으로 바꿔 돌려주므로(`)` → `(`), 넣은 글자와 추출한 글자를 비교할 때 둘 다 이걸 거친다.
+pub fn fold_mirrored(c: char) -> char {
+    match c {
+        ')' => '(',
+        ']' => '[',
+        '}' => '{',
+        '>' => '<',
+        '»' => '«',
+        '›' => '‹',
+        other => other,
+    }
+}

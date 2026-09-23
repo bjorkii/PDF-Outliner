@@ -329,6 +329,12 @@ fn paints_nothing(bytes: &[u8]) -> bool {
 // ------------------------------------------------------------------ 계획
 
 pub fn plan(doc: &Document) -> RemovalPlan {
+    plan_for(doc, None)
+}
+
+/// `only`에 든 페이지(0부터)만 지우는 계획. 다른 페이지도 해석은 한다 — 공유 Form을 제자리에서
+/// 고쳐도 되는지 판단하려면 모든 사용처를 알아야 하기 때문이다(그 페이지들의 사용처는 "그대로"로 친다).
+pub fn plan_for(doc: &Document, only: Option<&BTreeSet<usize>>) -> RemovalPlan {
     let counts = ReferenceCounts::count(doc);
     let page_ids: Vec<ObjectId> = doc.get_pages().into_values().collect();
     let mut pages = Vec::with_capacity(page_ids.len());
@@ -397,6 +403,14 @@ pub fn plan(doc: &Document) -> RemovalPlan {
                 }
             };
             page_visits.push(FormVisit { form, page: page_index, depth, name, result });
+        }
+        if only.is_some_and(|set| !set.contains(&page_index)) {
+            page.status = PageStatus::Unchanged;
+            page.content = None;
+            page.counts = KindCounts::default();
+            visits.extend(page_visits.into_iter().map(|v| FormVisit { result: None, ..v }));
+            pages.push(page);
+            continue;
         }
         match skip {
             Some(reason) => {
@@ -489,16 +503,17 @@ fn decide_forms(
 
 // ------------------------------------------------------------------ 적용·되돌리기
 
-/// 적용 전 원본 — 되돌리기용.
+/// 적용 전 원본 — 되돌리기용. 삭제([`apply`]), 앱 레이어 떼어 내기, 레이어 삽입이 함께 기록한다
+/// (페이지마다 가장 먼저 기록한 상태가 원본이다).
+#[derive(Default)]
 pub struct Applied {
     page_originals: HashMap<usize, Object>,
     /// 제자리에서 고친 Form의 원본과 그 Form을 쓰는 페이지들.
     form_originals: HashMap<ObjectId, (Object, BTreeSet<usize>)>,
 }
 
-pub fn apply(doc: &mut Document, plan: &RemovalPlan) -> anyhow::Result<Applied> {
+pub fn apply(doc: &mut Document, plan: &RemovalPlan, applied: &mut Applied) -> anyhow::Result<()> {
     let mut counts = ReferenceCounts::count(doc);
-    let mut applied = Applied { page_originals: HashMap::new(), form_originals: HashMap::new() };
 
     let planned: BTreeSet<usize> = plan
         .pages
@@ -508,8 +523,7 @@ pub fn apply(doc: &mut Document, plan: &RemovalPlan) -> anyhow::Result<Applied> 
         .map(|(i, _)| i)
         .collect();
     for &i in &planned {
-        let page = &plan.pages[i];
-        applied.page_originals.insert(i, doc.get_object(page.page_id)?.clone());
+        applied.record_page(doc, i, plan.pages[i].page_id)?;
     }
 
     for (&form, decision) in &plan.forms {
@@ -517,6 +531,15 @@ pub fn apply(doc: &mut Document, plan: &RemovalPlan) -> anyhow::Result<Applied> 
             FormDecision::InPlace(content, users) => {
                 let original = doc.get_object(form)?.clone();
                 let users = users.clone();
+                if applied.form_originals.contains_key(&form) {
+                    // 이미 기록된 원본 유지(사용 페이지만 합친다)
+                    if let Some((_, known)) = applied.form_originals.get_mut(&form) {
+                        known.extend(users.iter().copied());
+                    }
+                    let stream = doc.get_object_mut(form)?.as_stream_mut()?;
+                    set_form_content(stream, content.clone());
+                    continue;
+                }
                 let stream = doc.get_object_mut(form)?.as_stream_mut()?;
                 set_form_content(stream, content.clone());
                 applied.form_originals.insert(form, (original, users));
@@ -546,7 +569,7 @@ pub fn apply(doc: &mut Document, plan: &RemovalPlan) -> anyhow::Result<Applied> 
             doc.get_dictionary_mut(page.page_id)?.set("Contents", id);
         }
     }
-    Ok(applied)
+    Ok(())
 }
 
 fn set_form_content(stream: &mut Stream, content: Vec<u8>) {
@@ -560,6 +583,19 @@ fn set_form_content(stream: &mut Stream, content: Vec<u8>) {
 }
 
 impl Applied {
+    /// 페이지(0부터)의 현재 상태를 원본으로 기록한다(이미 있으면 그대로).
+    pub fn record_page(&mut self, doc: &Document, index: usize, page_id: ObjectId) -> anyhow::Result<()> {
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.page_originals.entry(index) {
+            slot.insert(doc.get_object(page_id)?.clone());
+        }
+        Ok(())
+    }
+
+    /// 기록된(바뀐) 페이지들(0부터).
+    pub fn changed_pages(&self) -> BTreeSet<usize> {
+        self.page_originals.keys().copied().collect()
+    }
+
     /// 페이지들(0부터)을 원래대로 되돌린다. 제자리에서 고친 Form을 쓰던 페이지면 그 Form도
     /// 원본으로 되돌리며, 그 때문에 함께 원래대로 돌아간 다른 페이지 번호를 돌려준다.
     pub fn rollback(&mut self, doc: &mut Document, pages: &BTreeSet<usize>) -> BTreeSet<usize> {
@@ -615,7 +651,7 @@ mod tests {
         let (mut doc, page) = one_page_doc(content, vec![]);
         add_font(&mut doc, page);
         let plan = plan(&doc);
-        apply(&mut doc, &plan).unwrap();
+        apply(&mut doc, &plan, &mut Applied::default()).unwrap();
         (doc, page, plan)
     }
 
@@ -656,7 +692,7 @@ mod tests {
         let (mut doc, page) = one_page_doc(b"BT /F9 10 Tf 3 Tr (A) Tj 0 Tr (B) Tj ET", vec![]);
         let plan = plan(&doc);
         assert!(matches!(plan.pages[0].status, PageStatus::Skipped(_)));
-        apply(&mut doc, &plan).unwrap();
+        apply(&mut doc, &plan, &mut Applied::default()).unwrap();
         assert!(page_text(&doc, page).contains("(A) Tj"));
     }
 
@@ -669,7 +705,8 @@ mod tests {
             .unwrap();
         let plan = plan(&doc);
         assert!(plan.has_changes());
-        let mut applied = apply(&mut doc, &plan).unwrap();
+        let mut applied = Applied::default();
+        apply(&mut doc, &plan, &mut applied).unwrap();
         let stream = doc.get_object(form_id).unwrap().as_stream().unwrap();
         assert!(stream.content.is_empty() && !stream.dict.has(b"Resources"));
         // 되돌리기
@@ -688,7 +725,7 @@ mod tests {
         // 다른 곳(주석 외형을 흉내 낸 딕셔너리)에서도 참조 — 해석하지 않은 사용처.
         doc.add_object(dictionary! { "AP" => form_id });
         let plan = plan(&doc);
-        apply(&mut doc, &plan).unwrap();
+        apply(&mut doc, &plan, &mut Applied::default()).unwrap();
         assert_eq!(stream_bytes(&doc, form_id).unwrap(), b"BT (x) Tj ET", "원본은 그대로");
         let new_ref = resource_entry(&doc, &crate::content::interp::page_resources(&doc, page), b"XObject", b"X0")
             .unwrap()

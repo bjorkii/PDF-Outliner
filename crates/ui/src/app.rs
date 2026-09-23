@@ -332,8 +332,12 @@ pub struct PdfViewerApp {
     pub ocr_job: Option<crate::ocr_dialogs::OcrJob>,
     /// OCR 전체 삭제 확인 창(분석 결과, `ocr_dialogs`).
     pub ocr_removal_confirm: Option<crate::ocr_dialogs::RemovalConfirm>,
-    /// OCR 전체 삭제 전에 북마크 저장을 묻는 창.
-    pub ocr_removal_needs_save: bool,
+    /// OCR 삭제·가져오기 전에 북마크 저장을 묻는 창.
+    pub ocr_needs_save: Option<crate::ocr_dialogs::PendingOcr>,
+    /// OCR 가져오기 설정 창(분석 결과, `ocr_dialogs`).
+    pub ocr_import_dialog: Option<crate::ocr_dialogs::ImportDialog>,
+    /// OCR 결과 창의 "보기"로 뷰어에 표시 중인 자리(`viewer_panel::draw_ocr_mark`).
+    pub ocr_mark: Option<crate::ocr_import::ProblemMark>,
 
     pub status_message: Option<String>,
 }
@@ -460,7 +464,9 @@ impl PdfViewerApp {
             ocr_export_dialog: None,
             ocr_job: None,
             ocr_removal_confirm: None,
-            ocr_removal_needs_save: false,
+            ocr_needs_save: None,
+            ocr_import_dialog: None,
+            ocr_mark: None,
             last_window_title: None,
             prev_focused_widget: None,
             status_message,
