@@ -1124,10 +1124,14 @@ pub struct EdgeState {
 /// 넘어간다" 리포트로 120 → 320 → 600 → 1200까지 올린 기록을 참고했다. 트랙패드는 한 번 쓸어도
 /// 관성으로 이벤트가 길게 이어져서, 의도적으로 미는 것과 스치는 것을 가르려면 큰 값이 필요하다.
 const FLIP_THRESHOLD: f32 = 1000.0;
-/// 페이지가 경계 밖으로 따라 나가는 최대 거리(pt).
-const MAX_OVERSCROLL: f32 = 90.0;
-/// 밀수록 덜 따라 나가게 하는 감쇠 — 작을수록 빨리 뻑뻑해진다.
+/// 탄성 구간에서 페이지가 따라 나가는 거리(pt) — 처음엔 손가락을 거의 그대로 따라가다 이 값에
+/// 점근한다.
+const MAX_OVERSCROLL: f32 = 80.0;
+/// 점근이 얼마나 빨리 일어나는지(pt) — 작을수록 일찍 뻑뻑해진다.
 const RUBBER_SOFTNESS: f32 = 120.0;
+/// 점근한 뒤에도 계속 기어가는 비율 — 이게 없으면 임계값까지 남은 구간에서 화면이 멈춘 것처럼
+/// 느껴진다(사용자 리포트 2026-09-23). 100pt 밀 때 3pt씩 더 움직인다.
+const CREEP: f32 = 0.03;
 /// 손을 뗐을 때 제자리로 돌아오는 비율(프레임당).
 const SPRING_BACK: f32 = 0.25;
 /// 이 시간(초) 동안 스크롤이 없으면 모아 둔 양을 잊는다.
@@ -1142,21 +1146,12 @@ const RESTING_SPEED: f32 = 1.0;
 /// - 관성 스크롤 한 번에 여러 장 넘어가지 않게, 넘긴 뒤에는 스크롤이 멎을 때까지 잠근다.
 /// - 한동안 스크롤이 없으면 모아 둔 양을 잊는다(조금씩 여러 번 민 것이 쌓이지 않게).
 pub fn edge_step(state: &mut EdgeState, overflow: f32, now: f64, scroll_speed: f32) -> Option<i32> {
-    if overflow != 0.0 && !state.locked {
-        let resistance = 1.0 / (1.0 + state.overscroll.abs() / RUBBER_SOFTNESS);
-        state.overscroll = (state.overscroll + overflow * resistance).clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL);
-    } else if state.overscroll != 0.0 {
-        state.overscroll -= state.overscroll * SPRING_BACK;
-        if state.overscroll.abs() < 0.5 {
-            state.overscroll = 0.0;
-        }
-    }
-
     if state.locked {
         if scroll_speed <= RESTING_SPEED {
             state.locked = false;
         }
         state.push = 0.0;
+        spring_back(state);
         return None;
     }
     if now - state.push_at > FORGET_AFTER {
@@ -1169,6 +1164,10 @@ pub fn edge_step(state: &mut EdgeState, overflow: f32, now: f64, scroll_speed: f
         }
         state.push += overflow;
         state.push_at = now;
+        // 따라 나가는 거리는 지금까지 민 양으로 정한다 — 넘어가기 직전까지 계속 조금씩 움직인다.
+        state.overscroll = rubber_band(state.push);
+    } else {
+        spring_back(state);
     }
     if state.push.abs() < FLIP_THRESHOLD {
         return None;
@@ -1177,6 +1176,24 @@ pub fn edge_step(state: &mut EdgeState, overflow: f32, now: f64, scroll_speed: f
     let direction = if state.push < 0.0 { 1 } else { -1 };
     state.push = 0.0;
     Some(direction)
+}
+
+/// 민 양(pt) → 페이지가 따라 나가는 거리(pt). 처음엔 거의 그대로 따라가고, 이후에는 둔해지되
+/// 넘어갈 때까지 계속 조금씩 움직인다.
+fn rubber_band(push: f32) -> f32 {
+    let magnitude = push.abs();
+    push.signum() * (MAX_OVERSCROLL * (1.0 - (-magnitude / RUBBER_SOFTNESS).exp()) + CREEP * magnitude)
+}
+
+/// 미는 입력이 없을 때 제자리로 돌아온다.
+fn spring_back(state: &mut EdgeState) {
+    if state.overscroll == 0.0 {
+        return;
+    }
+    state.overscroll -= state.overscroll * SPRING_BACK;
+    if state.overscroll.abs() < 0.5 {
+        state.overscroll = 0.0;
+    }
 }
 
 /// [`edge_step`]의 결과를 화면에 반영한다 — 넘길 수 있으면 페이지를 넘기고 새 쪽의 시작 위치를 잡는다.
@@ -1264,6 +1281,26 @@ mod edge_flip_tests {
             edge_step(&mut state, 0.0, 1.0 + frame as f64 * 0.016, 0.0);
         }
         assert_eq!(state.overscroll, 0.0, "손을 떼면 제자리로");
+    }
+
+    /// 임계값에 가까워져도 계속 조금씩 움직인다(딱 잘려 멈추지 않는다).
+    #[test]
+    fn keeps_moving_until_the_flip() {
+        let mut state = EdgeState::default();
+        let mut last = 0.0_f32;
+        let mut moves = 0;
+        for frame in 0..19 {
+            // 임계값의 95%까지만 민다(넘기지 않고 곡선만 본다).
+            assert_eq!(edge_step(&mut state, -FLIP_THRESHOLD * 0.05, frame as f64 * 0.016, 50.0), None);
+            if state.overscroll < last - 0.2 {
+                moves += 1;
+            }
+            last = state.overscroll;
+        }
+        assert_eq!(moves, 19, "미는 내내 매 프레임 더 밀려난다");
+        // 초반에는 거의 그대로 따라가고(첫 프레임 50pt 중 상당 부분), 뒤로 갈수록 둔해진다.
+        assert!(super::rubber_band(-50.0).abs() > 25.0, "처음엔 잘 따라온다");
+        assert!(super::rubber_band(-1000.0).abs() > super::rubber_band(-600.0).abs() + 10.0, "끝까지 움직인다");
     }
 
     /// 한동안 쉬면 모아 둔 양을 잊는다 — 조금씩 여러 번 민 것이 쌓여 갑자기 넘어가지 않게.
