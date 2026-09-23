@@ -553,22 +553,47 @@ fn run_folder_removal(
     let mut files = Vec::new();
     collect_pdfs(folder, &mut files);
     files.sort();
+    // 진행률은 파일이 아니라 페이지 기준 — 파일마다 쪽수가 크게 달라서.
+    emit(Event::Stage("페이지 수 세는 중".to_string()));
+    let page_counts: Vec<usize> =
+        files.iter().map(|f| engine.open_document(f).map(|d| d.pages().len() as usize).unwrap_or(1)).collect();
+    let total_pages: usize = page_counts.iter().sum::<usize>().max(1);
+    let mut done_pages = 0usize;
+
     let mut report = BatchReport { total: files.len(), ..Default::default() };
     for (index, file) in files.iter().enumerate() {
         let name = file.strip_prefix(folder).unwrap_or(file).to_string_lossy().to_string();
+        let file_pages = page_counts[index];
         emit(Event::Stage(format!("{name} ({}/{})", index + 1, files.len())));
-        emit(Event::Progress { done: index, total: files.len() });
+        emit(Event::Progress { done: done_pages, total: total_pages });
+
         if skip.iter().any(|s| s == file) {
             report.skipped.push((name, "앱에 열려 있는 파일".to_string()));
+            done_pages += file_pages;
             continue;
         }
         let backup = batch_backup_path(file);
         if backup.exists() {
             report.skipped.push((name, ".backup이 이미 있음(이전 실행 흔적)".to_string()));
+            done_pages += file_pages;
             continue;
         }
         let temp = file.with_extension("ocr_tmp.pdf");
-        match run_removal(engine, file, &temp, aggressive, &mut |_| {}) {
+        // 파일 안의 진행(검증 단계)을 이 파일 쪽수로 환산해 전체 진행률에 더한다.
+        let base = done_pages;
+        let forward = |event: Event| {
+            if let Event::Progress { done, total } = event {
+                let fraction = if total > 0 { done as f64 / total as f64 } else { 0.0 };
+                emit(Event::Progress { done: base + (fraction * file_pages as f64) as usize, total: total_pages });
+            }
+        };
+        let outcome = {
+            // forward가 emit을 빌리고 있으므로 이 블록 안에서만 살려 둔다.
+            let mut forward = forward;
+            run_removal(engine, file, &temp, aggressive, &mut forward)
+        };
+        done_pages += file_pages;
+        match outcome {
             Err(err) => {
                 let _ = std::fs::remove_file(&temp);
                 report.failed.push((name, format!("{err:#}")));
@@ -589,7 +614,7 @@ fn run_folder_removal(
             }
         }
     }
-    emit(Event::Progress { done: files.len(), total: files.len() });
+    emit(Event::Progress { done: total_pages, total: total_pages });
     report.log = write_batch_log(folder, &report).map(|p| p.to_string_lossy().to_string());
     Ok(report)
 }

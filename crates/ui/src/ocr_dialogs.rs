@@ -14,6 +14,13 @@ use crate::ocr_worker::{
 };
 use std::path::{Path, PathBuf};
 
+/// 창에 다시 포커스를 준다. 네이티브 파일·폴더 대화상자를 띄우거나 보조 프로세스가 도는 동안
+/// macOS에서 앱 창이 키 포커스를 잃고, 그 상태로는 파일을 끌어다 놓아도 열리지 않는다(다른 앱에
+/// 갔다 돌아와야 동작) — 사용자 리포트 2026-09-23.
+fn focus_window(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+}
+
 /// 내보내기 옵션 대화상자 상태. 형식은 메뉴에서 고른다.
 pub struct ExportDialog {
     pub format: ExportFormat,
@@ -103,6 +110,10 @@ impl OcrJob {
         self.phase = JobPhase::Finished(text);
     }
 
+    fn is_finished(&self) -> bool {
+        !matches!(self.phase, JobPhase::Running { .. })
+    }
+
     fn fail(&mut self, message: String) {
         self.worker = None;
         if let Some(temp) = self.temp_output.take() {
@@ -113,7 +124,16 @@ impl OcrJob {
 }
 
 /// 매 프레임: 작업 프로세스의 이벤트를 받아 상태를 갱신한다.
-pub fn poll(app: &mut PdfViewerApp) {
+pub fn poll(ctx: &egui::Context, app: &mut PdfViewerApp) {
+    let was_running = app.ocr_job.as_ref().is_some_and(|j| !j.is_finished());
+    poll_events(app);
+    // 작업이 끝난 프레임에 창 포커스를 되찾는다(보조 프로세스가 가져간 포커스).
+    if was_running && app.ocr_job.as_ref().is_some_and(|j| j.is_finished()) {
+        focus_window(ctx);
+    }
+}
+
+fn poll_events(app: &mut PdfViewerApp) {
     loop {
         let Some(job) = app.ocr_job.as_mut() else { return };
         let Some(worker) = job.worker.as_ref() else { return };
@@ -241,9 +261,9 @@ fn describe_batch(r: &crate::ocr_worker::BatchReport) -> String {
 
 /// 메뉴 "폴더 일괄 삭제…" — 폴더를 고르면 바로 시작한다(파일마다 백업 후 교체).
 pub fn request_folder_removal(ctx: &egui::Context, app: &mut PdfViewerApp) {
-    let Some(folder) = rfd::FileDialog::new().set_title("OCR을 지울 PDF 폴더 선택(하위 폴더 포함)").pick_folder() else {
-        return;
-    };
+    let folder = rfd::FileDialog::new().set_title("OCR을 지울 PDF 폴더 선택(하위 폴더 포함)").pick_folder();
+    focus_window(ctx);
+    let Some(folder) = folder else { return };
     let job = Job::RemoveFolder {
         folder,
         aggressive: false,
@@ -331,15 +351,17 @@ fn show_removal_confirm(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 }
             }
             // 적극 모드: 휴리스틱 형태(흰 글씨·이미지 아래·꺼진 레이어 등)까지 지운다.
-            if a.reported.removed() > 0 {
-                ui.add_space(6.0);
-                ui.checkbox(&mut confirm.aggressive, "적극 모드 — 숨겨진 것으로 보이는 텍스트까지 지우기")
-                    .on_hover_text(
-                        "흰 글씨, 이미지에 덮인 글자, 꺼진 레이어 안의 글자, 페이지·클리핑 밖의 글자, 보이지 않는 클리핑 텍스트까지 \
-                         지웁니다. 판정이 휴리스틱이라 오탐이 있을 수 있어, 지운 뒤 화면이 바뀌면 그 페이지는 되돌립니다.",
-                    );
-                ui.weak(format!("적극 모드에서 추가로 지울 것: {}", a.reported.describe()));
-            }
+            ui.add_space(6.0);
+            ui.checkbox(&mut confirm.aggressive, "적극 모드 — 숨겨진 것으로 보이는 텍스트까지 지우기")
+                .on_hover_text(
+                    "흰 글씨, 이미지에 덮인 글자, 꺼진 레이어 안의 글자, 페이지·클리핑 밖의 글자, 보이지 않는 클리핑 텍스트까지 \
+                     지웁니다. 판정이 휴리스틱이라 오탐이 있을 수 있어, 지운 뒤 화면이 바뀌면 그 페이지는 되돌립니다.",
+                );
+            ui.weak(if a.reported.removed() > 0 {
+                format!("이 파일에서 적극 모드가 추가로 지울 것: {}", a.reported.describe())
+            } else {
+                "이 파일에는 적극 모드로 더 지울 것이 없습니다.".to_string()
+            });
 
             ui.add_space(6.0);
             if a.signed {
@@ -465,13 +487,12 @@ pub fn request_import(ctx: &egui::Context, app: &mut PdfViewerApp) {
         app.status_message = Some("원본 PDF를 찾을 수 없습니다(이름이 바뀌었거나 이동/삭제됨).".to_string());
         return;
     }
-    let Some(mut files) = rfd::FileDialog::new()
+    let files = rfd::FileDialog::new()
         .set_title("가져올 hOCR 파일 선택(페이지별 파일이면 여러 개)")
         .add_filter("hOCR", &["hocr", "html", "htm", "xhtml"])
-        .pick_files()
-    else {
-        return;
-    };
+        .pick_files();
+    focus_window(ctx);
+    let Some(mut files) = files else { return };
     files.sort_by(|a, b| {
         let name = |p: &PathBuf| crate::app::display_filename(p);
         pdf_ocr::hocr::parse::natural_cmp(&name(a), &name(b))
@@ -956,7 +977,9 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
             "hocr" => file_dialog.add_filter("hOCR", &["hocr", "html"]),
             _ => file_dialog.add_filter("텍스트", &["txt"]),
         };
-        if let Some(output) = file_dialog.save_file() {
+        let output = file_dialog.save_file();
+        focus_window(ctx);
+        if let Some(output) = output {
             start_export(ctx, app, output);
         }
         // 저장 대화상자를 취소하면 옵션 창을 그대로 둔다.

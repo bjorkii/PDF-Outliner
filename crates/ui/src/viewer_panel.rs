@@ -280,7 +280,13 @@ fn show_single_page(
                 }
             }
         }
+        // 경계에서 더 민 양을 모아 페이지를 넘긴다(맥 미리보기의 경계 느낌).
+        let before_clamp = app.viewport.pan_offset.y;
         app.viewport.clamp_pan(page_size, available);
+        let overflow = before_clamp - app.viewport.pan_offset.y;
+        // 사이드바·검색 패널에서 스크롤할 때는 넘기지 않는다(스크롤 입력은 창 전체에서 들어온다).
+        let pointer_in_view = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| rect.contains(p));
+        flip_page_at_edge(ctx, app, if pointer_in_view { overflow } else { 0.0 });
 
         let image_rect =
             egui::Rect::from_center_size(rect.center() + app.viewport.pan_offset, page_size);
@@ -1094,6 +1100,57 @@ fn draw_search_highlight(
             }
         }
     }
+}
+
+/// 페이지 경계를 넘겨 더 민 양(`overflow`, pt)을 모아 임계값을 넘으면 페이지를 넘긴다.
+///
+/// - 위로 밀어 아래 경계를 넘으면 다음 쪽(새 페이지는 맨 위에서 시작), 아래로 밀어 위 경계를
+///   넘으면 이전 쪽(맨 아래에서 시작).
+/// - 관성 스크롤 한 번에 여러 장이 넘어가지 않도록, 넘긴 뒤에는 스크롤이 거의 멈출 때까지 잠근다.
+/// - 한동안 스크롤이 없으면 모아 둔 양을 잊는다 — 조금씩 여러 번 민 것이 쌓여 갑자기 넘어가지
+///   않게.
+fn flip_page_at_edge(ctx: &egui::Context, app: &mut PdfViewerApp, overflow: f32) {
+    /// 경계에서 이만큼(pt) 더 밀어야 넘어간다.
+    const FLIP_THRESHOLD: f32 = 120.0;
+    /// 이 시간(초) 동안 스크롤이 없으면 모아 둔 양을 잊는다.
+    const FORGET_AFTER: f64 = 0.35;
+    /// 스크롤 속도가 이보다 작아지면 "멈췄다"고 보고 잠금을 푼다(pt/프레임).
+    const RESTING_SPEED: f32 = 1.0;
+
+    let (now, scroll_speed) = ctx.input(|i| (i.time, i.smooth_scroll_delta.y.abs()));
+    if app.edge_push_locked {
+        if scroll_speed <= RESTING_SPEED {
+            app.edge_push_locked = false;
+        }
+        app.edge_push = 0.0;
+        return;
+    }
+    if now - app.edge_push_at > FORGET_AFTER {
+        app.edge_push = 0.0;
+    }
+    if overflow != 0.0 {
+        // 방향이 바뀌면 처음부터 다시 센다.
+        if app.edge_push.signum() != overflow.signum() {
+            app.edge_push = 0.0;
+        }
+        app.edge_push += overflow;
+        app.edge_push_at = now;
+    }
+    if app.edge_push.abs() < FLIP_THRESHOLD {
+        return;
+    }
+    // 위로 밀면(손가락을 위로) 화면이 올라가며 pan_offset.y가 줄어 overflow가 음수다.
+    let forward = app.edge_push < 0.0;
+    let at_last = app.current_page >= app.total_pages;
+    let at_first = app.current_page <= 1;
+    app.edge_push = 0.0;
+    if (forward && at_last) || (!forward && at_first) {
+        return;
+    }
+    app.edge_push_locked = true;
+    app.go_to_page_delta(if forward { 1 } else { -1 });
+    // 넘어간 쪽은 이어지는 자리에서 시작한다(다음 쪽은 맨 위, 이전 쪽은 맨 아래).
+    app.viewport.pan_offset.y = if forward { f32::MAX } else { f32::MIN };
 }
 
 /// OCR 결과 창에서 "보기"로 고른 자리(가져오기 검증에서 문제가 된 단어)를 빨간 테두리로 그린다.
