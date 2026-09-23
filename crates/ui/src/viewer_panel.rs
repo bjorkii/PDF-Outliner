@@ -1125,53 +1125,66 @@ pub struct EdgeState {
 /// 관성으로 이벤트가 길게 이어져서, 의도적으로 미는 것과 스치는 것을 가르려면 큰 값이 필요하다.
 const FLIP_THRESHOLD: f32 = 1000.0;
 /// 탄성이 점근하는 거리(pt) — 스프링이 늘어날 수 있는 한계처럼 작동한다.
-const RUBBER_LIMIT: f32 = 260.0;
-/// 처음 미는 힘이 얼마나 그대로 전달되는지(0~1). 스프링 상수에 해당한다.
-const RUBBER_START: f32 = 0.55;
-/// 손을 뗐을 때 제자리로 돌아오는 비율(프레임당).
-const SPRING_BACK: f32 = 0.25;
+const RUBBER_LIMIT: f32 = 200.0;
+/// 처음 미는 힘이 얼마나 그대로 전달되는지(0~1). 스프링 상수에 해당한다 — 작을수록 묵직하다.
+const RUBBER_START: f32 = 0.35;
+/// 화면이 목표 위치를 따라가는 속도(초당 비율). 목표로 "튀지" 않고 이 속도로 수렴하기 때문에
+/// 입력이 드문드문 오는 관성 구간에서도 위아래로 떨리지 않는다(사용자 리포트 2026-09-23).
+const FOLLOW_RATE: f32 = 16.0;
+/// 미는 입력이 끊긴 뒤 모아 둔 양이 풀리는 속도(초당 비율) — 손을 떼면 곧바로 돌아온다.
+const RELEASE_RATE: f32 = 12.0;
+/// 입력이 이 시간(초)보다 오래 끊겨야 풀기 시작한다. 트랙패드·관성 이벤트는 프레임을 건너뛰며
+/// 들어오는데, 빈 프레임마다 풀어 버리면 목표값이 오르내려 화면이 떨린다(테스트로 확인).
+const RELEASE_AFTER: f64 = 0.08;
 /// 이 시간(초) 동안 스크롤이 없으면 모아 둔 양을 잊는다.
 const FORGET_AFTER: f64 = 0.35;
 /// 스크롤 속도가 이보다 작아지면 "멎었다"고 보고 잠금을 푼다(pt/프레임).
 const RESTING_SPEED: f32 = 1.0;
 
 /// 한 프레임의 경계 밀기 처리(순수 함수). `overflow`는 클리핑으로 잘려 나간 이동량(pt),
-/// `scroll_speed`는 이번 프레임 스크롤 속도. 페이지를 넘겨야 하면 방향(1=다음, -1=이전).
+/// `dt`는 프레임 간격(초), `scroll_speed`는 이번 프레임 스크롤 속도. 페이지를 넘겨야 하면
+/// 방향(1=다음, -1=이전).
 ///
-/// - 미는 동안은 감쇠해서 페이지가 따라 나가고(`overscroll`), 입력이 없으면 제자리로 돌아온다.
+/// - 미는 동안은 스프링처럼 저항을 받으며 페이지가 따라 나가고(`overscroll`), 손을 떼면 돌아온다.
+/// - 화면 위치는 목표값으로 곧장 뛰지 않고 `FOLLOW_RATE`로 수렴한다 — 입력이 있는 프레임과 없는
+///   프레임이 번갈아 오는 관성 구간에서 떨리지 않게.
 /// - 관성 스크롤 한 번에 여러 장 넘어가지 않게, 넘긴 뒤에는 스크롤이 멎을 때까지 잠근다.
 /// - 한동안 스크롤이 없으면 모아 둔 양을 잊는다(조금씩 여러 번 민 것이 쌓이지 않게).
-pub fn edge_step(state: &mut EdgeState, overflow: f32, now: f64, scroll_speed: f32) -> Option<i32> {
+pub fn edge_step(state: &mut EdgeState, overflow: f32, now: f64, dt: f32, scroll_speed: f32) -> Option<i32> {
+    let mut flip = None;
     if state.locked {
         if scroll_speed <= RESTING_SPEED {
             state.locked = false;
         }
         state.push = 0.0;
-        spring_back(state);
-        return None;
-    }
-    if now - state.push_at > FORGET_AFTER {
-        state.push = 0.0;
-    }
-    if overflow != 0.0 {
-        // 방향이 바뀌면 처음부터 다시 센다.
-        if state.push.signum() != overflow.signum() {
+    } else {
+        if now - state.push_at > FORGET_AFTER {
             state.push = 0.0;
         }
-        state.push += overflow;
-        state.push_at = now;
-        // 따라 나가는 거리는 지금까지 민 양으로 정한다 — 넘어가기 직전까지 계속 조금씩 움직인다.
-        state.overscroll = rubber_band(state.push);
-    } else {
-        spring_back(state);
+        if overflow != 0.0 {
+            // 방향이 바뀌면 처음부터 다시 센다.
+            if state.push.signum() != overflow.signum() {
+                state.push = 0.0;
+            }
+            state.push += overflow;
+            state.push_at = now;
+        } else if now - state.push_at > RELEASE_AFTER {
+            // 입력이 끊기면 스프링이 풀리듯 모아 둔 양도 줄어든다.
+            state.push -= state.push * approach(RELEASE_RATE, dt);
+        }
+        if state.push.abs() >= FLIP_THRESHOLD {
+            // 위로 밀면(손가락을 위로) 화면이 올라가며 pan_offset.y가 줄어 overflow가 음수다.
+            flip = Some(if state.push < 0.0 { 1 } else { -1 });
+            state.push = 0.0;
+        }
     }
-    if state.push.abs() < FLIP_THRESHOLD {
-        return None;
+
+    let target = if flip.is_some() { 0.0 } else { rubber_band(state.push) };
+    state.overscroll += (target - state.overscroll) * approach(FOLLOW_RATE, dt);
+    if (state.overscroll - target).abs() < 0.3 {
+        state.overscroll = target;
     }
-    // 위로 밀면(손가락을 위로) 화면이 올라가며 pan_offset.y가 줄어 overflow가 음수다.
-    let direction = if state.push < 0.0 { 1 } else { -1 };
-    state.push = 0.0;
-    Some(direction)
+    flip
 }
 
 /// 민 양(pt) → 페이지가 따라 나가는 거리(pt).
@@ -1185,21 +1198,16 @@ fn rubber_band(push: f32) -> f32 {
     push.signum() * pull / (1.0 + pull / RUBBER_LIMIT)
 }
 
-/// 미는 입력이 없을 때 제자리로 돌아온다.
-fn spring_back(state: &mut EdgeState) {
-    if state.overscroll == 0.0 {
-        return;
-    }
-    state.overscroll -= state.overscroll * SPRING_BACK;
-    if state.overscroll.abs() < 0.5 {
-        state.overscroll = 0.0;
-    }
+/// 초당 `rate` 비율로 수렴할 때 이번 프레임(`dt`초)에 좁힐 비율 — 프레임 속도가 달라도 같은 느낌.
+fn approach(rate: f32, dt: f32) -> f32 {
+    1.0 - (-rate * dt.clamp(0.001, 0.1)).exp()
 }
+
 
 /// [`edge_step`]의 결과를 화면에 반영한다 — 넘길 수 있으면 페이지를 넘기고 새 쪽의 시작 위치를 잡는다.
 fn flip_page_at_edge(ctx: &egui::Context, app: &mut PdfViewerApp, overflow: f32) {
-    let (now, scroll_speed) = ctx.input(|i| (i.time, i.smooth_scroll_delta.y.abs()));
-    let direction = edge_step(&mut app.edge, overflow, now, scroll_speed);
+    let (now, dt, scroll_speed) = ctx.input(|i| (i.time, i.stable_dt, i.smooth_scroll_delta.y.abs()));
+    let direction = edge_step(&mut app.edge, overflow, now, dt, scroll_speed);
     if app.edge.overscroll != 0.0 {
         ctx.request_repaint(); // 돌아오는 동안 계속 그린다
     }
@@ -1256,7 +1264,7 @@ mod edge_flip_tests {
         // 위로 미는 중(overflow 음수)을 프레임마다 조금씩, 임계값의 세 배까지.
         for frame in 0..60 {
             let now = frame as f64 * 0.016;
-            if let Some(direction) = edge_step(&mut state, -50.0, now, 50.0) {
+            if let Some(direction) = edge_step(&mut state, -50.0, now, 1.0 / 60.0, 50.0) {
                 assert_eq!(direction, 1, "위로 밀면 다음 쪽");
                 turns += 1;
                 state.locked = true; // 호출 측이 하는 일
@@ -1264,7 +1272,7 @@ mod edge_flip_tests {
         }
         assert_eq!(turns, 1, "관성이 이어져도 한 장만");
         // 스크롤이 멎으면 잠금이 풀린다.
-        edge_step(&mut state, 0.0, 2.0, 0.0);
+        edge_step(&mut state, 0.0, 2.0, 1.0 / 60.0, 0.0);
         assert!(!state.locked);
     }
 
@@ -1273,12 +1281,12 @@ mod edge_flip_tests {
     fn small_push_only_bounces() {
         let mut state = EdgeState::default();
         for frame in 0..4 {
-            assert_eq!(edge_step(&mut state, -30.0, frame as f64 * 0.016, 30.0), None);
+            assert_eq!(edge_step(&mut state, -30.0, frame as f64 * 0.016, 1.0 / 60.0, 30.0), None);
         }
         assert!(state.overscroll < 0.0, "페이지가 따라 나간다");
         assert!(state.overscroll.abs() < super::RUBBER_LIMIT);
         for frame in 0..40 {
-            edge_step(&mut state, 0.0, 1.0 + frame as f64 * 0.016, 0.0);
+            edge_step(&mut state, 0.0, 1.0 + frame as f64 * 0.016, 1.0 / 60.0, 0.0);
         }
         assert_eq!(state.overscroll, 0.0, "손을 떼면 제자리로");
     }
@@ -1291,7 +1299,7 @@ mod edge_flip_tests {
         let mut moves = 0;
         for frame in 0..19 {
             // 임계값의 95%까지만 민다(넘기지 않고 곡선만 본다).
-            assert_eq!(edge_step(&mut state, -FLIP_THRESHOLD * 0.05, frame as f64 * 0.016, 50.0), None);
+            assert_eq!(edge_step(&mut state, -FLIP_THRESHOLD * 0.05, frame as f64 * 0.016, 1.0 / 60.0, 50.0), None);
             if state.overscroll < last - 0.2 {
                 moves += 1;
             }
@@ -1305,17 +1313,53 @@ mod edge_flip_tests {
         assert!(at(1000.0) - at(900.0) > 3.0, "끝까지 움직인다");
     }
 
+    /// 관성 구간처럼 스크롤 이벤트가 띄엄띄엄 와도 화면이 위아래로 떨리지 않는다.
+    #[test]
+    fn no_jitter_when_events_arrive_in_bursts() {
+        let mut state = EdgeState::default();
+        let mut trail = Vec::new();
+        for frame in 0..30 {
+            // 한 프레임 걸러 한 번씩만 입력이 들어오는 상황.
+            let overflow = if frame % 2 == 0 { -40.0 } else { 0.0 };
+            edge_step(&mut state, overflow, frame as f64 / 60.0, 1.0 / 60.0, 40.0);
+            trail.push(state.overscroll);
+        }
+        for pair in trail.windows(2) {
+            assert!(pair[1] <= pair[0] + 0.01, "한 방향으로만 움직여야 한다: {trail:?}");
+        }
+    }
+
+    /// 손을 떼면 떨림 없이 제자리로 돌아온다.
+    #[test]
+    fn returns_smoothly_after_release() {
+        let mut state = EdgeState::default();
+        for frame in 0..10 {
+            edge_step(&mut state, -60.0, frame as f64 / 60.0, 1.0 / 60.0, 60.0);
+        }
+        let mut trail = vec![state.overscroll];
+        for frame in 10..90 {
+            edge_step(&mut state, 0.0, frame as f64 / 60.0, 1.0 / 60.0, 0.0);
+            trail.push(state.overscroll);
+        }
+        // 가장 멀리 밀린 지점(수렴 지연으로 몇 프레임 뒤) 이후로는 한 방향으로만 돌아온다.
+        let peak = trail.iter().enumerate().min_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i).unwrap();
+        for pair in trail[peak..].windows(2) {
+            assert!(pair[1] >= pair[0] - 0.01, "돌아오는 동안 되밀리지 않는다: {trail:?}");
+        }
+        assert_eq!(state.overscroll, 0.0, "결국 제자리");
+    }
+
     /// 한동안 쉬면 모아 둔 양을 잊는다 — 조금씩 여러 번 민 것이 쌓여 갑자기 넘어가지 않게.
     #[test]
     fn pushes_expire_and_direction_resets() {
         let mut state = EdgeState::default();
-        edge_step(&mut state, -FLIP_THRESHOLD * 0.9, 0.0, 100.0);
+        edge_step(&mut state, -FLIP_THRESHOLD * 0.9, 0.0, 1.0 / 60.0, 100.0);
         // 한참 뒤 다시 조금 밀어도 넘어가지 않는다.
-        assert_eq!(edge_step(&mut state, -100.0, 5.0, 100.0), None);
+        assert_eq!(edge_step(&mut state, -100.0, 5.0, 1.0 / 60.0, 100.0), None);
         assert!(state.push.abs() < FLIP_THRESHOLD);
         // 반대 방향으로 밀면 그동안 모은 것은 버린다.
-        edge_step(&mut state, -FLIP_THRESHOLD * 0.9, 5.1, 100.0);
-        assert_eq!(edge_step(&mut state, 100.0, 5.12, 100.0), None);
+        edge_step(&mut state, -FLIP_THRESHOLD * 0.9, 5.1, 1.0 / 60.0, 100.0);
+        assert_eq!(edge_step(&mut state, 100.0, 5.12, 1.0 / 60.0, 100.0), None);
         assert!(state.push > 0.0);
     }
 
@@ -1325,7 +1369,7 @@ mod edge_flip_tests {
         let mut state = EdgeState::default();
         let mut result = None;
         for frame in 0..40 {
-            if let Some(direction) = edge_step(&mut state, 60.0, frame as f64 * 0.016, 60.0) {
+            if let Some(direction) = edge_step(&mut state, 60.0, frame as f64 * 0.016, 1.0 / 60.0, 60.0) {
                 result = Some(direction);
                 break;
             }
