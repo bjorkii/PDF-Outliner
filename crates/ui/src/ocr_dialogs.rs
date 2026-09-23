@@ -40,6 +40,7 @@ enum JobKind {
     AnalyzeRemoval { pdf: PathBuf },
     Remove { pdf: PathBuf },
     AnalyzeImport { pdf: PathBuf, files: Vec<PathBuf> },
+    Batch,
     Import { pdf: PathBuf },
 }
 
@@ -70,6 +71,8 @@ pub struct RemovalConfirm {
     analysis: RemovalAnalysis,
     /// 서명 무효화에 동의함(서명된 파일에서만 필요).
     signature_ack: bool,
+    /// 휴리스틱 형태(흰 글씨·이미지 아래 등)까지 지운다.
+    aggressive: bool,
 }
 
 impl OcrJob {
@@ -132,7 +135,7 @@ pub fn poll(app: &mut PdfViewerApp) {
                 let JobKind::AnalyzeRemoval { pdf } = &job.kind else { return };
                 let pdf = pdf.clone();
                 app.ocr_job = None;
-                app.ocr_removal_confirm = Some(RemovalConfirm { pdf, analysis, signature_ack: false });
+                app.ocr_removal_confirm = Some(RemovalConfirm { pdf, analysis, signature_ack: false, aggressive: false });
             }
             WorkerPoll::Event(Event::RemovalDone(report)) => {
                 let JobKind::Remove { pdf } = &job.kind else { return };
@@ -146,6 +149,10 @@ pub fn poll(app: &mut PdfViewerApp) {
                         Err(message) => job.fail(message),
                     }
                 }
+            }
+            WorkerPoll::Event(Event::BatchDone(report)) => {
+                job.finish(describe_batch(&report));
+                app.status_message = Some(format!("폴더 일괄 OCR 삭제: {}개 파일 바꿈", report.changed.len()));
             }
             WorkerPoll::Event(Event::ImportAnalysis(analysis)) => {
                 let JobKind::AnalyzeImport { pdf, files } = &job.kind else { return };
@@ -200,6 +207,50 @@ pub fn request_removal(ctx: &egui::Context, app: &mut PdfViewerApp) {
     }
     let job = Job::AnalyzeRemoval { pdf: pdf.clone() };
     app.ocr_job = Some(OcrJob::spawn(ctx, "OCR 전체 삭제 — 분석".to_string(), &job, JobKind::AnalyzeRemoval { pdf }, None));
+}
+
+/// 폴더 일괄 삭제 결과 문장.
+fn describe_batch(r: &crate::ocr_worker::BatchReport) -> String {
+    let mut lines = vec![format!(
+        "PDF {}개 중 바꾼 파일 {}개, 지울 것이 없던 파일 {}개, 건너뛴 파일 {}개, 실패 {}개",
+        r.total,
+        r.changed.len(),
+        r.unchanged.len(),
+        r.skipped.len(),
+        r.failed.len()
+    )];
+    for (name, pages, removed) in r.changed.iter().take(30) {
+        lines.push(format!("  {name}: {pages}쪽에서 {removed}건 지움"));
+    }
+    if r.changed.len() > 30 {
+        lines.push(format!("  … 외 {}개", r.changed.len() - 30));
+    }
+    for (name, reason) in r.skipped.iter().take(10) {
+        lines.push(format!("  건너뜀 {name}: {reason}"));
+    }
+    for (name, reason) in r.failed.iter().take(10) {
+        lines.push(format!("  실패 {name}: {reason}"));
+    }
+    lines.push("원본은 파일마다 .backup으로 보존했습니다.".to_string());
+    if let Some(log) = &r.log {
+        lines.push(format!("로그(CSV): {log}"));
+    }
+    lines.join("
+")
+}
+
+/// 메뉴 "폴더 일괄 삭제…" — 폴더를 고르면 바로 시작한다(파일마다 백업 후 교체).
+pub fn request_folder_removal(ctx: &egui::Context, app: &mut PdfViewerApp) {
+    let Some(folder) = rfd::FileDialog::new().set_title("OCR을 지울 PDF 폴더 선택(하위 폴더 포함)").pick_folder() else {
+        return;
+    };
+    let job = Job::RemoveFolder {
+        folder,
+        aggressive: false,
+        // 열려 있는 파일은 건드리지 않는다(문서 핸들·파일 감시와 충돌).
+        skip: app.current_file.clone().into_iter().collect(),
+    };
+    app.ocr_job = Some(OcrJob::spawn(ctx, "OCR 폴더 일괄 삭제".to_string(), &job, JobKind::Batch, None));
 }
 
 fn show_needs_save_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
@@ -266,14 +317,8 @@ fn show_removal_confirm(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 if a.own_layer_pages > 0 {
                     kinds.push(format!("이 앱이 넣은 OCR 레이어 {}쪽", a.own_layer_pages));
                 }
-                if a.counts.invisible_mode > 0 {
-                    kinds.push(format!("보이지 않게 그린 텍스트(OCR) {}", a.counts.invisible_mode));
-                }
-                if a.counts.zero_size > 0 {
-                    kinds.push(format!("크기 0 텍스트 {}", a.counts.zero_size));
-                }
-                if a.counts.transparent > 0 {
-                    kinds.push(format!("완전 투명 텍스트 {}", a.counts.transparent));
+                if !a.counts.0.is_empty() {
+                    kinds.push(a.counts.describe());
                 }
                 ui.weak(kinds.join(" · "));
                 ui.weak("지운 뒤 페이지마다 원본과 화면·보이는 텍스트를 비교해, 달라진 페이지는 원래대로 되돌립니다.");
@@ -285,11 +330,15 @@ fn show_removal_confirm(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     ui.weak(format!("  p.{page}: {reason}"));
                 }
             }
-            if a.counts.clip_only_kept > 0 {
-                ui.weak(format!(
-                    "클리핑에 쓰이는 보이지 않는 텍스트 {}건은 화면에 영향을 줄 수 있어 남깁니다.",
-                    a.counts.clip_only_kept
-                ));
+            // 적극 모드: 휴리스틱 형태(흰 글씨·이미지 아래·꺼진 레이어 등)까지 지운다.
+            if a.reported.removed() > 0 {
+                ui.add_space(6.0);
+                ui.checkbox(&mut confirm.aggressive, "적극 모드 — 숨겨진 것으로 보이는 텍스트까지 지우기")
+                    .on_hover_text(
+                        "흰 글씨, 이미지에 덮인 글자, 꺼진 레이어 안의 글자, 페이지·클리핑 밖의 글자, 보이지 않는 클리핑 텍스트까지 \
+                         지웁니다. 판정이 휴리스틱이라 오탐이 있을 수 있어, 지운 뒤 화면이 바뀌면 그 페이지는 되돌립니다.",
+                    );
+                ui.weak(format!("적극 모드에서 추가로 지울 것: {}", a.reported.describe()));
             }
 
             ui.add_space(6.0);
@@ -298,7 +347,10 @@ fn show_removal_confirm(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 ui.checkbox(&mut confirm.signature_ack, "서명이 무효가 되는 것을 이해했습니다");
             }
             if a.tagged {
-                ui.weak("태그(접근성 구조)가 있는 PDF입니다. 지운 텍스트를 가리키던 태그가 비게 될 수 있습니다.");
+                ui.weak(format!(
+                    "태그(접근성 구조)가 있는 PDF입니다. 태그 껍데기는 남겨 구조는 유지하지만, 내용이 비는 태그가 {}개 생깁니다.",
+                    a.empty_tags
+                ));
             }
             if let Some(pdfa) = &a.pdfa {
                 ui.weak(format!("PDF/A-{pdfa} 선언은 유지하지만 규격 준수는 보장하지 않습니다. 외부 검증(veraPDF 등)을 권합니다."));
@@ -342,7 +394,7 @@ fn show_removal_confirm(ctx: &egui::Context, app: &mut PdfViewerApp) {
         Some(true) => {
             let Some(confirm) = app.ocr_removal_confirm.take() else { return };
             let temp = confirm.pdf.with_extension("ocr_tmp.pdf");
-            let job = Job::Remove { pdf: confirm.pdf.clone(), temp_output: temp.clone() };
+            let job = Job::Remove { pdf: confirm.pdf.clone(), temp_output: temp.clone(), aggressive: confirm.aggressive };
             app.ocr_job = Some(OcrJob::spawn(
                 ctx,
                 "OCR 전체 삭제".to_string(),
@@ -360,7 +412,14 @@ fn show_removal_confirm(ctx: &egui::Context, app: &mut PdfViewerApp) {
 /// 실패 이유(원본은 그대로).
 fn finish_removal(app: &mut PdfViewerApp, pdf: &Path, temp: Option<&Path>, report: &RemovalReport) -> Result<String, String> {
     if report.nothing_to_do {
-        return Ok("지울 보이지 않는 텍스트가 없습니다. 파일을 바꾸지 않았습니다.".to_string());
+        if report.rolled_back.is_empty() {
+            return Ok("지울 보이지 않는 텍스트가 없습니다. 파일을 바꾸지 않았습니다.".to_string());
+        }
+        return Ok(format!(
+            "지울 수 있는 것이 없었습니다 — 지워 본 {}쪽 모두 화면이나 보이는 텍스트가 달라져 되돌렸습니다(파일을 바꾸지 않음).\n{}",
+            report.rolled_back.len(),
+            describe_removal(report, "원본 그대로")
+        ));
     }
     let backup_note = swap_in_result(app, pdf, temp, "OCR 텍스트를 지웠습니다.")?;
     Ok(describe_removal(report, &backup_note))
@@ -790,17 +849,25 @@ fn describe_import(r: &ImportReport, backup_note: &str) -> String {
 fn describe_removal(r: &RemovalReport, backup_note: &str) -> String {
     let a = &r.analysis;
     let mut lines = vec![
+        format!("모드: {}", if r.aggressive { "적극(숨겨진 것으로 보이는 텍스트까지)" } else { "표준" }),
         format!("바뀐 페이지: {}쪽 / 전체 {}쪽", r.pages_changed, a.pages),
         format!(
-            "지운 텍스트: {}건(보이지 않게 그림 {}, 크기 0 {}, 투명 {}){}",
+            "지운 텍스트: {}건({}){}",
             a.counts.removed(),
-            a.counts.invisible_mode,
-            a.counts.zero_size,
-            a.counts.transparent,
+            a.counts.describe(),
             if a.own_layer_pages > 0 { format!(" + 이 앱이 넣은 레이어 {}쪽", a.own_layer_pages) } else { String::new() }
         ),
         format!("파일 크기: {} → {}", human_size(r.size_before), human_size(r.size_after)),
     ];
+    if r.analysis.empty_tags > 0 {
+        lines.push(format!("내용이 비게 된 태그: {}개(구조는 유지)", r.analysis.empty_tags));
+    }
+    if r.pruned_layers > 0 {
+        lines.push(format!("빈 레이어 정리: {}개", r.pruned_layers));
+    }
+    if a.reported.removed() > 0 {
+        lines.push(format!("지우지 않고 남긴 것: {}", a.reported.describe()));
+    }
     if !r.rolled_back.is_empty() {
         lines.push(format!("검증에서 원본과 달라 되돌린 페이지: {}쪽", r.rolled_back.len()));
         lines.extend(r.rolled_back.iter().take(20).map(|(p, why)| format!("  p.{p}: {why}")));
@@ -817,9 +884,6 @@ fn describe_removal(r: &RemovalReport, backup_note: &str) -> String {
     }
     for (page, note) in a.notes.iter().take(10) {
         lines.push(format!("참고 p.{page}: {note}"));
-    }
-    if a.counts.clip_only_kept > 0 {
-        lines.push(format!("남긴 클리핑용 보이지 않는 텍스트: {}건", a.counts.clip_only_kept));
     }
     lines.push(backup_note.to_string());
     lines.join("\n")

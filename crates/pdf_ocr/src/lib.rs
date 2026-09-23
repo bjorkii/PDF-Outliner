@@ -21,6 +21,7 @@ pub mod hocr;
 pub mod import;
 pub mod insert;
 pub mod layout;
+pub mod optional_content;
 pub mod preflight;
 pub mod remove;
 pub mod resources;

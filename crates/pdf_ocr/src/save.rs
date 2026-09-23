@@ -24,6 +24,22 @@ pub fn uses_object_streams(doc: &Document) -> bool {
     matches!(doc.reference_table.cross_reference_type, XrefType::CrossReferenceStream)
 }
 
+/// 쓰이지 않는 객체를 문서에서 빼서 돌려준다. 검증에 실패한 페이지를 되돌릴 때 원본 콘텐츠
+/// 스트림이 필요하므로, 저장 전에 이걸로 빼 두었다가 [`restore`]로 되살린다(저장 때 그냥 지워
+/// 버리면 되돌린 페이지가 빈 페이지가 된다 — 실제로 겪음, 2026-09-23).
+pub fn take_unreferenced(doc: &mut Document) -> std::collections::BTreeMap<lopdf::ObjectId, Object> {
+    let referenced: std::collections::HashSet<lopdf::ObjectId> = doc.traverse_objects(|_| {}).into_iter().collect();
+    let unreferenced: Vec<lopdf::ObjectId> = doc.objects.keys().copied().filter(|id| !referenced.contains(id)).collect();
+    unreferenced.into_iter().filter_map(|id| doc.objects.remove(&id).map(|object| (id, object))).collect()
+}
+
+/// [`take_unreferenced`]로 뺀 객체를 되돌린다.
+pub fn restore(doc: &mut Document, objects: std::collections::BTreeMap<lopdf::ObjectId, Object>) {
+    for (id, object) in objects {
+        doc.objects.entry(id).or_insert(object);
+    }
+}
+
 /// `compact`면 객체 스트림 + xref 스트림으로, 아니면 표 형식으로 쓴다.
 pub fn save_rewritten(doc: &mut Document, path: &Path, now: DateTime<FixedOffset>, compact: bool) -> Result<()> {
     let mut trailer = Dictionary::new();

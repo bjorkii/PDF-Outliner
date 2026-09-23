@@ -19,8 +19,9 @@
 //! 고친 결과 아무것도 그리지 않게 된 Form은 내용을 비우고 `/Resources`를 떼어, 거기서만 쓰던
 //! OCR 폰트가 저장 때 정리되게 한다.
 
-use crate::classify::{classify, is_show_operator, HiddenKind, Verdict};
+use crate::classify::{classify, covered_by_image, is_show_operator, HiddenKind, PageFacts, Verdict};
 use crate::content::interp::{interpret_page, resource_entry, Context, GraphicsState, Problem, Source, Visitor, XObjectKind};
+use crate::optional_content::OptionalContent;
 use crate::content::lexer::{tokenize, Operation};
 use crate::content::{page_content_bytes, stream_bytes};
 use crate::fonts::{tj_number_for_advance, FontMetrics};
@@ -28,33 +29,35 @@ use crate::resources::{ensure_private_page_resources, page_subdict_mut, Referenc
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct KindCounts {
-    pub invisible_mode: usize,
-    pub zero_size: usize,
-    pub transparent: usize,
-    /// render mode 7 — 남겨 둔 것.
-    pub clip_only_kept: usize,
-}
+/// 형태별 개수(`classify::HiddenKind`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KindCounts(BTreeMap<HiddenKind, usize>);
 
 impl KindCounts {
     pub fn removed(&self) -> usize {
-        self.invisible_mode + self.zero_size + self.transparent
+        self.0.values().sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn get(&self, kind: HiddenKind) -> usize {
+        self.0.get(&kind).copied().unwrap_or(0)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (HiddenKind, usize)> + '_ {
+        self.0.iter().map(|(k, n)| (*k, *n))
     }
 
     pub fn add(&mut self, other: &KindCounts) {
-        self.invisible_mode += other.invisible_mode;
-        self.zero_size += other.zero_size;
-        self.transparent += other.transparent;
-        self.clip_only_kept += other.clip_only_kept;
+        for (kind, n) in &other.0 {
+            *self.0.entry(*kind).or_default() += n;
+        }
     }
 
     fn count(&mut self, kind: HiddenKind) {
-        match kind {
-            HiddenKind::InvisibleMode => self.invisible_mode += 1,
-            HiddenKind::ZeroSize => self.zero_size += 1,
-            HiddenKind::Transparent => self.transparent += 1,
-        }
+        *self.0.entry(kind).or_default() += 1;
     }
 }
 
@@ -72,10 +75,15 @@ pub struct PagePlan {
     /// 1부터 센 페이지 번호.
     pub number: usize,
     pub page_id: ObjectId,
+    /// 지운(지울) 형태별 개수.
     pub counts: KindCounts,
+    /// 이 모드에서는 지우지 않고 보고만 하는 형태별 개수.
+    pub reported: KindCounts,
     pub status: PageStatus,
     /// 처리는 했지만 알려야 할 것(해석하지 못한 Form 등).
     pub notes: Vec<String>,
+    /// 지운 뒤 내용이 비게 된 태그 수(태그 PDF일 때).
+    pub empty_tags: usize,
     content: Option<Vec<u8>>,
 }
 
@@ -115,6 +123,20 @@ impl RemovalPlan {
         total
     }
 
+    /// 지운 뒤 내용이 비게 되는 태그 수(계획에 든 페이지만).
+    pub fn empty_tags(&self) -> usize {
+        self.pages.iter().filter(|p| p.status == PageStatus::Planned).map(|p| p.empty_tags).sum()
+    }
+
+    /// 이 모드에서는 지우지 않고 보고만 하는 형태의 합(건너뛴 페이지 것도 포함).
+    pub fn reported_totals(&self) -> KindCounts {
+        let mut total = KindCounts::default();
+        for page in &self.pages {
+            total.add(&page.reported);
+        }
+        total
+    }
+
     pub fn has_changes(&self) -> bool {
         self.pages.iter().any(|p| p.status == PageStatus::Planned)
     }
@@ -122,58 +144,119 @@ impl RemovalPlan {
 
 // ------------------------------------------------------------------ 해석·분류
 
+/// 어떤 형태까지 지울지(설계 문서 4.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// 자동 판정이 확실한 형태만(A·B·D·E).
+    #[default]
+    Standard,
+    /// 휴리스틱 형태(F~K)까지. 렌더 비교로 화면이 그대로임을 확인해야 반영된다.
+    Aggressive,
+}
+
+impl Mode {
+    fn removes(&self, kind: HiddenKind) -> bool {
+        match self {
+            Mode::Standard => kind.is_standard(),
+            Mode::Aggressive => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
-struct Removal {
-    /// 지운 표시 연산자의 이동량(텍스트 공간, Th 적용 후). 계산하지 못하면 None.
-    advance: Option<f64>,
-    font_size: f64,
-    horizontal_scaling: f64,
+enum Removal {
+    /// 표시 연산자 — 지운 만큼의 이동을 `[n] TJ`로 채워야 할 수 있다(이동량, 글자 크기, 가로 배율).
+    Show { advance: Option<f64>, font_size: f64, horizontal_scaling: f64 },
+    /// 그냥 지우는 연산자(빈 껍데기가 된 `BDC`·`EMC`).
+    Delete,
 }
 
 #[derive(Default)]
 struct StreamVisit {
     removals: BTreeMap<usize, Removal>,
     counts: KindCounts,
+    /// 이 모드에서는 지우지 않고 세기만 한 형태.
+    reported: KindCounts,
+    /// 지우고 나서 내용이 비게 된 태그(마크드 콘텐츠) 수.
+    empty_tags: usize,
     problem: Option<String>,
 }
 
 struct Frame {
+    /// 페이지 콘텐츠면 None.
     form: Option<(ObjectId, usize, Vec<u8>)>,
     visit: StreamVisit,
+    /// 열려 있는 `/OC` 블록(바깥부터).
+    oc_blocks: Vec<MarkedBlock>,
+}
+
+/// 마크드 콘텐츠 블록 — 레이어(`/OC`)는 안이 다 비면 껍데기도 지우고, 태그(`/MCID`)는 비게 되는
+/// 것을 세어 보고한다(설계 문서 4.3 — 껍데기를 남기므로 구조 트리가 끊기지는 않는다).
+struct MarkedBlock {
+    /// `BDC`의 연산자 위치.
+    index: usize,
+    /// 기본으로 꺼진 레이어인지.
+    hidden_layer: bool,
+    /// 태그된 콘텐츠(`/MCID`가 있음).
+    tagged: bool,
+    /// 블록 안에 남는 그리기가 있는지.
+    painted: bool,
+    /// 블록 안에서 무언가를 지웠는지.
+    removed: bool,
+}
+
+/// 이미지에 덮이는지(H) 나중에 판정할 표시 연산자.
+struct PendingShow {
+    frame: usize,
+    index: usize,
+    bbox: [f64; 4],
+    order: usize,
+    removal: Removal,
 }
 
 struct Collector<'a> {
     doc: &'a Document,
-    stack: Vec<Frame>,
+    mode: Mode,
+    facts: PageFacts,
+    optional_content: &'a OptionalContent,
+    /// 지금 들어와 있는, 기본으로 꺼진 레이어 Form의 수.
+    hidden_layer_forms: usize,
+    frames: Vec<Frame>,
+    /// 지금 해석 중인 프레임(`frames` 인덱스) — 마지막이 현재.
+    stack: Vec<usize>,
     pending_name: Vec<u8>,
-    finished_forms: Vec<(ObjectId, usize, Vec<u8>, StreamVisit)>,
     fonts: HashMap<ObjectId, Option<FontMetrics>>,
+    /// 페이지 전체에서 연산자가 실행된 순서.
+    order: usize,
+    /// 그려진 이미지: (순서, 사용자 공간 사각형, 불투명 여부).
+    images: Vec<(usize, [f64; 4], bool)>,
+    pending: Vec<PendingShow>,
 }
 
 impl Collector<'_> {
+    fn frame(&mut self) -> &mut StreamVisit {
+        let index = *self.stack.last().expect("프레임 스택은 비지 않는다");
+        &mut self.frames[index].visit
+    }
+
+    /// 표시 연산자의 이동량(폰트 폭). 지운 자리에 `[n] TJ`를 넣어야 할 때 쓴다.
     fn advance(&mut self, context: &Context, op: &Operation) -> Option<f64> {
+        if let Some(show) = context.show {
+            return (!show.approximate).then_some(show.advance);
+        }
+        // 해석기가 폰트를 못 읽은 경우(ExtGState 폰트 등)를 위한 보조 경로.
         let text = &context.state.text;
-        let (id, direct) = match (&text.font_name, text.font_ref) {
-            (_, Some(id)) => (Some(id), None),
-            (Some(name), None) => {
-                let entry = resource_entry(self.doc, context.resources, b"Font", name)?;
-                match entry {
-                    Object::Reference(id) => (Some(*id), None),
-                    other => (None, other.as_dict().ok()),
-                }
-            }
-            (None, None) => return None,
-        };
-        let metrics = match (id, direct) {
-            (Some(id), _) => {
-                let doc = self.doc;
+        let name = text.font_name.as_ref()?;
+        let doc = self.doc;
+        let metrics = match resource_entry(doc, context.resources, b"Font", name)? {
+            Object::Reference(id) => {
+                let id = *id;
                 self.fonts
                     .entry(id)
                     .or_insert_with(|| doc.get_dictionary(id).ok().and_then(|d| FontMetrics::load(doc, d)))
                     .clone()?
             }
-            (None, Some(dict)) => FontMetrics::load(self.doc, dict)?,
-            _ => return None,
+            other => FontMetrics::load(doc, other.as_dict().ok()?)?,
         };
         metrics.show_advance(
             &op.operator,
@@ -184,46 +267,171 @@ impl Collector<'_> {
             text.horizontal_scaling,
         )
     }
+
+    /// 마크드 콘텐츠 스택에 기본으로 꺼진 레이어가 있는지.
+    fn in_hidden_layer(&self, context: &Context) -> bool {
+        self.hidden_layer_forms > 0
+            || context.marked.iter().any(|m| {
+                m.optional_content.is_some_and(|id| self.optional_content.is_hidden(self.doc, id) == Some(true))
+            })
+    }
+
+    /// XObject 딕셔너리의 `/OC`가 기본으로 꺼진 레이어를 가리키는지.
+    fn xobject_hidden(&self, id: ObjectId) -> bool {
+        self.doc
+            .get_object(id)
+            .ok()
+            .and_then(|o| o.as_stream().ok())
+            .and_then(|s| s.dict.get(b"OC").ok())
+            .and_then(|o| o.as_reference().ok())
+            .is_some_and(|oc| self.optional_content.is_hidden(self.doc, oc) == Some(true))
+    }
+
+    /// 이미지가 그 아래를 완전히 가리는지 — 마스크·투명도가 있으면 아니다.
+    fn image_is_opaque(&self, dict: &Dictionary, state: &GraphicsState) -> bool {
+        let has = |key: &[u8]| dict.get(key).is_ok_and(|o| !matches!(o, Object::Null));
+        state.fill_alpha > 0.99 && !state.soft_mask && !has(b"SMask") && !has(b"Mask") && !has(b"IM") && !has(b"ImageMask")
+    }
+
+    /// 단위 정사각형을 CTM으로 옮긴 사각형(이미지가 놓인 자리).
+    fn image_box(state: &GraphicsState) -> [f64; 4] {
+        let corners = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+            .map(|(x, y)| crate::content::interp::transform_point(&state.ctm, x, y));
+        corners.iter().fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b, (x, y)| {
+            [b[0].min(*x), b[1].min(*y), b[2].max(*x), b[3].max(*y)]
+        })
+    }
+
+    fn record(&mut self, kind: HiddenKind, index: usize, removal: Removal) {
+        let mode = self.mode;
+        if !mode.removes(kind) {
+            let frame = *self.stack.last().expect("프레임");
+            self.mark_painted(frame); // 남는 글자라 블록이 비지 않는다
+            self.frame().reported.count(kind);
+            return;
+        }
+        let frame = *self.stack.last().expect("프레임");
+        for block in &mut self.frames[frame].oc_blocks {
+            block.removed = true;
+        }
+        let visit = self.frame();
+        visit.counts.count(kind);
+        visit.removals.insert(index, removal);
+    }
+
+    /// 지금 열려 있는 모든 `/OC` 블록에 "그리는 것이 남았다"고 표시한다.
+    fn mark_painted(&mut self, frame: usize) {
+        for block in &mut self.frames[frame].oc_blocks {
+            block.painted = true;
+        }
+    }
 }
 
 impl Visitor for Collector<'_> {
     fn operation(&mut self, context: &Context, index: usize, op: &Operation) {
-        match classify(context, op) {
-            Verdict::Keep => {}
-            Verdict::ClipOnlyKept => {
-                if let Some(frame) = self.stack.last_mut() {
-                    frame.visit.counts.clip_only_kept += 1;
+        self.order += 1;
+        if op.is(b"BI") {
+            if let Some(image) = &op.inline_image {
+                let opaque = context.state.fill_alpha > 0.99
+                    && !context.state.soft_mask
+                    && !image.dict.iter().any(|(k, _)| k == b"IM" || k == b"ImageMask" || k == b"SMask");
+                self.images.push((self.order, Self::image_box(context.state), opaque));
+            }
+            return;
+        }
+        // 마크드 콘텐츠 블록 열고 닫기 — 꺼진 레이어는 안이 다 비면 껍데기까지 지우고,
+        // 태그는 비게 된 개수를 센다.
+        let frame_index = *self.stack.last().expect("프레임");
+        if op.is(b"BDC") {
+            // 방문자는 연산자를 적용하기 전에 불리므로 이 BDC는 아직 `context.marked`에 없다.
+            let hidden_layer = op.operand_name(0) == Some(b"OC")
+                && op
+                    .operand_name(1)
+                    .and_then(|name| resource_entry(self.doc, context.resources, b"Properties", name))
+                    .and_then(|o| o.as_reference().ok())
+                    .is_some_and(|id| self.optional_content.is_hidden(self.doc, id) == Some(true));
+            let tagged = op.operands.get(1).and_then(|o| o.dict_get(b"MCID")).is_some()
+                || op
+                    .operand_name(1)
+                    .and_then(|name| resource_entry(self.doc, context.resources, b"Properties", name))
+                    .and_then(|o| crate::geometry::resolve(self.doc, o).as_dict().ok())
+                    .is_some_and(|d| d.has(b"MCID"));
+            self.frames[frame_index].oc_blocks.push(MarkedBlock { index, hidden_layer, tagged, painted: false, removed: false });
+        } else if op.is(b"EMC") {
+            if let Some(block) = self.frames[frame_index].oc_blocks.pop() {
+                if !block.painted {
+                    let visit = &mut self.frames[frame_index].visit;
+                    if block.hidden_layer && self.mode.removes(HiddenKind::HiddenLayer) {
+                        visit.removals.insert(block.index, Removal::Delete);
+                        visit.removals.insert(index, Removal::Delete);
+                    } else if block.tagged && block.removed {
+                        visit.empty_tags += 1;
+                    }
                 }
             }
-            Verdict::Remove(kind) => {
-                let advance = self.advance(context, op);
-                let removal = Removal {
-                    advance,
-                    font_size: context.state.text.font_size,
-                    horizontal_scaling: context.state.text.horizontal_scaling,
-                };
-                if let Some(frame) = self.stack.last_mut() {
-                    frame.visit.counts.count(kind);
-                    frame.visit.removals.insert(index, removal);
+        } else if matches!(
+            op.operator.as_slice(),
+            b"Do" | b"sh" | b"S" | b"s" | b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*"
+        ) {
+            self.mark_painted(frame_index);
+        }
+
+        self.facts.in_hidden_layer = self.in_hidden_layer(context);
+        let verdict = classify(context, op, &self.facts);
+        if verdict == Verdict::Keep {
+            if is_show_operator(op) {
+                self.mark_painted(frame_index);
+            }
+            return;
+        }
+        let removal = Removal::Show {
+            advance: self.advance(context, op),
+            font_size: context.state.text.font_size,
+            horizontal_scaling: context.state.text.horizontal_scaling,
+        };
+        match verdict {
+            Verdict::Keep => {}
+            Verdict::Hidden(kind) => self.record(kind, index, removal),
+            Verdict::MaybeUnderImage => {
+                // 이미지가 나중에 덮는지는 페이지를 다 읽은 뒤에 판정한다. 그때까지는 남는
+                // 글자로 보고 블록이 비지 않았다고 둔다(덮인 것으로 판정돼도 껍데기는 남긴다).
+                self.mark_painted(frame_index);
+                if let Some(show) = context.show {
+                    self.pending.push(PendingShow { frame: frame_index, index, bbox: show.bbox, order: self.order, removal });
                 }
             }
         }
     }
 
-    fn xobject(&mut self, _context: &Context, name: &[u8], _id: Option<ObjectId>, _kind: &XObjectKind) {
+    fn xobject(&mut self, context: &Context, name: &[u8], id: Option<ObjectId>, kind: &XObjectKind) {
         self.pending_name = name.to_vec();
+        if *kind != XObjectKind::Image {
+            return;
+        }
+        let dict = id
+            .and_then(|id| self.doc.get_object(id).ok())
+            .and_then(|o| o.as_stream().ok())
+            .map(|s| s.dict.clone())
+            .unwrap_or_default();
+        let opaque = self.image_is_opaque(&dict, context.state);
+        self.images.push((self.order, Self::image_box(context.state), opaque));
     }
 
     fn enter_form(&mut self, id: ObjectId, _state: &GraphicsState) -> bool {
         let depth = self.stack.len();
         let name = std::mem::take(&mut self.pending_name);
-        self.stack.push(Frame { form: Some((id, depth, name)), visit: StreamVisit::default() });
+        if self.xobject_hidden(id) {
+            self.hidden_layer_forms += 1;
+        }
+        self.frames.push(Frame { form: Some((id, depth, name)), visit: StreamVisit::default(), oc_blocks: Vec::new() });
+        self.stack.push(self.frames.len() - 1);
         true
     }
 
-    fn exit_form(&mut self, _id: ObjectId) {
-        if let Some(Frame { form: Some((id, depth, name)), visit }) = self.stack.pop() {
-            self.finished_forms.push((id, depth, name, visit));
+    fn exit_form(&mut self, id: ObjectId) {
+        self.stack.pop();
+        if self.xobject_hidden(id) {
+            self.hidden_layer_forms -= 1;
         }
     }
 
@@ -235,20 +443,18 @@ impl Visitor for Collector<'_> {
             Problem::TooDeep(_) => "Form 중첩이 너무 깊음".to_string(),
         };
         // 해석하지 못한 Form은 그대로 둔다(그 안의 텍스트도 남는다).
-        if let (Source::Form(id), Some(frame)) = (source, self.stack.last_mut()) {
-            if frame.form.as_ref().is_some_and(|(fid, _, _)| *fid == id) {
-                frame.visit.problem = Some(message);
-                frame.visit.removals.clear();
-                frame.visit.counts = KindCounts::default();
-                return;
+        if let Source::Form(id) = source {
+            if let Some(&frame) = self.stack.last() {
+                if self.frames[frame].form.as_ref().is_some_and(|(fid, _, _)| *fid == id) {
+                    let visit = &mut self.frames[frame].visit;
+                    visit.problem = Some(message);
+                    visit.removals.clear();
+                    visit.counts = KindCounts::default();
+                    return;
+                }
             }
         }
-        if let Some(frame) = self.stack.last_mut() {
-            let note = format!("Form {:?}: {message}", match source {
-                Source::Form(id) | Source::Page(id) => id,
-            });
-            frame.visit.problem.get_or_insert(note);
-        }
+        self.frame().problem.get_or_insert(message);
     }
 }
 
@@ -263,6 +469,9 @@ fn edit_stream(bytes: &[u8], operations: &[Operation], removals: &BTreeMap<usize
         out.extend_from_slice(&bytes[cursor..op.span.start]);
         cursor = op.span.end;
 
+        let Removal::Show { advance, font_size, horizontal_scaling } = *removal else {
+            continue; // 그냥 지운다(빈 /OC 껍데기)
+        };
         let mut replacement = match op.operator.as_slice() {
             b"'" => "T*".to_string(),
             b"\"" => {
@@ -273,8 +482,8 @@ fn edit_stream(bytes: &[u8], operations: &[Operation], removals: &BTreeMap<usize
             _ => String::new(),
         };
         if needs_advance(operations, removals, index) {
-            let advance = removal.advance.ok_or("글자 폭을 계산할 수 없는 폰트(지운 텍스트 뒤에 같은 줄 텍스트가 이어짐)")?;
-            let n = tj_number_for_advance(advance, removal.font_size, removal.horizontal_scaling)
+            let advance = advance.ok_or("글자 폭을 계산할 수 없는 폰트(지운 텍스트 뒤에 같은 줄 텍스트가 이어짐)")?;
+            let n = tj_number_for_advance(advance, font_size, horizontal_scaling)
                 .ok_or("크기 0 폰트의 이동량을 보존할 수 없음")?;
             if !replacement.is_empty() {
                 replacement.push(' ');
@@ -329,13 +538,14 @@ fn paints_nothing(bytes: &[u8]) -> bool {
 // ------------------------------------------------------------------ 계획
 
 pub fn plan(doc: &Document) -> RemovalPlan {
-    plan_for(doc, None)
+    plan_for(doc, None, Mode::Standard)
 }
 
 /// `only`에 든 페이지(0부터)만 지우는 계획. 다른 페이지도 해석은 한다 — 공유 Form을 제자리에서
 /// 고쳐도 되는지 판단하려면 모든 사용처를 알아야 하기 때문이다(그 페이지들의 사용처는 "그대로"로 친다).
-pub fn plan_for(doc: &Document, only: Option<&BTreeSet<usize>>) -> RemovalPlan {
+pub fn plan_for(doc: &Document, only: Option<&BTreeSet<usize>>, mode: Mode) -> RemovalPlan {
     let counts = ReferenceCounts::count(doc);
+    let optional_content = OptionalContent::load(doc);
     let page_ids: Vec<ObjectId> = doc.get_pages().into_values().collect();
     let mut pages = Vec::with_capacity(page_ids.len());
     let mut visits: Vec<FormVisit> = Vec::new();
@@ -345,16 +555,28 @@ pub fn plan_for(doc: &Document, only: Option<&BTreeSet<usize>>) -> RemovalPlan {
             number: page_index + 1,
             page_id,
             counts: KindCounts::default(),
+            reported: KindCounts::default(),
             status: PageStatus::Unchanged,
             notes: Vec::new(),
+            empty_tags: 0,
             content: None,
         };
+        let crop = crate::geometry::PageFrame::from_page(doc, page_id)
+            .map(|f| [f.crop.llx, f.crop.lly, f.crop.urx, f.crop.ury])
+            .unwrap_or([f64::MIN / 4.0, f64::MIN / 4.0, f64::MAX / 4.0, f64::MAX / 4.0]);
         let mut collector = Collector {
             doc,
-            stack: vec![Frame { form: None, visit: StreamVisit::default() }],
+            mode,
+            facts: PageFacts { crop, in_hidden_layer: false },
+            optional_content: &optional_content,
+            hidden_layer_forms: 0,
+            frames: vec![Frame { form: None, visit: StreamVisit::default(), oc_blocks: Vec::new() }],
+            stack: vec![0],
             pending_name: Vec::new(),
-            finished_forms: Vec::new(),
             fonts: HashMap::new(),
+            order: 0,
+            images: Vec::new(),
+            pending: Vec::new(),
         };
         if let Err(problem) = interpret_page(doc, page_id, &mut collector) {
             page.status = PageStatus::Skipped(match problem {
@@ -365,9 +587,26 @@ pub fn plan_for(doc: &Document, only: Option<&BTreeSet<usize>>) -> RemovalPlan {
             pages.push(page);
             continue;
         }
-        let page_visit = collector.stack.pop().map(|f| f.visit).unwrap_or_default();
+        // 이미지에 덮이는 텍스트(H)는 페이지를 다 읽은 뒤에 판정한다.
+        let pending = std::mem::take(&mut collector.pending);
+        for show in pending {
+            if covered_by_image(&show.bbox, show.order, &collector.images) {
+                let visit = &mut collector.frames[show.frame].visit;
+                if mode.removes(HiddenKind::UnderImage) {
+                    visit.counts.count(HiddenKind::UnderImage);
+                    visit.removals.insert(show.index, show.removal);
+                } else {
+                    visit.reported.count(HiddenKind::UnderImage);
+                }
+            }
+        }
+        let mut frames = collector.frames;
+        let page_frame = frames.remove(0);
+        let page_visit = page_frame.visit;
         let mut skip: Option<String> = None;
         page.counts.add(&page_visit.counts);
+        page.reported.add(&page_visit.reported);
+        page.empty_tags += page_visit.empty_tags;
         if let Some(problem) = &page_visit.problem {
             page.notes.push(problem.clone());
         }
@@ -383,8 +622,12 @@ pub fn plan_for(doc: &Document, only: Option<&BTreeSet<usize>>) -> RemovalPlan {
             }
         }
         let mut page_visits = Vec::new();
-        for (form, depth, name, visit) in collector.finished_forms {
+        for frame in frames {
+            let (form, depth, name) = frame.form.expect("Form 프레임");
+            let visit = frame.visit;
             page.counts.add(&visit.counts);
+            page.reported.add(&visit.reported);
+            page.empty_tags += visit.empty_tags;
             if let Some(problem) = &visit.problem {
                 page.notes.push(format!("Form {form:?}: {problem} — 이 Form 안의 텍스트는 그대로 둠"));
             }
@@ -408,6 +651,7 @@ pub fn plan_for(doc: &Document, only: Option<&BTreeSet<usize>>) -> RemovalPlan {
             page.status = PageStatus::Unchanged;
             page.content = None;
             page.counts = KindCounts::default();
+            page.reported = KindCounts::default();
             visits.extend(page_visits.into_iter().map(|v| FormVisit { result: None, ..v }));
             pages.push(page);
             continue;
@@ -498,6 +742,86 @@ fn decide_forms(
                 v.result = None;
             }
         }
+    }
+}
+
+// ------------------------------------------------------------------ 레이어 정리
+
+/// 콘텐츠·주석에서 아직 쓰이는 레이어(OCG·OCMD와 그 구성원)를 모은다.
+#[derive(Default)]
+struct OcgCollector {
+    used: std::collections::HashSet<ObjectId>,
+}
+
+impl Visitor for OcgCollector {
+    fn operation(&mut self, context: &Context, _index: usize, _op: &Operation) {
+        self.used.extend(context.marked.iter().filter_map(|m| m.optional_content));
+    }
+
+    fn xobject(&mut self, _context: &Context, _name: &[u8], id: Option<ObjectId>, _kind: &XObjectKind) {
+        self.used.extend(id);
+    }
+}
+
+/// 더 이상 쓰이지 않는 레이어를 `/OCProperties`에서 뺀다(설계 문서 4.4) — 남겨 두면 뷰어 레이어
+/// 패널에 빈 레이어가 보인다. 지운 개수를 돌려준다.
+pub fn prune_optional_content(doc: &mut Document) -> usize {
+    let optional_content = OptionalContent::load(doc);
+    if optional_content.is_empty() {
+        return 0;
+    }
+    let mut collector = OcgCollector::default();
+    let page_ids: Vec<ObjectId> = doc.get_pages().into_values().collect();
+    for page_id in &page_ids {
+        let _ = interpret_page(doc, *page_id, &mut collector);
+        // 주석의 /OC와 XObject 딕셔너리의 /OC.
+        if let Ok(page) = doc.get_dictionary(*page_id) {
+            if let Some(annots) = page.get(b"Annots").ok().and_then(|o| crate::geometry::resolve(doc, o).as_array().ok()) {
+                for annot in annots {
+                    if let Some(oc) = crate::geometry::resolve(doc, annot)
+                        .as_dict()
+                        .ok()
+                        .and_then(|a| a.get(b"OC").ok())
+                        .and_then(|o| o.as_reference().ok())
+                    {
+                        collector.used.insert(oc);
+                    }
+                }
+            }
+        }
+    }
+    // XObject가 /OC로 가리키는 레이어, 그리고 OCMD가 품은 OCG까지 포함한다.
+    let mut referenced = std::collections::HashSet::new();
+    for id in collector.used {
+        referenced.insert(id);
+        if let Ok(dict) = doc.get_dictionary(id) {
+            if let Ok(oc) = dict.get(b"OC").and_then(Object::as_reference) {
+                referenced.insert(oc);
+            }
+            for member in ocmd_members(doc, dict) {
+                referenced.insert(member);
+            }
+        }
+        if let Some(members) = doc
+            .get_object(id)
+            .ok()
+            .and_then(|o| o.as_stream().ok())
+            .and_then(|s| s.dict.get(b"OC").ok())
+            .and_then(|o| o.as_reference().ok())
+        {
+            referenced.insert(members);
+            if let Ok(dict) = doc.get_dictionary(members) {
+                referenced.extend(ocmd_members(doc, dict));
+            }
+        }
+    }
+    crate::optional_content::prune_unreferenced(doc, &referenced)
+}
+
+fn ocmd_members(doc: &Document, dict: &Dictionary) -> Vec<ObjectId> {
+    match dict.get(b"OCGs").ok().map(|o| crate::geometry::resolve(doc, o)) {
+        Some(Object::Array(items)) => items.iter().filter_map(|o| o.as_reference().ok()).collect(),
+        _ => dict.get(b"OCGs").ok().and_then(|o| o.as_reference().ok()).into_iter().collect(),
     }
 }
 
@@ -658,7 +982,7 @@ mod tests {
     #[test]
     fn removes_only_show_operators_and_keeps_state() {
         let (doc, page, plan) = run(b"BT /F1 10 Tf 3 Tr 1 0 0 1 5 5 Tm (AB) Tj ET BT 0 Tr (A) Tj ET");
-        assert_eq!(plan.totals().invisible_mode, 1);
+        assert_eq!(plan.totals().get(HiddenKind::InvisibleMode), 1);
         let text = page_text(&doc, page);
         assert!(text.contains("3 Tr 1 0 0 1 5 5 Tm  ET"), "{text}");
         assert!(text.contains("(A) Tj"));
@@ -681,10 +1005,118 @@ mod tests {
     }
 
     #[test]
-    fn transparent_and_zero_size_and_clip_mode() {
+    fn transparent_and_zero_size_removed_clip_mode_only_reported() {
         let (_, _, plan) = run(b"BT /F1 0 Tf (A) Tj ET /Clear gs BT /F1 10 Tf (A) Tj ET BT 7 Tr (B) Tj ET");
-        let t = plan.totals();
-        assert_eq!((t.zero_size, t.transparent, t.clip_only_kept), (1, 1, 1));
+        let (t, r) = (plan.totals(), plan.reported_totals());
+        assert_eq!(t.get(HiddenKind::ZeroSize), 1);
+        assert_eq!(t.get(HiddenKind::Transparent), 1);
+        assert_eq!(t.get(HiddenKind::ClipMode), 0, "표준 모드에서는 지우지 않는다");
+        assert_eq!(r.get(HiddenKind::ClipMode), 1);
+    }
+
+    /// 적극 모드에서만 지우는 형태들 — 표준 모드에서는 보고만 한다.
+    #[test]
+    fn aggressive_only_kinds() {
+        let image = || Stream::new(dictionary! { "Type" => "XObject", "Subtype" => "Image" }, vec![]);
+        // 흰 글씨 / 페이지 밖 / 클리핑 밖 / 이미지 아래 — 각각 한 번씩.
+        let content: &[u8] = b"BT /F1 10 Tf 1 1 1 rg 1 0 0 1 20 20 Tm (A) Tj ET             0 0 0 rg BT 1 0 0 1 900 900 Tm (A) Tj ET             q 0 0 10 10 re W n BT 1 0 0 1 300 300 Tm (A) Tj ET Q             BT 1 0 0 1 100 100 Tm (A) Tj ET q 612 0 0 792 0 0 cm /Im0 Do Q";
+        let (mut doc, page) = one_page_doc(content, vec![("Im0", image())]);
+        add_font(&mut doc, page);
+        let standard = plan(&doc);
+        assert_eq!(standard.totals().removed(), 0);
+        let reported = standard.reported_totals();
+        for kind in [HiddenKind::WhiteText, HiddenKind::OutsidePage, HiddenKind::Clipped, HiddenKind::UnderImage] {
+            assert_eq!(reported.get(kind), 1, "{kind:?}");
+        }
+        let aggressive = plan_for(&doc, None, Mode::Aggressive);
+        assert_eq!(aggressive.totals().removed(), 4);
+        apply(&mut doc, &aggressive, &mut Applied::default()).unwrap();
+        assert!(!page_text(&doc, page).contains("Tj"), "{}", page_text(&doc, page));
+    }
+
+    /// 기본으로 꺼진 레이어(OCG) 안의 텍스트 — 마크드 콘텐츠와 Form의 `/OC` 양쪽.
+    #[test]
+    fn hidden_layer_text() {
+        let (mut doc, page) = one_page_doc(b"/OC /L1 BDC BT /F1 10 Tf (A) Tj ET EMC /X0 Do", vec![("X0", form(b"BT /F1 10 Tf (B) Tj ET"))]);
+        add_font(&mut doc, page);
+        let ocg = doc.add_object(dictionary! { "Type" => "OCG", "Name" => Object::string_literal("OCR") });
+        let properties = dictionary! { "OCGs" => vec![ocg.into()], "D" => dictionary! { "OFF" => vec![ocg.into()] } };
+        let root = doc.trailer.get(b"Root").unwrap().as_reference().unwrap();
+        doc.get_dictionary_mut(root).unwrap().set("OCProperties", properties);
+        // 페이지 리소스의 /Properties에 레이어를 걸고, Form에는 /OC를 붙인다.
+        let form_id = {
+            let resources = doc.get_dictionary_mut(page).unwrap().get_mut(b"Resources").unwrap().as_dict_mut().unwrap();
+            resources.set("Properties", dictionary! { "L1" => ocg });
+            resources.get(b"XObject").unwrap().as_dict().unwrap().get(b"X0").unwrap().as_reference().unwrap()
+        };
+        doc.get_object_mut(form_id).unwrap().as_stream_mut().unwrap().dict.set("OC", ocg);
+
+        assert_eq!(plan(&doc).reported_totals().get(HiddenKind::HiddenLayer), 2);
+        let aggressive = plan_for(&doc, None, Mode::Aggressive);
+        assert_eq!(aggressive.totals().get(HiddenKind::HiddenLayer), 2);
+    }
+
+    /// 꺼진 레이어의 글자를 지우면 빈 `BDC`·`EMC` 껍데기와 레이어 목록도 정리된다.
+    #[test]
+    fn empty_hidden_layer_is_cleaned_up() {
+        let (mut doc, page) = one_page_doc(b"/OC /L1 BDC BT /F1 10 Tf (A) Tj ET EMC BT /F1 10 Tf 1 0 0 1 0 50 Tm (B) Tj ET", vec![]);
+        add_font(&mut doc, page);
+        let ocg = doc.add_object(dictionary! { "Type" => "OCG", "Name" => Object::string_literal("OCR") });
+        let root = doc.trailer.get(b"Root").unwrap().as_reference().unwrap();
+        doc.get_dictionary_mut(root).unwrap().set(
+            "OCProperties",
+            dictionary! { "OCGs" => vec![ocg.into()], "D" => dictionary! { "OFF" => vec![ocg.into()], "Order" => vec![ocg.into()] } },
+        );
+        doc.get_dictionary_mut(page)
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Properties", dictionary! { "L1" => ocg });
+
+        let plan = plan_for(&doc, None, Mode::Aggressive);
+        apply(&mut doc, &plan, &mut Applied::default()).unwrap();
+        let text = page_text(&doc, page);
+        assert!(!text.contains("BDC") && !text.contains("EMC"), "빈 레이어 껍데기가 남음: {text}");
+        assert!(text.contains("(B) Tj"), "레이어 밖 글자는 남는다: {text}");
+        assert_eq!(prune_optional_content(&mut doc), 1);
+        let properties = doc.get_dictionary(root).unwrap().get(b"OCProperties").unwrap().as_dict().unwrap();
+        assert!(properties.get(b"OCGs").unwrap().as_array().unwrap().is_empty());
+    }
+
+    /// 되돌리기는 저장 때 정리된 원본 스트림을 다시 가리킨다 — 정리한 객체를 보관했다가
+    /// 되살려야 한다(실제로 이 순서를 빼먹어 되돌린 페이지가 빈 페이지가 됐다, 2026-09-23).
+    #[test]
+    fn rollback_after_pruning_restores_original_content() {
+        let (mut doc, page) = one_page_doc(b"BT /F1 10 Tf 3 Tr (A) Tj ET", vec![]);
+        add_font(&mut doc, page);
+        let original = page_text(&doc, page);
+        let plan = plan(&doc);
+        let mut applied = Applied::default();
+        apply(&mut doc, &plan, &mut applied).unwrap();
+        let dropped = crate::save::take_unreferenced(&mut doc);
+        assert!(!dropped.is_empty(), "지운 뒤엔 원본 콘텐츠 스트림이 쓰이지 않는다");
+        crate::save::restore(&mut doc, dropped);
+        applied.rollback(&mut doc, &BTreeSet::from([0]));
+        assert_eq!(page_text(&doc, page), original);
+    }
+
+    /// 태그된 마크드 콘텐츠의 글자를 지우면 "빈 태그"로 센다(껍데기는 남겨 구조 트리는 그대로).
+    #[test]
+    fn empty_tags_are_counted_not_removed() {
+        let (mut doc, page) = one_page_doc(
+            // 둘째 블록에서 0 Tr로 되돌린다 — 텍스트 상태는 ET 뒤에도 유지되기 때문.
+            b"/P <</MCID 0>> BDC BT /F1 10 Tf 3 Tr (A) Tj ET EMC /P <</MCID 1>> BDC BT 0 Tr (B) Tj ET EMC",
+            vec![],
+        );
+        add_font(&mut doc, page);
+        let plan = plan(&doc);
+        assert_eq!(plan.empty_tags(), 1, "지운 쪽 태그만 빈 것으로 센다");
+        apply(&mut doc, &plan, &mut Applied::default()).unwrap();
+        let text = page_text(&doc, page);
+        assert_eq!(text.matches("BDC").count(), 2, "태그 껍데기는 남긴다: {text}");
+        assert!(text.contains("(B) Tj"));
     }
 
     #[test]

@@ -374,7 +374,8 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
     let overwrite: BTreeSet<usize> = overwrite.intersection(&target_pages).copied().collect();
     if !overwrite.is_empty() {
         pdf_ocr::insert::strip_own_layers(&mut doc, Some(&overwrite), &mut applied)?;
-        let plan = pdf_ocr::remove::plan_for(&doc, Some(&overwrite));
+        // 가져오기의 덮어쓰기는 표준 모드로만 지운다 — 보이는 글자를 건드리지 않게.
+        let plan = pdf_ocr::remove::plan_for(&doc, Some(&overwrite), pdf_ocr::remove::Mode::Standard);
         for page in plan.pages.iter().filter(|p| overwrite.contains(&(p.number - 1))) {
             if let PageStatus::Skipped(reason) = &page.status {
                 report.skipped.push((page.number, format!("기존 OCR을 지울 수 없어 건너뜀: {reason}")));
@@ -396,12 +397,14 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
     let now = chrono::Local::now().fixed_offset();
     pdf_ocr::insert::insert_layers(&mut doc, &targets, &pdf_ocr::save::format_pdf_date(now), &mut applied)?;
     emit(Event::Stage("저장 중".to_string()));
+    // 되돌릴 때 원본 콘텐츠 스트림이 필요하므로, 저장하며 버려질 객체를 미리 빼 둔다.
+    let dropped = pdf_ocr::save::take_unreferenced(&mut doc);
     pdf_ocr::save::save_rewritten(&mut doc, &job.temp_output, now, compact)?;
 
     // 4. 검증과 되돌리기.
     emit(Event::Stage("검증 중(원본과 화면·텍스트 비교)".to_string()));
     let changed: Vec<usize> = applied.changed_pages().into_iter().collect();
-    let mut failures = verify_pages(engine, &job.pdf, &job.temp_output, &changed, &HashMap::new(), emit)?;
+    let mut failures = verify_pages(engine, &job.pdf, &job.temp_output, &changed, &HashMap::new(), true, emit)?;
     let already: BTreeSet<usize> = failures.iter().map(|(i, _)| *i).collect();
     for mark in check_layers(engine, &job.temp_output, &targets, &already) {
         if mark.rolled_back {
@@ -412,6 +415,7 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
     let mut reverted = BTreeSet::new();
     if !failures.is_empty() {
         let failed: BTreeSet<usize> = failures.iter().map(|(i, _)| *i).collect();
+        pdf_ocr::save::restore(&mut doc, dropped);
         let also = applied.rollback(&mut doc, &failed);
         report.rolled_back = failures.iter().map(|(i, reason)| (i + 1, reason.clone())).collect();
         report.also_reverted = also.iter().map(|i| i + 1).collect();
@@ -420,7 +424,7 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
         emit(Event::Stage("되돌린 페이지 반영해 다시 저장 중".to_string()));
         pdf_ocr::save::save_rewritten(&mut doc, &job.temp_output, now, compact)?;
         let again: Vec<usize> = reverted.iter().copied().collect();
-        let still = verify_pages(engine, &job.pdf, &job.temp_output, &again, &HashMap::new(), emit)?;
+        let still = verify_pages(engine, &job.pdf, &job.temp_output, &again, &HashMap::new(), true, emit)?;
         if let Some((page, reason)) = still.first() {
             bail!("되돌린 {}쪽이 원본과 같지 않습니다({reason}). 원본을 건드리지 않았습니다.", page + 1);
         }

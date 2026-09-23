@@ -36,36 +36,32 @@ pub enum Job {
     /// OCR 전체 삭제 전 분석(사전 점검 + 삭제 계획). 파일을 쓰지 않는다.
     AnalyzeRemoval { pdf: PathBuf },
     /// OCR 전체 삭제 — 결과를 `temp_output`에 쓰고 검증까지 한다. 원본 교체는 UI가 한다.
-    Remove { pdf: PathBuf, temp_output: PathBuf },
+    Remove { pdf: PathBuf, temp_output: PathBuf, aggressive: bool },
+    /// 폴더 안 모든 PDF에서 OCR 삭제 — 파일마다 백업하고 바꾼다(설계 문서 7장 폴더 일괄 처리).
+    RemoveFolder { folder: PathBuf, aggressive: bool, skip: Vec<PathBuf> },
     /// hOCR 가져오기 전 분석(hOCR 파싱 + 페이지 분류). 파일을 쓰지 않는다.
     AnalyzeImport { pdf: PathBuf, hocr_files: Vec<PathBuf> },
     /// hOCR 가져오기 — 결과를 `temp_output`에 쓰고 검증까지 한다.
     Import(crate::ocr_import::ImportJob),
 }
 
-/// 삭제 대상 개수(형태별 표시 연산자 수).
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct RemovalCounts {
-    pub invisible_mode: usize,
-    pub zero_size: usize,
-    pub transparent: usize,
-    pub clip_only_kept: usize,
-}
+/// 형태별 개수 — (형태 이름, 개수).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemovalCounts(pub Vec<(String, usize)>);
 
 impl RemovalCounts {
     pub fn removed(&self) -> usize {
-        self.invisible_mode + self.zero_size + self.transparent
+        self.0.iter().map(|(_, n)| n).sum()
+    }
+
+    pub fn describe(&self) -> String {
+        self.0.iter().map(|(kind, n)| format!("{kind} {n}")).collect::<Vec<_>>().join(" · ")
     }
 }
 
 impl From<pdf_ocr::remove::KindCounts> for RemovalCounts {
     fn from(c: pdf_ocr::remove::KindCounts) -> Self {
-        Self {
-            invisible_mode: c.invisible_mode,
-            zero_size: c.zero_size,
-            transparent: c.transparent,
-            clip_only_kept: c.clip_only_kept,
-        }
+        Self(c.iter().map(|(kind, n)| (kind.label().to_string(), n)).collect())
     }
 }
 
@@ -77,11 +73,15 @@ pub struct RemovalAnalysis {
     /// 앱이 넣은 OCR 레이어가 있는 페이지 수(구조째 떼어 낸다).
     pub own_layer_pages: usize,
     pub counts: RemovalCounts,
+    /// 이 모드에서는 지우지 않고 보고만 하는 형태(적극 모드로 바꾸면 지울 수 있는 것).
+    pub reported: RemovalCounts,
     /// (페이지 번호, 이유) — 건드리지 않을 페이지.
     pub skipped: Vec<(usize, String)>,
     pub notes: Vec<(usize, String)>,
     pub signed: bool,
     pub tagged: bool,
+    /// 지우고 나면 내용이 비게 되는 태그 수(태그 PDF일 때).
+    pub empty_tags: usize,
     pub pdfa: Option<String>,
     pub incremental_updates: usize,
     pub linearized: bool,
@@ -98,6 +98,10 @@ pub struct RemovalReport {
     pub also_reverted: Vec<usize>,
     pub size_before: u64,
     pub size_after: u64,
+    /// 적극 모드로 돌렸는지.
+    pub aggressive: bool,
+    /// 쓰이지 않게 되어 목록에서 뺀 레이어 수.
+    pub pruned_layers: usize,
     /// 결과 파일을 만들지 않음(지울 것이 없음).
     pub nothing_to_do: bool,
 }
@@ -132,6 +136,22 @@ pub struct ExportReport {
     pub failed_pages: Vec<(usize, String)>,
 }
 
+/// 폴더 일괄 삭제 결과.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BatchReport {
+    pub total: usize,
+    /// 바꾼 파일과 (바뀐 페이지 수, 지운 건수).
+    pub changed: Vec<(String, usize, usize)>,
+    /// 지울 것이 없던 파일.
+    pub unchanged: Vec<String>,
+    /// (파일, 이유) — 건드리지 않음.
+    pub skipped: Vec<(String, String)>,
+    /// (파일, 이유) — 실패(원본 그대로).
+    pub failed: Vec<(String, String)>,
+    /// 남긴 로그(CSV) 경로.
+    pub log: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
     /// 진행 중인 단계 이름(예: "검증 중").
@@ -140,6 +160,7 @@ pub enum Event {
     ExportDone(ExportReport),
     RemovalAnalysis(RemovalAnalysis),
     RemovalDone(RemovalReport),
+    BatchDone(BatchReport),
     ImportAnalysis(crate::ocr_import::ImportAnalysis),
     ImportDone(crate::ocr_import::ImportReport),
     Failed(String),
@@ -247,8 +268,15 @@ pub fn run_worker_process() -> i32 {
     };
     let result = match &job {
         Job::Export(export) => run_export(engine, export, &mut emit).map(Event::ExportDone),
-        Job::AnalyzeRemoval { pdf } => analyze_removal(engine, pdf).map(|prepared| Event::RemovalAnalysis(prepared.analysis)),
-        Job::Remove { pdf, temp_output } => run_removal(engine, pdf, temp_output, &mut emit).map(Event::RemovalDone),
+        Job::AnalyzeRemoval { pdf } => {
+            analyze_removal(engine, pdf, pdf_ocr::remove::Mode::Standard).map(|prepared| Event::RemovalAnalysis(prepared.analysis))
+        }
+        Job::Remove { pdf, temp_output, aggressive } => {
+            run_removal(engine, pdf, temp_output, *aggressive, &mut emit).map(Event::RemovalDone)
+        }
+        Job::RemoveFolder { folder, aggressive, skip } => {
+            run_folder_removal(engine, folder, *aggressive, skip, &mut emit).map(Event::BatchDone)
+        }
         Job::AnalyzeImport { pdf, hocr_files } => {
             crate::ocr_import::analyze(engine, pdf, hocr_files, &mut emit).map(Event::ImportAnalysis)
         }
@@ -264,7 +292,8 @@ pub fn run_worker_process() -> i32 {
                 Job::Export(export) => drop(std::fs::remove_file(&export.temp_output)),
                 Job::Remove { temp_output, .. } => drop(std::fs::remove_file(temp_output)),
                 Job::Import(job) => drop(std::fs::remove_file(&job.temp_output)),
-                Job::AnalyzeRemoval { .. } | Job::AnalyzeImport { .. } => {}
+                // 폴더 일괄은 파일마다 임시 파일을 스스로 정리한다.
+                Job::AnalyzeRemoval { .. } | Job::AnalyzeImport { .. } | Job::RemoveFolder { .. } => {}
             }
             emit(Event::Failed(format!("{err:#}")));
             1
@@ -401,17 +430,19 @@ pub(crate) fn open_for_edit(engine: PdfEngine, pdf: &Path) -> anyhow::Result<(Do
 }
 
 /// 사전 점검 + 앱 레이어 떼어 내기(메모리에서) + 삭제 계획.
-fn analyze_removal(engine: PdfEngine, pdf: &Path) -> anyhow::Result<PreparedRemoval> {
+fn analyze_removal(engine: PdfEngine, pdf: &Path, mode: pdf_ocr::remove::Mode) -> anyhow::Result<PreparedRemoval> {
     let (mut doc, preflight, compact) = open_for_edit(engine, pdf)?;
     let mut applied = pdf_ocr::remove::Applied::default();
     let stripped = pdf_ocr::insert::strip_own_layers(&mut doc, None, &mut applied)?;
-    let plan = pdf_ocr::remove::plan(&doc);
+    let plan = pdf_ocr::remove::plan_for(&doc, None, mode);
     let mut analysis = RemovalAnalysis {
         pages: plan.pages.len(),
         own_layer_pages: stripped.len(),
         counts: plan.totals().into(),
+        reported: plan.reported_totals().into(),
         signed: preflight.signed,
         tagged: preflight.tagged,
+        empty_tags: plan.empty_tags(),
         pdfa: preflight.pdfa.clone(),
         incremental_updates: preflight.incremental_updates,
         linearized: preflight.linearized,
@@ -429,13 +460,20 @@ fn analyze_removal(engine: PdfEngine, pdf: &Path) -> anyhow::Result<PreparedRemo
     Ok(PreparedRemoval { analysis, doc, plan, applied, compact })
 }
 
-fn run_removal(engine: PdfEngine, pdf: &Path, temp_output: &Path, emit: &mut dyn FnMut(Event)) -> anyhow::Result<RemovalReport> {
+fn run_removal(
+    engine: PdfEngine,
+    pdf: &Path,
+    temp_output: &Path,
+    aggressive: bool,
+    emit: &mut dyn FnMut(Event),
+) -> anyhow::Result<RemovalReport> {
     use anyhow::{bail, Context};
     use std::collections::BTreeSet;
     emit(Event::Stage("분석 중".to_string()));
-    let PreparedRemoval { analysis, mut doc, plan, mut applied, compact } = analyze_removal(engine, pdf)?;
+    let mode = if aggressive { pdf_ocr::remove::Mode::Aggressive } else { pdf_ocr::remove::Mode::Standard };
+    let PreparedRemoval { analysis, mut doc, plan, mut applied, compact } = analyze_removal(engine, pdf, mode)?;
     let size_before = std::fs::metadata(pdf).map(|m| m.len()).unwrap_or(0);
-    let mut report = RemovalReport { analysis, size_before, ..Default::default() };
+    let mut report = RemovalReport { analysis, size_before, aggressive, ..Default::default() };
     if !plan.has_changes() && report.analysis.own_layer_pages == 0 {
         report.nothing_to_do = true;
         return Ok(report);
@@ -443,17 +481,28 @@ fn run_removal(engine: PdfEngine, pdf: &Path, temp_output: &Path, emit: &mut dyn
 
     emit(Event::Stage("삭제·저장 중".to_string()));
     pdf_ocr::remove::apply(&mut doc, &plan, &mut applied)?;
+    report.pruned_layers = pdf_ocr::remove::prune_optional_content(&mut doc);
     let now = chrono::Local::now().fixed_offset();
+    // 되돌릴 때 원본 콘텐츠 스트림이 필요하므로, 저장하며 버려질 객체를 미리 빼 둔다.
+    let dropped = pdf_ocr::save::take_unreferenced(&mut doc);
     pdf_ocr::save::save_rewritten(&mut doc, temp_output, now, compact)?;
 
     let planned: Vec<usize> = applied.changed_pages().into_iter().collect();
     emit(Event::Stage("검증 중(원본과 화면·텍스트 비교)".to_string()));
     let no_layer = std::collections::HashMap::new();
-    let failures = verify_pages(engine, pdf, temp_output, &planned, &no_layer, emit)?;
+    // 적극 모드는 화면만 비교한다 — 흰 글씨처럼 "화면엔 없지만 추출되는" 글자를 지우기 때문.
+    let failures = verify_pages(engine, pdf, temp_output, &planned, &no_layer, !aggressive, emit)?;
 
     let mut reverted: BTreeSet<usize> = BTreeSet::new();
     if !failures.is_empty() {
+        // 진단용(stderr) — 어떤 페이지가 왜 되돌려지는지.
+        eprintln!(
+            "ocr-worker: 검증 실패 {}쪽 — {:?}",
+            failures.len(),
+            failures.iter().take(10).map(|(i, why)| (i + 1, why.as_str())).collect::<Vec<_>>()
+        );
         let failed: BTreeSet<usize> = failures.iter().map(|(i, _)| *i).collect();
+        pdf_ocr::save::restore(&mut doc, dropped);
         let also = applied.rollback(&mut doc, &failed);
         report.rolled_back = failures.iter().map(|(i, reason)| (i + 1, reason.clone())).collect();
         report.also_reverted = also.iter().map(|i| i + 1).collect();
@@ -462,7 +511,13 @@ fn run_removal(engine: PdfEngine, pdf: &Path, temp_output: &Path, emit: &mut dyn
         emit(Event::Stage("되돌린 페이지 반영해 다시 저장 중".to_string()));
         pdf_ocr::save::save_rewritten(&mut doc, temp_output, now, compact)?;
         let again: Vec<usize> = reverted.iter().copied().collect();
-        let still = verify_pages(engine, pdf, temp_output, &again, &no_layer, emit)?;
+        let still = verify_pages(engine, pdf, temp_output, &again, &no_layer, !aggressive, emit)?;
+        if !still.is_empty() {
+            eprintln!(
+                "ocr-worker: 되돌린 뒤에도 다른 페이지 {:?}",
+                still.iter().take(10).map(|(i, why)| (i + 1, why.as_str())).collect::<Vec<_>>()
+            );
+        }
         if let Some((page, reason)) = still.first() {
             bail!("되돌린 {}쪽이 원본과 같지 않습니다({reason}). 원본을 건드리지 않았습니다.", page + 1);
         }
@@ -475,8 +530,112 @@ fn run_removal(engine: PdfEngine, pdf: &Path, temp_output: &Path, emit: &mut dyn
         bail!("결과 파일의 페이지 수가 원본과 다릅니다. 원본을 건드리지 않았습니다.");
     }
     report.pages_changed = planned.iter().filter(|i| !reverted.contains(i)).count();
+    if report.pages_changed == 0 {
+        // 전부 되돌아갔다 — 결과가 원본과 같으므로 파일을 바꾸지 않는다.
+        report.nothing_to_do = true;
+        let _ = std::fs::remove_file(temp_output);
+        return Ok(report);
+    }
     report.size_after = std::fs::metadata(temp_output).map(|m| m.len()).unwrap_or(0);
     Ok(report)
+}
+
+/// 폴더(하위 폴더 포함) 안 모든 PDF에서 OCR을 지운다. 파일마다 `.backup`으로 보존하고 바꾸며,
+/// 백업이 이미 있으면(이전 실행 흔적) 건드리지 않는다 — 폴더 북마크 일괄 적용과 같은 규칙
+/// (`batch_import` 모듈). 앱에 열려 있는 파일도 건너뛴다. 결과는 폴더 루트에 CSV 로그로 남긴다.
+fn run_folder_removal(
+    engine: PdfEngine,
+    folder: &Path,
+    aggressive: bool,
+    skip: &[PathBuf],
+    emit: &mut dyn FnMut(Event),
+) -> anyhow::Result<BatchReport> {
+    let mut files = Vec::new();
+    collect_pdfs(folder, &mut files);
+    files.sort();
+    let mut report = BatchReport { total: files.len(), ..Default::default() };
+    for (index, file) in files.iter().enumerate() {
+        let name = file.strip_prefix(folder).unwrap_or(file).to_string_lossy().to_string();
+        emit(Event::Stage(format!("{name} ({}/{})", index + 1, files.len())));
+        emit(Event::Progress { done: index, total: files.len() });
+        if skip.iter().any(|s| s == file) {
+            report.skipped.push((name, "앱에 열려 있는 파일".to_string()));
+            continue;
+        }
+        let backup = batch_backup_path(file);
+        if backup.exists() {
+            report.skipped.push((name, ".backup이 이미 있음(이전 실행 흔적)".to_string()));
+            continue;
+        }
+        let temp = file.with_extension("ocr_tmp.pdf");
+        match run_removal(engine, file, &temp, aggressive, &mut |_| {}) {
+            Err(err) => {
+                let _ = std::fs::remove_file(&temp);
+                report.failed.push((name, format!("{err:#}")));
+            }
+            Ok(result) if result.nothing_to_do => report.unchanged.push(name),
+            Ok(result) => {
+                if let Err(err) = std::fs::copy(file, &backup) {
+                    let _ = std::fs::remove_file(&temp);
+                    report.failed.push((name, format!("백업 실패({err}) — 원본 그대로")));
+                    continue;
+                }
+                if let Err(err) = std::fs::rename(&temp, file) {
+                    let _ = std::fs::remove_file(&temp);
+                    report.failed.push((name, format!("교체 실패({err}) — 원본 그대로")));
+                    continue;
+                }
+                report.changed.push((name, result.pages_changed, result.analysis.counts.removed()));
+            }
+        }
+    }
+    emit(Event::Progress { done: files.len(), total: files.len() });
+    report.log = write_batch_log(folder, &report).map(|p| p.to_string_lossy().to_string());
+    Ok(report)
+}
+
+fn collect_pdfs(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || name.starts_with("~$") {
+            continue;
+        }
+        match entry.file_type() {
+            Ok(t) if t.is_dir() => collect_pdfs(&path, out),
+            Ok(t) if t.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) => out.push(path),
+            _ => {}
+        }
+    }
+}
+
+fn batch_backup_path(pdf: &Path) -> PathBuf {
+    let mut name = pdf.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(".backup");
+    pdf.with_file_name(name)
+}
+
+/// 파일별 결과를 CSV로 남긴다(UTF-8 BOM — Excel이 한글을 제대로 읽게).
+fn write_batch_log(folder: &Path, report: &BatchReport) -> Option<PathBuf> {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let path = folder.join(format!("ocr-remove-{stamp}.csv"));
+    let mut text = String::from("\u{feff}파일,결과,바뀐 페이지,지운 건수,비고\n");
+    let escape = |value: &str| format!("\"{}\"", value.replace('"', "\"\""));
+    for (name, pages, removed) in &report.changed {
+        text.push_str(&format!("{},성공,{pages},{removed},\n", escape(name)));
+    }
+    for name in &report.unchanged {
+        text.push_str(&format!("{},변경 없음,0,0,\n", escape(name)));
+    }
+    for (name, reason) in &report.skipped {
+        text.push_str(&format!("{},건너뜀,0,0,{}\n", escape(name), escape(reason)));
+    }
+    for (name, reason) in &report.failed {
+        text.push_str(&format!("{},실패,0,0,{}\n", escape(name), escape(reason)));
+    }
+    std::fs::write(&path, text).ok().map(|_| path)
 }
 
 /// 페이지들(0부터)을 원본과 비교해 실패한 (페이지, 이유) 목록. `expected_layer`에 든 페이지는
@@ -487,10 +646,11 @@ pub(crate) fn verify_pages(
     result: &Path,
     pages: &[usize],
     expected_layer: &std::collections::HashMap<usize, Vec<char>>,
+    check_visible_text: bool,
     emit: &mut dyn FnMut(Event),
 ) -> anyhow::Result<Vec<(usize, String)>> {
     use anyhow::Context;
-    use pdf_engine::verify::{compare, snapshot};
+    use pdf_engine::verify::{compare_with, snapshot};
     let before = engine.open_document(original).map_err(open_error_message)?;
     let after = engine.open_document(result).context("결과 파일을 pdfium으로 열지 못함")?;
     let mut failures = Vec::new();
@@ -499,7 +659,7 @@ pub(crate) fn verify_pages(
             let a = snapshot(&before.pages().get(index as i32)?)?;
             let after_page = after.pages().get(index as i32)?;
             let b = snapshot(&after_page)?;
-            if let Err(reason) = compare(&a, &b) {
+            if let Err(reason) = compare_with(&a, &b, check_visible_text) {
                 return Ok(Err(reason));
             }
             if let Some(expected) = expected_layer.get(&index) {

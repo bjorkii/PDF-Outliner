@@ -24,6 +24,9 @@ pub enum FontMetrics {
     },
     /// Type0 + Identity-H: 2바이트 코드 = CID.
     Cid { widths: HashMap<u32, f64>, default: f64 },
+    /// 폭을 알 수 없는 단순 폰트(표준 14처럼 `/Widths`가 없는 경우)의 어림값 — 글자 상자
+    /// 판정에만 쓰고, 지운 자리의 이동량 보존(`[n] TJ`)에는 쓰지 않는다.
+    Approximate { width: f64 },
 }
 
 impl FontMetrics {
@@ -43,6 +46,12 @@ impl FontMetrics {
                     parse_cid_widths(doc, resolve(doc, w).as_array().ok()?, &mut widths)?;
                 }
                 Some(FontMetrics::Cid { widths, default })
+            }
+            b"Type1" | b"MMType1" | b"TrueType" | b"Type3" if font.get(b"Widths").is_err() => {
+                // 표준 14 폰트 등 — 이름으로 고정폭만 구분한 어림값.
+                let base = font.get(b"BaseFont").ok().and_then(|o| o.as_name().ok()).unwrap_or(b"");
+                let width = if base.windows(7).any(|w| w == b"Courier") { 600.0 } else { 500.0 };
+                Some(FontMetrics::Approximate { width })
             }
             b"Type1" | b"MMType1" | b"TrueType" | b"Type3" => {
                 let widths: Vec<f64> = resolve(doc, font.get(b"Widths").ok()?)
@@ -84,6 +93,14 @@ impl FontMetrics {
                         .copied()
                         .unwrap_or(*missing);
                     total += w * scale * font_size + char_spacing;
+                    if code == 32 {
+                        total += word_spacing;
+                    }
+                }
+            }
+            FontMetrics::Approximate { width } => {
+                for &code in bytes {
+                    total += width / 1000.0 * font_size + char_spacing;
                     if code == 32 {
                         total += word_spacing;
                     }
@@ -166,6 +183,43 @@ fn parse_cid_widths(doc: &Document, array: &[Object], out: &mut HashMap<u32, f64
         }
     }
     Some(())
+}
+
+/// 폰트 폭에 글자 높이(ascent·descent)를 더한 것 — 글자 상자 계산용. 기술자(FontDescriptor)에 값이
+/// 없으면 흔한 어림값(0.75 / -0.25 em)을 쓴다.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontInfo {
+    pub metrics: FontMetrics,
+    /// em 기준(1.0 = 글자 크기).
+    pub ascent: f64,
+    pub descent: f64,
+}
+
+impl FontMetrics {
+    /// 폭을 어림으로 잡았는지 — 위치 보존 계산에는 쓸 수 없다.
+    pub fn is_approximate(&self) -> bool {
+        matches!(self, FontMetrics::Approximate { .. })
+    }
+}
+
+impl FontInfo {
+    pub fn load(doc: &Document, font: &Dictionary) -> Option<Self> {
+        let metrics = FontMetrics::load(doc, font)?;
+        let descriptor = font
+            .get(b"FontDescriptor")
+            .ok()
+            .and_then(|o| resolve(doc, o).as_dict().ok())
+            .or_else(|| {
+                // Type0: 기술자는 자손 폰트에 있다.
+                let descendants = resolve(doc, font.get(b"DescendantFonts").ok()?).as_array().ok()?;
+                let first = resolve(doc, descendants.first()?).as_dict().ok()?;
+                resolve(doc, first.get(b"FontDescriptor").ok()?).as_dict().ok()
+            });
+        let value = |key: &[u8]| descriptor.and_then(|d| d.get(key).ok()).and_then(|o| number(resolve(doc, o)));
+        let ascent = value(b"Ascent").filter(|v| *v > 0.0).map(|v| v / 1000.0).unwrap_or(0.75);
+        let descent = value(b"Descent").filter(|v| *v < 0.0).map(|v| v / 1000.0).unwrap_or(-0.25);
+        Some(Self { metrics, ascent, descent })
+    }
 }
 
 /// `[n] TJ`로 `advance`(텍스트 공간, Th 적용 후)만큼 옮길 때의 n. 폰트 크기나 가로 배율이 0이면

@@ -210,9 +210,12 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
 
             // OCR 텍스트 레이어 작업(plan/ocr_feature_considerations.md). 작업은 별도 프로세스가
             // 하고(ocr_worker), 한 번에 하나만 돌린다.
-            let ocr_available = app.current_file.is_some() && !app.ocr_job.as_ref().is_some_and(|j| j.is_running());
-            ui.add_enabled_ui(ocr_available, |ui| {
+            // 폴더 일괄은 파일을 열지 않아도 쓸 수 있고, 나머지는 열린 파일이 필요하다.
+            let job_running = app.ocr_job.as_ref().is_some_and(|j| j.is_running());
+            let has_file = app.current_file.is_some();
+            ui.add_enabled_ui(!job_running, |ui| {
                 ui.menu_button("OCR", |ui| {
+                    ui.add_enabled_ui(has_file, |ui| {
                     if ui
                         .button("전체 삭제…")
                         .on_hover_text("보이지 않는 텍스트(OCR 레이어)를 모두 지웁니다 — 원본은 .backup으로 보존")
@@ -221,6 +224,17 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                         crate::ocr_dialogs::request_removal(ui.ctx(), app);
                         ui.close_menu();
                     }
+                    });
+                    if ui
+                        .button("폴더 일괄 삭제…")
+                        .on_hover_text("고른 폴더(하위 폴더 포함)의 모든 PDF에서 보이지 않는 텍스트를 지웁니다 — 파일마다 .backup 보존, 결과는 CSV 로그")
+                        .clicked()
+                    {
+                        crate::ocr_dialogs::request_folder_removal(ui.ctx(), app);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    ui.add_enabled_ui(has_file, |ui| {
                     if ui
                         .button("가져오기…")
                         .on_hover_text("hOCR 파일의 텍스트를 보이지 않는 텍스트 레이어로 넣습니다 — 원본은 .backup으로 보존")
@@ -239,6 +253,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                             app.ocr_export_dialog = Some(crate::ocr_dialogs::ExportDialog::new(ExportFormat::Txt));
                             ui.close_menu();
                         }
+                    });
                     });
                 });
             });

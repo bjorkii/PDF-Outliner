@@ -87,6 +87,9 @@ pub struct GraphicsState {
     pub fill_color: Vec<f64>,
     pub stroke_color_space: Vec<u8>,
     pub stroke_color: Vec<f64>,
+    /// 지금까지 적용된 클리핑 영역을 감싸는 사각형(사용자 공간). None이면 제한 없음.
+    /// 실제 클리핑 경로가 아니라 경로를 감싸는 사각형이라, "밖에 있다"는 판정에만 쓸 수 있다.
+    pub clip: Option<[f64; 4]>,
 }
 
 impl Default for GraphicsState {
@@ -101,6 +104,7 @@ impl Default for GraphicsState {
             fill_color: vec![0.0],
             stroke_color_space: b"DeviceGray".to_vec(),
             stroke_color: vec![0.0],
+            clip: None,
         }
     }
 }
@@ -132,6 +136,17 @@ pub enum XObjectKind {
     Other,
 }
 
+/// 표시 연산자가 그리는 글자 뭉치의 크기 — 폰트 폭·높이로 계산한다.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShowExtent {
+    /// 사용자 공간에서 글자들을 감싸는 사각형 `[left, bottom, right, top]`.
+    pub bbox: [f64; 4],
+    /// 텍스트 공간 가로 이동량(`Th` 적용 후) — 다음 글자 위치.
+    pub advance: f64,
+    /// 폰트 폭을 어림으로 잡았는지(표준 14 폰트 등) — 위치 보존 계산에는 쓸 수 없다.
+    pub approximate: bool,
+}
+
 /// 연산자 하나를 볼 때의 해석기 상태.
 pub struct Context<'a> {
     pub source: Source,
@@ -144,6 +159,8 @@ pub struct Context<'a> {
     pub marked: &'a [MarkedContent],
     /// Form 중첩 깊이(페이지 콘텐츠가 0).
     pub depth: usize,
+    /// 표시 연산자(`Tj`, `TJ`, `'`, `"`)일 때 그 글자들의 크기. 폰트를 읽지 못하면 None.
+    pub show: Option<ShowExtent>,
 }
 
 pub trait Visitor {
@@ -181,7 +198,7 @@ pub fn interpret_page(doc: &Document, page_id: ObjectId, visitor: &mut dyn Visit
     let data = super::page_content_bytes(doc, page_id).map_err(|e| Problem::Stream(e.to_string()))?;
     let operations = tokenize(&data).map_err(Problem::Lex)?;
     let resources = page_resources(doc, page_id);
-    let mut interpreter = Interpreter { doc, visitor, form_stack: HashSet::new() };
+    let mut interpreter = Interpreter { doc, visitor, form_stack: HashSet::new(), fonts: Default::default() };
     interpreter.run(Source::Page(page_id), &operations, &resources, GraphicsState::default(), 0);
     Ok(())
 }
@@ -207,6 +224,45 @@ struct Interpreter<'a, 'v> {
     visitor: &'v mut dyn Visitor,
     /// 지금 해석 중인 Form 체인(순환 감지).
     form_stack: HashSet<ObjectId>,
+    /// 폰트 객체별 폭·높이(같은 폰트를 여러 번 읽지 않게).
+    fonts: std::collections::HashMap<ObjectId, Option<crate::fonts::FontInfo>>,
+}
+
+/// 경로를 만드는 연산자가 쌓는 좌표(사용자 공간)의 사각형.
+#[derive(Default)]
+struct PathBox {
+    bbox: Option<[f64; 4]>,
+    current: (f64, f64),
+}
+
+impl PathBox {
+    fn add(&mut self, point: (f64, f64)) {
+        self.current = point;
+        self.bbox = Some(match self.bbox {
+            None => [point.0, point.1, point.0, point.1],
+            Some(b) => [b[0].min(point.0), b[1].min(point.1), b[2].max(point.0), b[3].max(point.1)],
+        });
+    }
+
+    fn take(&mut self) -> Option<[f64; 4]> {
+        self.current = (0.0, 0.0);
+        self.bbox.take()
+    }
+}
+
+pub fn intersect_box(a: Option<[f64; 4]>, b: [f64; 4]) -> Option<[f64; 4]> {
+    let Some(a) = a else { return Some(b) };
+    Some([a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])])
+}
+
+/// `b`가 `a` 안에 완전히 들어가는지(빈 사각형이면 거짓).
+pub fn contains_box(a: &[f64; 4], b: &[f64; 4]) -> bool {
+    b[0] >= a[0] && b[1] >= a[1] && b[2] <= a[2] && b[3] <= a[3] && b[2] > b[0] && b[3] > b[1]
+}
+
+/// 두 사각형이 겹치는지.
+pub fn boxes_overlap(a: &[f64; 4], b: &[f64; 4]) -> bool {
+    a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
 }
 
 impl Interpreter<'_, '_> {
@@ -217,8 +273,16 @@ impl Interpreter<'_, '_> {
         let mut tm = IDENTITY;
         let mut tlm = IDENTITY;
         let mut marked: Vec<MarkedContent> = Vec::new();
+        let mut path = PathBox::default();
+        let mut pending_clip = false;
 
         for (index, op) in operations.iter().enumerate() {
+            // `'`와 `"`는 글자를 그리기 전에 줄을 먼저 바꾼다 — 그 뒤 위치로 글자 상자를 계산한다.
+            let show_matrix = match op.operator.as_slice() {
+                b"'" | b"\"" => multiply(&[1.0, 0.0, 0.0, 1.0, 0.0, -state.text.leading], &tlm),
+                _ => tm,
+            };
+            let show = self.show_extent(resources, &state, &show_matrix, op);
             {
                 let context = Context {
                     source,
@@ -229,11 +293,13 @@ impl Interpreter<'_, '_> {
                     text_line_matrix: &tlm,
                     marked: &marked,
                     depth,
+                    show,
                 };
                 self.visitor.operation(&context, index, op);
             }
 
             let f = |i: usize| op.operand_f64(i).unwrap_or(0.0);
+            let point = |i: usize| transform_point(&state.ctm, f(i), f(i + 1));
             match op.operator.as_slice() {
                 b"q" => stack.push(state.clone()),
                 // 짝이 맞지 않는 Q(빈 스택)는 무시한다 — 실제 파일에 있다.
@@ -318,6 +384,25 @@ impl Interpreter<'_, '_> {
                 b"EMC" => {
                     marked.pop();
                 }
+                b"m" | b"l" => path.add(point(0)),
+                b"c" => (0..3).for_each(|i| path.add(point(i * 2))),
+                b"v" | b"y" => (0..2).for_each(|i| path.add(point(i * 2))),
+                b"re" => {
+                    let (x, y, w, h) = (f(0), f(1), f(2), f(3));
+                    for (px, py) in [(x, y), (x + w, y), (x + w, y + h), (x, y + h)] {
+                        path.add(transform_point(&state.ctm, px, py));
+                    }
+                }
+                b"W" | b"W*" => pending_clip = true,
+                // 경로를 그리거나 버리는 연산자 — 대기 중인 클리핑이 있으면 여기서 적용된다.
+                b"n" | b"f" | b"F" | b"f*" | b"S" | b"s" | b"B" | b"B*" | b"b" | b"b*" => {
+                    let bbox = path.take();
+                    if std::mem::take(&mut pending_clip) {
+                        if let Some(bbox) = bbox {
+                            state.clip = intersect_box(state.clip, bbox);
+                        }
+                    }
+                }
                 b"Do" => {
                     if let Some(name) = op.operand_name(0) {
                         let context = Context {
@@ -329,13 +414,63 @@ impl Interpreter<'_, '_> {
                             text_line_matrix: &tlm,
                             marked: &marked,
                             depth,
+                            show: None,
                         };
                         self.do_xobject(&context, name);
                     }
                 }
                 _ => {}
             }
+
+            // 글자를 그린 만큼 텍스트 행렬을 옮긴다(`'`·`"`는 위에서 줄을 바꾼 뒤).
+            if let Some(extent) = show {
+                tm = multiply(&[1.0, 0.0, 0.0, 1.0, extent.advance, 0.0], &tm);
+            }
         }
+    }
+
+    /// 표시 연산자가 그리는 글자 뭉치의 크기(폰트를 읽지 못하면 None).
+    fn show_extent(&mut self, resources: &Dictionary, state: &GraphicsState, tm: &Matrix, op: &Operation) -> Option<ShowExtent> {
+        if !matches!(op.operator.as_slice(), b"Tj" | b"TJ" | b"'" | b"\"") {
+            return None;
+        }
+        let text = &state.text;
+        let doc = self.doc;
+        let font = match (&text.font_name, text.font_ref) {
+            (_, Some(id)) => self
+                .fonts
+                .entry(id)
+                .or_insert_with(|| doc.get_dictionary(id).ok().and_then(|d| crate::fonts::FontInfo::load(doc, d)))
+                .clone()?,
+            (Some(name), None) => match resource_entry(doc, resources, b"Font", name)? {
+                Object::Reference(id) => {
+                    let id = *id;
+                    self.fonts
+                        .entry(id)
+                        .or_insert_with(|| doc.get_dictionary(id).ok().and_then(|d| crate::fonts::FontInfo::load(doc, d)))
+                        .clone()?
+                }
+                other => crate::fonts::FontInfo::load(doc, other.as_dict().ok()?)?,
+            },
+            (None, None) => return None,
+        };
+        let advance = font.metrics.show_advance(
+            &op.operator,
+            &op.operands,
+            text.font_size,
+            text.char_spacing,
+            text.word_spacing,
+            text.horizontal_scaling,
+        )?;
+        // 텍스트 공간 사각형(가로는 이동량, 세로는 글자 높이) → 사용자 공간.
+        let (y0, y1) = (font.descent * text.font_size + text.rise, font.ascent * text.font_size + text.rise);
+        let matrix = multiply(tm, &state.ctm);
+        let corners = [(0.0, y0), (advance, y0), (0.0, y1), (advance, y1)]
+            .map(|(x, y)| transform_point(&matrix, x, y));
+        let bbox = corners.iter().fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b, (x, y)| {
+            [b[0].min(*x), b[1].min(*y), b[2].max(*x), b[3].max(*y)]
+        });
+        Some(ShowExtent { bbox, advance, approximate: font.metrics.is_approximate() })
     }
 
     fn apply_ext_gstate(&self, resources: &Dictionary, name: &[u8], state: &mut GraphicsState) {
@@ -613,6 +748,61 @@ pub(crate) mod tests {
         let (doc, page) = one_page_doc(b"BT (unterminated Tj ET", vec![]);
         let mut r = ShowRecorder::default();
         assert!(matches!(interpret_page(&doc, page, &mut r), Err(Problem::Lex(_))));
+    }
+
+    /// 표시 연산자의 글자 상자와 클리핑 영역을 받아 두는 방문자.
+    #[derive(Default)]
+    struct BoxRecorder {
+        shows: Vec<([f64; 4], Option<[f64; 4]>)>,
+    }
+
+    impl Visitor for BoxRecorder {
+        fn operation(&mut self, c: &Context, _index: usize, _op: &Operation) {
+            if let Some(show) = c.show {
+                self.shows.push((show.bbox, c.state.clip));
+            }
+        }
+    }
+
+    /// 폭 500(1/1000 em), ascent 0.8, descent -0.2인 단순 폰트를 가진 페이지.
+    fn doc_with_font(content: &[u8]) -> (Document, ObjectId) {
+        let (mut doc, page) = one_page_doc(content, vec![]);
+        let descriptor = doc.add_object(dictionary! { "Ascent" => 800, "Descent" => -200 });
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "T",
+            "FirstChar" => 65, "Widths" => vec![500.into(), 500.into()], "FontDescriptor" => descriptor,
+        });
+        doc.get_dictionary_mut(page)
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Font", dictionary! { "F1" => font });
+        (doc, page)
+    }
+
+    #[test]
+    fn show_extent_uses_font_metrics_and_advances() {
+        // 10pt 글자 두 개(각 폭 5pt) — 상자는 x 20~30, y 8~12(기준선 10 + ascent/descent)
+        let (doc, page) = doc_with_font(b"BT /F1 10 Tf 1 0 0 1 20 10 Tm (AB) Tj (A) Tj ET");
+        let mut r = BoxRecorder::default();
+        interpret_page(&doc, page, &mut r).unwrap();
+        assert_eq!(r.shows.len(), 2);
+        assert_eq!(r.shows[0].0, [20.0, 8.0, 30.0, 18.0]);
+        // 두 번째 Tj는 첫 번째가 그린 만큼(10pt) 오른쪽에서 시작한다
+        assert_eq!(r.shows[1].0, [30.0, 8.0, 35.0, 18.0]);
+    }
+
+    #[test]
+    fn clip_is_tracked_and_restored() {
+        let (doc, page) = doc_with_font(
+            b"q 10 10 100 50 re W n BT /F1 10 Tf 1 0 0 1 20 20 Tm (A) Tj ET Q BT /F1 10 Tf 1 0 0 1 20 20 Tm (A) Tj ET",
+        );
+        let mut r = BoxRecorder::default();
+        interpret_page(&doc, page, &mut r).unwrap();
+        assert_eq!(r.shows[0].1, Some([10.0, 10.0, 110.0, 60.0]));
+        assert_eq!(r.shows[1].1, None, "Q로 클리핑이 풀린다");
     }
 
     #[test]

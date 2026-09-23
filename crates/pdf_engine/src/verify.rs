@@ -12,10 +12,12 @@ use pdfium_render::prelude::*;
 /// 렌더 비교 해상도 상한(긴 변 픽셀). 스캔 페이지의 72dpi 사용자 공간 크기가 수천 pt인 경우가
 /// 있어 해상도가 아니라 크기로 제한한다.
 const RENDER_MAX_SIDE: i32 = 1000;
-/// 채널 차이가 이보다 큰 픽셀을 "다름"으로 센다.
-const CHANNEL_TOLERANCE: u8 = 32;
-/// 다른 픽셀이 이 비율(또는 10개)을 넘으면 화면이 바뀐 것으로 본다.
-const PIXEL_FRACTION_TOLERANCE: f64 = 0.0002;
+/// 채널 차이가 이보다 큰 픽셀을 "다름"으로 센다. 보이지 않는 텍스트만 지웠다면 화면은 픽셀 단위로
+/// 같아야 하므로(실측), 허용치는 작게 잡는다 — 32로 뒀더니 밝은 배경 위의 흰 글씨가 지워져 화면이
+/// 바뀌었는데도 통과했다(2026-09-23).
+const CHANNEL_TOLERANCE: u8 = 8;
+/// 다른 픽셀이 이 비율(또는 6개)을 넘으면 화면이 바뀐 것으로 본다.
+const PIXEL_FRACTION_TOLERANCE: f64 = 0.00002;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageSnapshot {
@@ -53,7 +55,10 @@ pub fn snapshot(page: &PdfPage) -> Result<PageSnapshot> {
 }
 
 /// 두 스냅샷이 "화면과 보이는 텍스트가 같음"인지. 다르면 이유.
-pub fn compare(before: &PageSnapshot, after: &PageSnapshot) -> Result<(), String> {
+///
+/// `check_text`가 거짓이면 화면만 본다 — 적극 모드로 흰 글씨처럼 "화면에는 안 보이지만 추출은 되는"
+/// 텍스트를 지울 때는 추출 텍스트가 달라지는 것이 정상이기 때문이다.
+pub fn compare_with(before: &PageSnapshot, after: &PageSnapshot, check_text: bool) -> Result<(), String> {
     if (before.width, before.height) != (after.width, after.height) {
         return Err(format!(
             "페이지 크기가 바뀜({}×{} → {}×{})",
@@ -67,14 +72,19 @@ pub fn compare(before: &PageSnapshot, after: &PageSnapshot) -> Result<(), String
         .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > CHANNEL_TOLERANCE))
         .count();
     let total = (before.width.max(0) as usize) * (before.height.max(0) as usize);
-    let allowed = ((total as f64 * PIXEL_FRACTION_TOLERANCE) as usize).max(10);
+    let allowed = ((total as f64 * PIXEL_FRACTION_TOLERANCE) as usize).max(6);
     if differing > allowed {
         return Err(format!("화면이 달라짐(픽셀 {differing}개 차이)"));
     }
-    if before.visible_text != after.visible_text {
+    if check_text && before.visible_text != after.visible_text {
         return Err("보이는 텍스트가 달라짐".to_string());
     }
     Ok(())
+}
+
+/// 화면과 보이는 텍스트를 모두 비교한다.
+pub fn compare(before: &PageSnapshot, after: &PageSnapshot) -> Result<(), String> {
+    compare_with(before, after, true)
 }
 
 /// 이름에 `font_name`이 들어간 폰트로 그린 글자(공백·생성 문자 제외)와 loose box(사용자 공간

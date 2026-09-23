@@ -7,8 +7,10 @@
 //! - 기하 구분: 앞 글자와 세로로 거의 겹치지 않거나 크게 뒤로 돌아가면 줄 경계, 글자 높이의 절반
 //!   넘게 떨어져 있으면 단어 경계. pdfium이 구분 문자를 넣지 않은 경우를 위한 것이다.
 //!
-//! 세로쓰기와 페이지 안에서 회전된 텍스트는 가로쓰기로 가정한 이 규칙에 맞지 않는다. 글자마다
-//! 줄이 나뉘어 나올 수 있다(1차 범위 밖).
+//! 세로쓰기(글자가 위에서 아래로 쌓이는 경우)는 가로 규칙으로는 글자마다 줄이 나뉘므로 따로
+//! 잡는다: 앞 글자와 가로로 겹치면서 아래로 이어지면 같은 줄(세로줄)로 보고, 글자마다 단어를
+//! 하나씩 둔다. 줄은 `vertical`로 표시한다. 페이지 안에서 회전된 텍스트(가로도 세로도 아닌 각도)는
+//! 여전히 글자마다 나뉠 수 있다.
 
 use unicode_normalization::UnicodeNormalization;
 
@@ -52,6 +54,10 @@ impl DRect {
 
     fn vertical_overlap(&self, other: &DRect) -> f64 {
         (self.y1.min(other.y1) - self.y0.max(other.y0)).max(0.0)
+    }
+
+    fn horizontal_overlap(&self, other: &DRect) -> f64 {
+        (self.x1.min(other.x1) - self.x0.max(other.x0)).max(0.0)
     }
 }
 
@@ -98,6 +104,8 @@ pub struct Line {
     pub char_height: f64,
     /// 글자 방향(반시계 방향 각도, hOCR `textangle`). 0이면 가로쓰기 그대로.
     pub text_angle: u16,
+    /// 글자가 위에서 아래로 쌓이는 세로줄(글자는 바로 서 있다).
+    pub vertical: bool,
 }
 
 impl Line {
@@ -181,13 +189,22 @@ pub fn build_lines(chars: &[InputChar], options: &LayoutOptions) -> (Vec<Line>, 
             Piece::Char(c, rect) => {
                 if let Some(prev) = builder.last_rect {
                     let h = prev.height().max(rect.height()).max(1e-6);
+                    let w = prev.width().max(rect.width()).max(1e-6);
                     let overlap = prev.vertical_overlap(&rect) / prev.height().min(rect.height()).max(1e-6);
                     let gap = rect.x0 - prev.x1;
-                    if overlap < 0.3 || gap < -h {
+                    // 세로쓰기: 가로로 겹치면서 바로 아래로 이어지는 글자.
+                    let side_overlap = prev.horizontal_overlap(&rect) / prev.width().min(rect.width()).max(1e-6);
+                    let down = rect.y0 - prev.y1;
+                    let vertical_run = side_overlap >= 0.5 && down > -h * 0.5 && down < h * 0.8;
+                    if vertical_run && (builder.vertical || overlap < 0.3) {
+                        builder.vertical = true;
+                        builder.end_word(); // 세로줄은 글자마다 단어 하나
+                    } else if overlap < 0.3 || gap < -h {
                         builder.end_line();
                     } else if gap > h * 0.5 {
                         builder.end_word();
                     }
+                    let _ = w;
                 }
                 builder.push(c, rect);
             }
@@ -206,6 +223,8 @@ struct Builder {
     last_rect: Option<DRect>,
     baselines: Vec<f64>,
     heights: Vec<f64>,
+    /// 지금 만들고 있는 줄이 세로줄인지.
+    vertical: bool,
 }
 
 impl Builder {
@@ -241,7 +260,7 @@ impl Builder {
         let char_height = median(&mut self.heights).unwrap_or(rect.height());
         self.baselines.clear();
         self.heights.clear();
-        self.lines.push(Line { words, rect, baseline, char_height, text_angle: 0 });
+        self.lines.push(Line { words, rect, baseline, char_height, text_angle: 0, vertical: std::mem::take(&mut self.vertical) });
     }
 }
 
@@ -341,6 +360,27 @@ pub(crate) mod tests {
         let (lines, stats) = build_lines(&chars, &LayoutOptions::default());
         assert_eq!(stats.clamped_chars, 1);
         assert!(lines[0].rect.y0 > -1.0);
+    }
+
+    #[test]
+    fn vertical_run_becomes_one_line_of_single_characters() {
+        // 같은 x에 글자가 아래로 쌓이는 세로쓰기.
+        let chars: Vec<InputChar> = "문화독립"
+            .chars()
+            .enumerate()
+            .map(|(i, ch)| InputChar {
+                ch,
+                rect: DRect { x0: 100.0, y0: i as f64 * 14.0, x1: 112.0, y1: i as f64 * 14.0 + 12.0 },
+                baseline: None,
+                generated: false,
+                invisible: true,
+            })
+            .collect();
+        let (lines, _) = build_lines(&chars, &LayoutOptions::default());
+        assert_eq!(lines.len(), 1, "세로줄은 한 줄로 묶인다");
+        assert!(lines[0].vertical);
+        assert_eq!(lines[0].text(), "문 화 독 립");
+        assert_eq!(lines[0].rect, DRect { x0: 100.0, y0: 0.0, x1: 112.0, y1: 54.0 });
     }
 
     #[test]
