@@ -117,16 +117,61 @@ fn poll_export_probe(app: &mut PdfViewerApp) {
 
 enum JobPhase {
     Running { done: usize, total: usize },
-    Finished(String),
+    Finished(Report),
     Failed(String),
 }
 
+/// 결과 창 본문 — 머리글 한 줄과 불릿 항목들. 항목마다 **들여쓴 상세 줄**을 달 수 있다(페이지별
+/// 이유 등). 예전에는 전체를 줄바꿈으로 이은 문자열 하나였는데, 그러면 항목과 그에 딸린
+/// 페이지 목록이 한 덩어리로 붙어 어디까지가 한 항목인지 보이지 않았다(2026-09-29 요청).
+#[derive(Default)]
+pub struct Report {
+    headline: String,
+    items: Vec<ReportItem>,
+}
+
+#[derive(Default)]
+struct ReportItem {
+    line: String,
+    details: Vec<String>,
+}
+
+impl Report {
+    fn new(headline: impl Into<String>) -> Self {
+        Self { headline: headline.into(), items: Vec::new() }
+    }
+
+    /// 불릿 항목 하나를 더한다.
+    fn line(&mut self, text: impl Into<String>) {
+        self.items.push(ReportItem { line: text.into(), details: Vec::new() });
+    }
+
+    /// 마지막 항목에 딸리는 상세 줄(들여써서 박스 안에 적는다).
+    fn detail(&mut self, text: impl Into<String>) {
+        if let Some(item) = self.items.last_mut() {
+            item.details.push(text.into());
+        }
+    }
+
+    /// "복사"가 넘길 평문.
+    fn to_text(&self) -> String {
+        let mut lines = vec![self.headline.clone()];
+        for item in &self.items {
+            lines.push(format!("• {}", item.line));
+            lines.extend(item.details.iter().map(|d| format!("    {d}")));
+        }
+        lines.join("\n")
+    }
+}
+
 enum JobKind {
-    Export { describe: Box<dyn Fn(&ExportReport) -> String>, output: PathBuf },
+    Export { describe: Box<dyn Fn(&ExportReport) -> Report>, output: PathBuf },
     AnalyzeRemoval { pdf: PathBuf },
     Remove { pdf: PathBuf },
     AnalyzeImport { pdf: PathBuf, files: Vec<PathBuf> },
-    Batch,
+    /// 폴더 일괄 삭제. 취소하면 그때 처리 중이던 파일의 임시 파일이 폴더에 남으므로, 어느
+    /// 폴더를 훑어 지울지 기억해 둔다(단일 파일 작업은 `temp_output` 하나로 끝난다).
+    Batch { folder: PathBuf },
     /// `skipped`는 넣을 대상에서 미리 빠진 페이지의 이유별 개수(작업 프로세스는 이유를 모른다 —
     /// 창에서 정한 것이다). 결과 창에도 남겨야 실행 뒤에 확인할 수 있다.
     Import { pdf: PathBuf, skipped: String },
@@ -176,6 +221,11 @@ impl OcrJob {
         if let Some(temp) = self.temp_output.take() {
             let _ = std::fs::remove_file(temp);
         }
+        // 폴더 일괄은 파일마다 제 옆에 임시 파일을 만든다. 프로세스를 죽여 세운 자리에 그것이
+        // 남으므로(교체 전이라 원본은 온전하다) 여기서 훑어 지운다(2026-09-29 요청).
+        if let JobKind::Batch { folder } = &self.kind {
+            remove_leftover_temps(folder);
+        }
     }
 
     fn spawn(ctx: &egui::Context, title: String, job: &Job, kind: JobKind, temp_output: Option<PathBuf>) -> Self {
@@ -186,10 +236,10 @@ impl OcrJob {
         Self { title, worker, temp_output, phase, stage: None, kind, marks: Vec::new(), reveal: None }
     }
 
-    fn finish(&mut self, text: String) {
+    fn finish(&mut self, report: Report) {
         self.worker = None;
         self.temp_output = None;
-        self.phase = JobPhase::Finished(text);
+        self.phase = JobPhase::Finished(report);
     }
 
     fn is_finished(&self) -> bool {
@@ -230,7 +280,7 @@ fn poll_events(app: &mut PdfViewerApp) {
             WorkerPoll::Event(Event::ExportDone(report)) => {
                 let (text, output) = match &job.kind {
                     JobKind::Export { describe, output } => (describe(&report), Some(output.clone())),
-                    _ => (String::new(), None),
+                    _ => (Report::default(), None),
                 };
                 job.reveal = output.map(|path| ("저장 위치 열기", path));
                 job.finish(text); // 결과 파일로 이미 옮겨짐
@@ -322,20 +372,20 @@ pub fn request_removal(ctx: &egui::Context, app: &mut PdfViewerApp) {
 }
 
 /// 폴더 일괄 삭제 결과 문장.
-fn describe_batch(r: &crate::ocr_worker::BatchReport) -> String {
-    let mut lines = vec![format!(
+fn describe_batch(r: &crate::ocr_worker::BatchReport) -> Report {
+    let mut report = Report::new("처리를 완료했습니다.");
+    report.line(format!(
         "PDF {}개 중 바꾼 파일 {}개, 지울 것이 없던 파일 {}개, 건너뛴 파일 {}개, 실패 {}개",
         r.total,
         r.changed.len(),
         r.unchanged.len(),
         r.skipped.len(),
         r.failed.len()
-    )];
+    ));
     // 파일별 목록은 적지 않는다(2026-09-28 결정) — 같은 내용이 CSV에 그대로 있고, CSV는 아래
     // "결과 로그 파일(csv) 위치 열기" 버튼으로 바로 갈 수 있다.
-    lines.push("원본은 파일마다 '파일명.pdf-실행시각.backup'으로 보존했습니다.".to_string());
-    lines.join("
-")
+    report.line("원본은 파일마다 '파일명.pdf-실행시각.backup'으로 보존했습니다.");
+    report
 }
 
 /// 메뉴 "폴더 일괄 삭제…" — 폴더를 고르면 바로 시작한다(파일마다 백업 후 교체).
@@ -344,11 +394,12 @@ pub fn request_folder_removal(ctx: &egui::Context, app: &mut PdfViewerApp) {
     focus_window(ctx);
     let Some(folder) = folder else { return };
     let job = Job::RemoveFolder {
-        folder,
+        folder: folder.clone(),
         // 열려 있는 파일은 건드리지 않는다(문서 핸들·파일 감시와 충돌).
         skip: app.current_file.clone().into_iter().collect(),
     };
-    app.ocr_job = Some(OcrJob::spawn(ctx, "OCR 폴더 일괄 삭제".to_string(), &job, JobKind::Batch, None));
+    app.ocr_job =
+        Some(OcrJob::spawn(ctx, "OCR 폴더 일괄 삭제".to_string(), &job, JobKind::Batch { folder }, None));
 }
 
 fn show_needs_save_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
@@ -537,18 +588,16 @@ fn finish_removal(
     pdf: &Path,
     temp: Option<&Path>,
     report: &RemovalReport,
-) -> Result<(String, Option<PathBuf>), String> {
+) -> Result<(Report, Option<PathBuf>), String> {
     // "지울 것이 없음"은 확인 창에서 먼저 알리고 닫으므로 여기까지 오지 않는다. 남은 갈래는
     // **지워 봤는데 모두 되돌린** 경우다 — 실행해 봐야 알 수 있어 여기서 말해야 한다.
     if report.nothing_to_do {
-        return Ok((
-            format!(
-                "지울 수 있는 것이 없었습니다 — 지워 본 {}쪽 모두 화면이나 보이는 텍스트가 달라져 되돌렸습니다(파일을 바꾸지 않음).\n{}",
-                report.rolled_back.len(),
-                describe_removal(report)
-            ),
-            None,
-        ));
+        let mut text = describe_removal(report);
+        text.headline = format!(
+            "지울 수 있는 것이 없었습니다 — 지워 본 {}쪽 모두 화면이나 보이는 텍스트가 달라져 되돌렸습니다(파일을 바꾸지 않음).",
+            report.rolled_back.len()
+        );
+        return Ok((text, None));
     }
     let backup = swap_in_result(app, pdf, temp, "OCR 텍스트를 지웠습니다.", "OCR을 삭제할 수 없습니다")?;
     Ok((describe_removal(report), Some(backup)))
@@ -1006,74 +1055,77 @@ fn summarize_pages(pages: &[usize]) -> String {
     parts.join(", ")
 }
 
-fn describe_import(r: &ImportReport, skipped_by_plan: &str) -> String {
-    let mut lines = Vec::new();
-    if !skipped_by_plan.is_empty() {
-        lines.push(format!("대상에서 뺀 페이지 — {skipped_by_plan}"));
-    }
-    if r.nothing_to_do {
-        lines.push("가져올 OCR 텍스트가 있는 페이지가 없습니다".to_string());
+fn describe_import(r: &ImportReport, skipped_by_plan: &str) -> Report {
+    let mut report = if r.nothing_to_do {
+        Report::new("가져올 OCR 텍스트가 있는 페이지가 없습니다")
     } else {
-        lines.push(format!("pp.{}에 OCR 텍스트를 가져왔습니다.", summarize_pages(&r.inserted)));
-        lines.push(String::new()); // 머리글과 한 줄 띄운다
+        Report::new(format!("pp.{}에 OCR 텍스트를 가져왔습니다.", summarize_pages(&r.inserted)))
+    };
+    if !skipped_by_plan.is_empty() {
+        report.line(format!("대상에서 뺀 페이지: {skipped_by_plan}"));
+    }
+    if !r.nothing_to_do {
         if r.pages_overwritten > 0 {
-            lines.push(format!("• 원래 있던 OCR을 지우고 넣은 페이지: {}쪽", r.pages_overwritten));
+            report.line(format!("원래 있던 OCR을 덮어씌운 페이지: {}쪽", r.pages_overwritten));
         }
-        lines.push(format!("• 파일 크기: {} → {}", human_size(r.size_before), human_size(r.size_after)));
+        report.line(format!("파일 크기: {} → {}", human_size(r.size_before), human_size(r.size_after)));
     }
     if !r.skipped.is_empty() {
-        lines.push(format!("• 넣지 못한 페이지: {}쪽", r.skipped.len()));
-        lines.extend(r.skipped.iter().take(20).map(|(p, why)| format!("  p.{p}: {why}")));
+        report.line(format!("OCR을 가져오지 못한 페이지: {}쪽", r.skipped.len()));
+        for (page, why) in r.skipped.iter().take(200) {
+            report.detail(format!("p.{page}: {why}"));
+        }
     }
     if !r.rolled_back.is_empty() {
-        lines.push(format!("• 검증에서 원본과 달라 되돌린 페이지: {}쪽", r.rolled_back.len()));
-        lines.extend(r.rolled_back.iter().take(20).map(|(p, why)| format!("  p.{p}: {why}")));
+        report.line(format!("검증에서 원본과 달라 되돌린 페이지: {}쪽", r.rolled_back.len()));
+        for (page, why) in r.rolled_back.iter().take(200) {
+            report.detail(format!("p.{page}: {why}"));
+        }
     }
-    let warnings = r.marks.iter().filter(|m| !m.rolled_back).count();
-    if warnings > 0 {
-        lines.push(format!(
-            "• 확인 권장: {warnings}쪽 — 같은 글자가 겹친 자리가 있어 뷰어에서 한 글자로 추출됩니다(아래 목록의 '보기')"
-        ));
-    }
+    // "확인 권장 N쪽" 줄은 없앴다 — 바로 아래 문제지점 목록이 같은 말을 하고 있다(2026-09-29 요청).
     if !r.also_reverted.is_empty() {
-        lines.push(format!(
-            "• 같은 Form을 써서 함께 원래대로 둔 페이지: {}",
+        report.line(format!(
+            "같은 Form을 써서 함께 원래대로 둔 페이지: {}",
             r.also_reverted.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
         ));
     }
-    lines.join("\n")
+    report
 }
 
-fn describe_removal(r: &RemovalReport) -> String {
+fn describe_removal(r: &RemovalReport) -> Report {
     let a = &r.analysis;
     // 지운 텍스트의 건수·형태별 개수는 적지 않는다(2026-09-28 결정) — 글자를 하나하나 세어 준
     // 값은 사용자가 관심 가질 정보가 아니다. 규모는 쪽 단위로만 말한다.
-    let mut lines = vec![
-        "모든 OCR 텍스트가 삭제됐습니다.".to_string(),
-        String::new(), // 머리글과 한 줄 띄운다
-        format!("• 파일 크기: {} → {}", human_size(r.size_before), human_size(r.size_after)),
-    ];
+    let mut report = Report::new("처리를 완료했습니다.");
+    report.line(format!("파일 크기: {} → {}", human_size(r.size_before), human_size(r.size_after)));
     if r.pruned_layers > 0 {
-        lines.push(format!("• 빈 레이어 정리: {}개", r.pruned_layers));
+        report.line(format!("빈 레이어 정리: {}개", r.pruned_layers));
     }
     if !r.rolled_back.is_empty() {
-        lines.push(format!("• 검증에서 원본과 달라 되돌린 페이지: {}쪽", r.rolled_back.len()));
-        lines.extend(r.rolled_back.iter().take(20).map(|(p, why)| format!("  p.{p}: {why}")));
+        report.line(format!("검증에서 원본과 달라 되돌린 페이지: {}쪽", r.rolled_back.len()));
+        for (page, why) in r.rolled_back.iter().take(200) {
+            report.detail(format!("p.{page}: {why}"));
+        }
     }
     if !r.also_reverted.is_empty() {
-        lines.push(format!(
-            "• 같은 Form을 써서 함께 원래대로 둔 페이지: {}",
+        report.line(format!(
+            "같은 Form을 써서 함께 원래대로 둔 페이지: {}",
             r.also_reverted.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
         ));
     }
     if !a.skipped.is_empty() {
-        lines.push(format!("• 처리할 수 없어 그대로 둔 페이지: {}쪽", a.skipped.len()));
-        lines.extend(a.skipped.iter().take(20).map(|(p, why)| format!("  p.{p}: {why}")));
+        report.line(format!("처리할 수 없어 그대로 둔 페이지: {}쪽", a.skipped.len()));
+        for (page, why) in a.skipped.iter().take(200) {
+            report.detail(format!("p.{page}: {why}"));
+        }
     }
-    for (page, note) in a.notes.iter().take(10) {
-        lines.push(format!("참고 p.{page}: {note}"));
+    if !a.notes.is_empty() {
+        report.line("참고".to_string());
+        for (page, note) in a.notes.iter().take(50) {
+            report.detail(format!("p.{page}: {note}"));
+        }
     }
-    lines.join("\n")
+    report
 }
 
 fn human_size(bytes: u64) -> String {
@@ -1145,7 +1197,9 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     bullet(ui, "이 문서에는 보이지 않는 텍스트(OCR 레이어)가 없습니다.");
                 }
                 if dialog.format == ExportFormat::Txt {
-                    ui.add_space(2.0);
+                    // 위(내보낼 텍스트 고르기)와 아래(txt 형식 다루기)는 성격이 다른 묶음이라
+                    // 눈에 보이게 띄운다(2026-09-29 요청).
+                    ui.add_space(12.0);
                     ui.checkbox(&mut dialog.txt_page_labels, "페이지 번호 함께 표기")
                         .on_hover_text("PDF의 페이지 레이블이 물리 번호와 다르면 === [p. 12 | xii] === 처럼 함께 적습니다.");
                     ui.checkbox(&mut dialog.txt_crlf, "줄바꿈을 CRLF로 처리(Windows 호환)");
@@ -1254,26 +1308,78 @@ fn partial_path(output: &Path) -> PathBuf {
     output.with_file_name(name)
 }
 
-fn describe_export(r: &ExportReport, invisible_only: bool) -> String {
+fn describe_export(r: &ExportReport, invisible_only: bool) -> Report {
     // 형식과 고른 범위는 창 제목·옵션에 이미 있고, 쪽·단어 수는 사용자가 관심 가질 값이
     // 아니다(2026-09-28 결정). 끝났다는 사실만 머리글로 적고, 이상이 있을 때만 줄을 더한다.
-    let mut lines = vec!["내보내기를 완료했습니다.".to_string()];
+    let mut report = Report::new("내보내기를 완료했습니다.");
     if r.clamped_chars > 0 {
-        lines.push(format!("• 글자 높이가 비정상적으로 커서 보정한 글자: {}개", r.clamped_chars));
+        report.line(format!("글자 높이가 비정상적으로 커서 보정한 글자: {}개", r.clamped_chars));
     }
     if !r.failed_pages.is_empty() {
-        lines.push(format!("• 읽지 못해 빈 페이지로 기록한 페이지: {}쪽", r.failed_pages.len()));
-        for (page, reason) in r.failed_pages.iter().take(20) {
-            lines.push(format!("  p.{page}: {reason}"));
-        }
-        if r.failed_pages.len() > 20 {
-            lines.push(format!("  … 외 {}쪽", r.failed_pages.len() - 20));
+        report.line(format!("읽지 못해 빈 페이지로 기록한 페이지: {}쪽", r.failed_pages.len()));
+        for (page, reason) in r.failed_pages.iter().take(200) {
+            report.detail(format!("p.{page}: {reason}"));
         }
     }
     if r.pages_with_text == 0 && invisible_only {
-        lines.push("OCR 텍스트가 없습니다. '모든 텍스트'로 다시 내보내 보세요.".to_string());
+        report.line("OCR 텍스트가 없습니다. '모든 텍스트'로 다시 내보내 보세요.");
     }
-    lines.join("\n")
+    report
+}
+
+/// 폴더(하위 폴더 포함)에 남은 OCR 작업 임시 파일을 지운다. 원본을 바꾸기 전 단계의 산물이라
+/// 지워도 잃을 것이 없다.
+fn remove_leftover_temps(folder: &Path) {
+    let Ok(entries) = std::fs::read_dir(folder) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(t) if t.is_dir() => remove_leftover_temps(&path),
+            // `문서.pdf` → `문서.ocr_tmp.pdf`(with_extension) 이므로 이름 끝으로 알아본다.
+            Ok(t) if t.is_file() && path.to_string_lossy().ends_with(".ocr_tmp.pdf") => {
+                let _ = std::fs::remove_file(&path);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 상세 줄을 들여쓸 폭과, 스크롤로 넘기기 시작하는 줄 수.
+const DETAIL_INDENT: f32 = 16.0;
+const DETAIL_ROWS: usize = 6;
+const DETAIL_HEIGHT: f32 = 150.0;
+
+/// 항목에 딸린 상세 목록 — 들여쓰고 박스로 묶어 위 항목과 구분하고, 길면 스크롤한다
+/// (2026-09-29 요청: 예전에는 본문 전체가 한 스크롤 영역이라 어디까지가 한 항목인지 몰랐다).
+fn detail_box(ui: &mut egui::Ui, id: &str, rows: usize, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.add_space(DETAIL_INDENT);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_min_width(360.0);
+            if rows > DETAIL_ROWS {
+                egui::ScrollArea::vertical().id_salt(id).max_height(DETAIL_HEIGHT).show(ui, add);
+            } else {
+                add(ui);
+            }
+        });
+    });
+}
+
+/// 결과 창 아래 버튼 줄. `copy`는 "복사"가 클립보드에 넣을 평문.
+fn buttons(ui: &mut egui::Ui, job: &OcrJob, reveal: &mut Option<PathBuf>, close: &mut bool, copy: String) {
+    ui.horizontal(|ui| {
+        if let Some((label, path)) = &job.reveal {
+            if ui.button(*label).clicked() {
+                *reveal = Some(path.clone());
+            }
+        }
+        if ui.button("복사").clicked() {
+            ui.output_mut(|o| o.copied_text = copy.clone());
+        }
+        if ui.button("닫기").clicked() {
+            *close = true;
+        }
+    });
 }
 
 fn show_job_window(ctx: &egui::Context, app: &mut PdfViewerApp) {
@@ -1303,29 +1409,40 @@ fn show_job_window(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     close = true;
                 }
             }
-            JobPhase::Finished(report) | JobPhase::Failed(report) => {
-                if matches!(job.phase, JobPhase::Failed(_)) {
-                    ui.colored_label(ui.visuals().error_fg_color, "실패했습니다. 원본 PDF는 바뀌지 않았습니다.");
-                    ui.add_space(4.0);
-                }
+            JobPhase::Failed(message) => {
+                ui.colored_label(ui.visuals().error_fg_color, "실패했습니다. 원본 PDF는 바뀌지 않았습니다.");
+                ui.add_space(4.0);
                 egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    // 첫 줄은 "무엇이 어떻게 됐다"는 결론이라 크게 적는다(2026-09-28 요청).
-                    let (head, rest) = report.split_once('\n').unwrap_or((report.as_str(), ""));
-                    ui.label(egui::RichText::new(head).size(HEADLINE_SIZE));
-                    if !rest.is_empty() {
-                        ui.add(egui::Label::new(rest).selectable(true));
-                    }
+                    ui.add(egui::Label::new(message.as_str()).selectable(true));
                 });
+                ui.add_space(8.0);
+                buttons(ui, job, &mut reveal, &mut close, message.clone());
+            }
+            JobPhase::Finished(report) => {
+                headline(ui, report.headline.clone());
+                for item in &report.items {
+                    ui.add_space(8.0); // 항목끼리 붙어 읽히지 않게(2026-09-29 요청)
+                    bullet(ui, item.line.clone());
+                    if !item.details.is_empty() {
+                        detail_box(ui, "ocr_detail", item.details.len(), |ui| {
+                            for line in &item.details {
+                                ui.label(line);
+                            }
+                        });
+                    }
+                }
                 if !job.marks.is_empty() {
-                    ui.add_space(6.0);
-                    ui.label("확인할 자리 — '보기'를 누르면 그 페이지에 빨간 테두리로 표시합니다(창은 끌어서 옮길 수 있음)");
-                    egui::ScrollArea::vertical().id_salt("ocr_marks").max_height(160.0).show(ui, |ui| {
-                        for mark in &job.marks {
+                    ui.add_space(8.0);
+                    bullet(ui, "아래 지점에서 빨간 테두리로 표시된 부분은 확인을 권장합니다.");
+                    let marks = job.marks.clone();
+                    detail_box(ui, "ocr_marks", marks.len(), |ui| {
+                        for mark in &marks {
                             ui.horizontal(|ui| {
                                 if ui.small_button("보기").clicked() {
                                     show_mark = Some(mark.clone());
                                 }
-                                let color = if mark.rolled_back { ui.visuals().error_fg_color } else { ui.visuals().warn_fg_color };
+                                let color =
+                                    if mark.rolled_back { ui.visuals().error_fg_color } else { ui.visuals().warn_fg_color };
                                 ui.colored_label(color, format!("p.{}", mark.page));
                                 ui.label(&mark.note);
                             });
@@ -1333,19 +1450,8 @@ fn show_job_window(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     });
                 }
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if let Some((label, path)) = &job.reveal {
-                        if ui.button(*label).clicked() {
-                            reveal = Some(path.clone());
-                        }
-                    }
-                    if ui.button("복사").clicked() {
-                        ui.output_mut(|o| o.copied_text = report.clone());
-                    }
-                    if ui.button("닫기").clicked() {
-                        close = true;
-                    }
-                });
+                let text = report.to_text();
+                buttons(ui, job, &mut reveal, &mut close, text);
             }
         });
     if let Some(path) = reveal {
@@ -1363,6 +1469,37 @@ fn show_job_window(ctx: &egui::Context, app: &mut PdfViewerApp) {
         if let Some(mut job) = app.ocr_job.take() {
             job.cancel();
         }
+    }
+}
+
+/// 취소하고 남은 임시 파일 정리(2026-09-29 요청).
+#[cfg(test)]
+mod leftover_temp_tests {
+    use super::*;
+
+    /// 폴더 일괄 삭제를 취소하면 그때 처리 중이던 파일의 `*.ocr_tmp.pdf`가 남는다(실제로 확인:
+    /// 2026-09-29, 세 파일 중 둘째를 처리하던 중 종료). 하위 폴더까지 훑어 지우고, 원본과
+    /// 백업은 건드리지 않아야 한다.
+    #[test]
+    fn only_ocr_temp_files_are_removed_including_subfolders() {
+        let root = std::env::temp_dir().join(format!("ocr_leftover_{}", std::process::id()));
+        let sub = root.join("하위");
+        std::fs::create_dir_all(&sub).unwrap();
+        let keep = [root.join("문서.pdf"), root.join("문서.pdf-20260929015017.backup"), sub.join("다른.pdf")];
+        let temps = [root.join("문서.ocr_tmp.pdf"), sub.join("다른.ocr_tmp.pdf")];
+        for path in keep.iter().chain(temps.iter()) {
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        remove_leftover_temps(&root);
+
+        for path in &temps {
+            assert!(!path.exists(), "임시 파일이 남았다: {}", path.display());
+        }
+        for path in &keep {
+            assert!(path.exists(), "지우면 안 되는 파일을 지웠다: {}", path.display());
+        }
+        std::fs::remove_dir_all(&root).ok();
     }
 }
 

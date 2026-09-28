@@ -676,6 +676,18 @@ fn run_folder_removal(
     let mut done_pages = 0usize;
 
     let mut report = BatchReport { total: files.len(), ..Default::default() };
+    let mut log = open_batch_log(folder);
+    report.log = log.as_ref().map(|(path, _)| path.to_string_lossy().to_string());
+    // 결과를 report에 담으면서 곧바로 CSV에도 한 줄 흘려 보낸다.
+    macro_rules! record {
+        ($entry:expr) => {{
+            let entry = $entry;
+            if let Some((_, file)) = log.as_mut() {
+                append_batch_log(file, &entry);
+            }
+            report.entries.push(entry);
+        }};
+    }
     for (index, file) in files.iter().enumerate() {
         let name = file.strip_prefix(folder).unwrap_or(file).to_string_lossy().to_string();
         let entry = BatchEntry::new(folder, file);
@@ -685,7 +697,7 @@ fn run_folder_removal(
 
         if skip.iter().any(|s| s == file) {
             let reason = "열려 있는 파일".to_string();
-            report.entries.push(entry.finish("건너뜀", None, reason.clone()));
+            record!(entry.finish("건너뜀", None, reason.clone()));
             report.skipped.push((name, reason));
             done_pages += file_pages;
             continue;
@@ -713,37 +725,36 @@ fn run_folder_removal(
             Err(err) => {
                 let _ = std::fs::remove_file(&temp);
                 let reason = format!("{err:#}");
-                report.entries.push(entry.finish("실패", None, reason.clone()));
+                record!(entry.finish("실패", None, reason.clone()));
                 report.failed.push((name, reason));
             }
             Ok(result) if result.nothing_to_do => {
                 // 지울 것이 없었다 = 보이지 않는 텍스트가 없었다(파일은 열어 봤으므로 단정할 수 있다).
-                report.entries.push(entry.finish("변경 없음", Some(false), String::new()));
+                record!(entry.finish("변경 없음", Some(false), String::new()));
                 report.unchanged.push(name);
             }
             Ok(result) => {
                 if let Err(err) = std::fs::copy(file, &backup) {
                     let _ = std::fs::remove_file(&temp);
                     let reason = format!("백업 실패({err}) — 원본 그대로");
-                    report.entries.push(entry.finish("실패", Some(true), reason.clone()));
+                    record!(entry.finish("실패", Some(true), reason.clone()));
                     report.failed.push((name, reason));
                     continue;
                 }
                 if let Err(err) = std::fs::rename(&temp, file) {
                     let _ = std::fs::remove_file(&temp);
                     let reason = format!("교체 실패({err}) — 원본 그대로");
-                    report.entries.push(entry.finish("실패", Some(true), reason.clone()));
+                    record!(entry.finish("실패", Some(true), reason.clone()));
                     report.failed.push((name, reason));
                     continue;
                 }
                 let removed = result.analysis.counts.removed();
-                report.entries.push(entry.finish("성공", Some(true), String::new()));
+                record!(entry.finish("성공", Some(true), String::new()));
                 report.changed.push((name, result.pages_changed, removed));
             }
         }
     }
     emit(Event::Progress { done: total_pages, total: total_pages });
-    report.log = write_batch_log(folder, &report).map(|p| p.to_string_lossy().to_string());
     Ok(report)
 }
 
@@ -774,28 +785,36 @@ fn collect_pdfs(dir: &Path, out: &mut Vec<PathBuf>) {
 ///
 /// 순서는 **처리한 순서**(폴더 탐색 순서)다. 결과별로 묶어 적던 예전 방식과 달리, 중간에 멈춘
 /// 작업도 어디까지 됐는지 그대로 읽힌다.
-fn write_batch_log(folder: &Path, report: &BatchReport) -> Option<PathBuf> {
+/// CSV 로그를 열고 머리글을 쓴다. **파일 하나를 끝낼 때마다 한 줄씩 이어 쓴다**(2026-09-29 요청)
+/// — 예전에는 작업이 다 끝난 뒤 한 번에 썼기 때문에, 도중에 취소하면 어디까지 처리됐는지 남는
+/// 기록이 하나도 없었다.
+fn open_batch_log(folder: &Path) -> Option<(PathBuf, std::fs::File)> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let path = folder.join(format!("ocr-remove-{stamp}.csv"));
-    let mut text =
-        String::from("\u{feff}경로,파일명,OCR 유무,실행결과,처리완료시간,비고\n");
+    let mut file = std::fs::File::create(&path).ok()?;
+    // UTF-8 BOM — Excel이 한글을 제대로 읽게.
+    file.write_all("\u{feff}경로,파일명,OCR 유무,실행결과,처리완료시간,비고\n".as_bytes()).ok()?;
+    Some((path, file))
+}
+
+/// 파일 하나의 결과를 CSV에 이어 쓰고 곧바로 디스크에 내린다(취소·크래시에도 남게).
+fn append_batch_log(file: &mut std::fs::File, e: &BatchEntry) {
     let escape = |value: &str| format!("\"{}\"", value.replace('"', "\"\""));
-    for e in &report.entries {
-        let had_ocr = match e.had_ocr {
-            Some(true) => "있음",
-            Some(false) => "없음",
-            None => "알 수 없음",
-        };
-        text.push_str(&format!(
-            "{},{},{had_ocr},{},{},{}\n",
-            escape(&e.folder),
-            escape(&e.name),
-            e.outcome,
-            e.finished_at,
-            escape(&e.note),
-        ));
-    }
-    std::fs::write(&path, text).ok().map(|_| path)
+    let had_ocr = match e.had_ocr {
+        Some(true) => "있음",
+        Some(false) => "없음",
+        None => "알 수 없음",
+    };
+    let row = format!(
+        "{},{},{had_ocr},{},{},{}\n",
+        escape(&e.folder),
+        escape(&e.name),
+        e.outcome,
+        e.finished_at,
+        escape(&e.note),
+    );
+    let _ = file.write_all(row.as_bytes());
+    let _ = file.flush();
 }
 
 /// 페이지들(0부터)을 원본과 비교해 실패한 (페이지, 이유) 목록. `expected_layer`에 든 페이지는

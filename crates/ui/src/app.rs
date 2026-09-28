@@ -2242,6 +2242,25 @@ pub(crate) fn has_backup(file: &Path) -> bool {
     })
 }
 
+/// 사용자가 답해야 하는 창이 떠 있는지. 떠 있는 동안 툴바 메뉴를 잠가, 그 창을 두고 다른 기능을
+/// 골라 **시스템 다이얼로그가 겹쳐 뜨는 것**을 막는다(2026-09-29 리포트: "Excel로 내보내기" 알림
+/// 창을 띄운 채 "OCR 가져오기"를 고르면 파일 선택 창이 또 떴다).
+pub(crate) fn modal_open(app: &PdfViewerApp) -> bool {
+    app.saved_file_notice.is_some()
+        || app.ocr_job.is_some()
+        || app.ocr_needs_save.is_some()
+        || app.ocr_export_dialog.is_some()
+        || app.ocr_removal_confirm.is_some()
+        || app.ocr_import_dialog.is_some()
+        || app.batch_import.is_some()
+        || app.pending_open_path.is_some()
+        || app.pending_recovery.is_some()
+        || app.quit_confirmation_pending
+        || app.clear_bookmarks_pending
+        || app.rename_input.is_some()
+        || app.search_no_results
+}
+
 /// 팝업창을 Esc로 닫는다 — 눌렸으면 **소비**해서 다음 창이 같은 Esc로 함께 닫히지 않게 한다
 /// (창은 위에서 아래로 검사하므로 먼저 검사한 창이 받는다). 사용자 요청 2026-09-27.
 ///

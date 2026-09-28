@@ -380,6 +380,22 @@ fn finish(job: &mut BatchImportJob) {
     });
 }
 
+/// 목록을 들여쓰고 박스로 묶어 위 문장과 구분한다. 줄이 많으면 스크롤한다(2026-09-29 요청 —
+/// OCR 결과 창의 상세 목록과 같은 모양).
+fn list_box(ui: &mut egui::Ui, id: &str, rows: usize, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_min_width(420.0);
+            if rows > 6 {
+                egui::ScrollArea::vertical().id_salt(id).max_height(150.0).show(ui, add);
+            } else {
+                add(ui);
+            }
+        });
+    });
+}
+
 /// 뷰어 영역(CentralPanel 내부)에 그리는 일괄 처리 화면 — 잡이 존재하는 동안
 /// viewer_panel::show가 문서 대신 이걸 그린다(스펙 1순위안: 뷰어 영역을 로그 뷰로 전환).
 pub fn show_panel(ui: &mut egui::Ui, app: &mut crate::app::PdfViewerApp) {
@@ -387,91 +403,119 @@ pub fn show_panel(ui: &mut egui::Ui, app: &mut crate::app::PdfViewerApp) {
         return;
     };
 
-    ui.heading(match job.phase {
-        JobPhase::Finished => "폴더 내 모든 PDF의 북마크를 내보냈습니다.",
-        _ => "폴더 내 모든 PDF에 북마크 내보내기",
-    });
-    ui.add_space(6.0);
-    ui.label(format!("대상 폴더: {}", job.folder.to_string_lossy().nfc().collect::<String>()));
-    // 자동 인식된 북마크 파일들 — 어떤 파일이 어떤 순서로 적용되는지 사용자가 확인
-    // 화면에서 바로 볼 수 있어야 한다(선택 다이얼로그가 없으므로 여기가 유일한 안내).
-    ui.label(format!("자동 인식된 북마크 파일 {}개 (xlsx → csv 순으로 적용):", job.sheet_files.len()));
-    for sheet in &job.sheet_files {
-        ui.label(format!("    • {}", rel_display(sheet, &job.folder)));
-    }
-    for note in &job.setup_notes {
-        ui.colored_label(ui.visuals().warn_fg_color, note);
-    }
-    ui.add_space(6.0);
-
     let mut close = false;
-    match job.phase {
-        JobPhase::AwaitingConfirmation => {
-            ui.label(format!(
-                "발견된 PDF {}개 — 그중 파일명이 일치하는 행이 있는 파일 {}개",
-                job.files.len(),
-                job.matched_count
-            ));
-            ui.label("각 원본은 같은 자리에 '파일명.pdf-실행시각.backup'으로 보존됩니다(실행마다 따로 남습니다).");
+    // 버튼 줄은 스크롤과 무관하게 아래에 고정한다 — 내용이 창을 넘치면 시작·취소 버튼이 화면
+    // 밖으로 밀려 아예 누를 수 없었다(2026-09-29 리포트).
+    egui::TopBottomPanel::bottom("batch_import_actions").show_inside(ui, |ui| {
+        ui.add_space(6.0);
+        match job.phase {
+            JobPhase::AwaitingConfirmation => {
+                ui.horizontal(|ui| {
+                    if ui.button("시작").clicked() {
+                        job.started_at = chrono::Local::now();
+                        job.phase = JobPhase::Running;
+                    }
+                    if ui.button("취소").clicked() {
+                        close = true;
+                    }
+                });
+            }
+            JobPhase::Running => {
+                let done = job.next_index.min(job.files.len());
+                ui.label(format!("처리 중… ({done}/{})", job.files.len()));
+                ui.add(egui::ProgressBar::new(done as f32 / job.files.len().max(1) as f32).show_percentage());
+            }
+            JobPhase::Finished => {
+                // 배치 전에 보던 문서가 있으면 그 자리로 복귀하는 버튼(2026-07-19 요청),
+                // 없으면 그냥 닫기 — 실제 복귀 처리는 아래 close 블록에서.
+                let label = if job.return_to.is_some() { "되돌아가기" } else { "닫기" };
+                if ui.button(label).clicked() {
+                    close = true;
+                }
+            }
+        }
+        ui.add_space(6.0);
+    });
+
+    // 나머지는 전부 한 스크롤 안에 둔다 — 창을 줄여도 읽을 수 있어야 한다(2026-09-29 요청).
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.heading(match job.phase {
+            JobPhase::Finished => "폴더 내 모든 PDF의 북마크를 내보냈습니다.",
+            _ => "폴더 내 모든 PDF에 북마크 내보내기",
+        });
+        ui.add_space(6.0);
+        ui.label(format!("대상 폴더: {}", job.folder.to_string_lossy().nfc().collect::<String>()));
+        // "파일명이 일치하는 행" 한마디로는 무엇과 무엇이 맞는다는 것인지 읽히지 않았다
+        // (2026-09-29 지적). 북마크 파일의 '파일명' 열과 폴더의 PDF 이름이 맞는 것을 말한다.
+        ui.label(format!(
+            "폴더에서 찾은 PDF {}개 — 이 중 북마크 파일의 '파일명' 열과 이름이 맞는 {}개에 북마크를 넣습니다.",
+            job.files.len(),
+            job.matched_count
+        ));
+        if matches!(job.phase, JobPhase::AwaitingConfirmation) {
+            ui.label("각 원본은 같은 자리에 '파일명.pdf-실행시각.backup'으로 보존됩니다.");
             if job.matched_count == 0 {
                 ui.colored_label(
                     ui.visuals().warn_fg_color,
                     "일치하는 파일명이 하나도 없습니다 — 시작하면 전부 건너뜁니다.",
                 );
             }
+        }
+
+        // 자동 인식된 북마크 파일들 — 어떤 파일이 어떤 순서로 적용되는지 사용자가 확인
+        // 화면에서 바로 볼 수 있어야 한다(선택 다이얼로그가 없으므로 여기가 유일한 안내).
+        ui.add_space(8.0);
+        ui.label(format!("자동 인식된 북마크 파일 {}개 (xlsx → csv 순으로 적용)", job.sheet_files.len()));
+        let sheets: Vec<String> = job.sheet_files.iter().map(|s| rel_display(s, &job.folder)).collect();
+        list_box(ui, "batch_sheets", sheets.len(), |ui| {
+            for sheet in &sheets {
+                ui.label(sheet);
+            }
+        });
+
+        if !job.setup_notes.is_empty() {
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("시작").clicked() {
-                    job.started_at = chrono::Local::now();
-                    job.phase = JobPhase::Running;
-                }
-                if ui.button("취소").clicked() {
-                    close = true;
+            ui.label("사전알림");
+            let notes = job.setup_notes.clone();
+            list_box(ui, "batch_notes", notes.len(), |ui| {
+                for note in &notes {
+                    ui.colored_label(ui.visuals().warn_fg_color, note);
                 }
             });
         }
-        JobPhase::Running => {
-            let done = job.next_index.min(job.files.len());
-            ui.label(format!("처리 중… ({done}/{})", job.files.len()));
-            ui.add(egui::ProgressBar::new(done as f32 / job.files.len().max(1) as f32).show_percentage());
-        }
-        JobPhase::Finished => {
-            let stats = job.stats();
-            ui.strong(format!("완료 — {}", stats_line(&stats)));
+
+        if matches!(job.phase, JobPhase::Finished) {
+            ui.add_space(8.0);
+            ui.strong(format!("완료 — {}", stats_line(&job.stats())));
             if let Some(note) = &job.log_file_note {
                 ui.label(note.clone());
             }
-            ui.add_space(8.0);
-            // 배치 전에 보던 문서가 있으면 그 자리로 복귀하는 버튼(2026-07-19 요청),
-            // 없으면 그냥 닫기 — 실제 복귀 처리는 아래 close 블록에서.
-            let label = if job.return_to.is_some() { "되돌아가기" } else { "닫기" };
-            if ui.button(label).clicked() {
-                close = true;
-            }
         }
-    }
 
-    // 실시간 로그: 처리된 파일부터 차례로 쌓이고, 진행 중엔 바닥에 붙어 따라 내려간다.
-    if !job.log.is_empty() {
-        ui.add_space(8.0);
-        ui.separator();
-        egui::ScrollArea::vertical()
-            .stick_to_bottom(job.is_running())
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for entry in &job.log {
-                    let color = match entry.outcome {
-                        FileOutcome::Success { .. } => egui::Color32::from_rgb(0x2e, 0x7d, 0x32),
-                        FileOutcome::Failed(_) => ui.visuals().error_fg_color,
-                        _ => ui.visuals().weak_text_color(),
-                    };
-                    ui.colored_label(
-                        color,
-                        format!("[{}] {} — {}", entry.outcome.label(), entry.rel_path, entry.outcome.detail()),
-                    );
-                }
-            });
-    }
+        // 실시간 로그: 처리된 파일부터 차례로 쌓이고, 진행 중엔 바닥에 붙어 따라 내려간다.
+        if !job.log.is_empty() {
+            ui.add_space(8.0);
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("batch_log")
+                .stick_to_bottom(job.is_running())
+                .max_height(320.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for entry in &job.log {
+                        let color = match entry.outcome {
+                            FileOutcome::Success { .. } => egui::Color32::from_rgb(0x2e, 0x7d, 0x32),
+                            FileOutcome::Failed(_) => ui.visuals().error_fg_color,
+                            _ => ui.visuals().weak_text_color(),
+                        };
+                        ui.colored_label(
+                            color,
+                            format!("[{}] {} — {}", entry.outcome.label(), entry.rel_path, entry.outcome.detail()),
+                        );
+                    }
+                });
+        }
+    });
 
     if close {
         let return_to = app.batch_import.take().and_then(|job| job.return_to);

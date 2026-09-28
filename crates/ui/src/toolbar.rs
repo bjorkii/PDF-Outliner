@@ -200,11 +200,14 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
             let has_file = app.current_file.is_some();
-            let ocr_busy = app.ocr_job.as_ref().is_some_and(|j| j.is_running());
+            // 답해야 하는 창이 떠 있으면 메뉴를 잠근다 — 그 창을 두고 다른 기능을 고르면 시스템
+            // 다이얼로그가 겹쳐 떴다(2026-09-29 리포트).
+            let free = !crate::app::modal_open(app);
+            let has_file = has_file && free;
             let m = modifier_label();
 
             // ---- 파일
-            hover_menu(ui, "file", "파일", true, RECENT_FILE_WIDTH, |ui| {
+            hover_menu(ui, "file", "파일", free, RECENT_FILE_WIDTH, |ui| {
                 if menu_item(ui, "파일 열기…", true, "") {
                     if let Some(path) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).pick_file() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -225,9 +228,10 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             });
 
             // ---- 북마크
-            hover_menu(ui, "bookmark", "북마크", true, MENU_WIDTH, |ui| {
+            hover_menu(ui, "bookmark", "북마크", free, MENU_WIDTH, |ui| {
                 if menu_item(ui, "CSV로 내보내기…", true, "") {
                     if let Some(path) = rfd::FileDialog::new()
+                        .set_title("북마크를 저장할 CSV 파일 지정")
                         .add_filter("CSV", &["csv"])
                         .set_file_name(app.export_default_filename("csv"))
                         .save_file()
@@ -237,6 +241,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 }
                 if menu_item(ui, "Excel로 내보내기…", true, "") {
                     if let Some(path) = rfd::FileDialog::new()
+                        .set_title("북마크를 내보낼 엑셀 파일 지정")
                         .add_filter("Excel", &["xlsx"])
                         .set_file_name(app.export_default_filename("xlsx"))
                         .save_file()
@@ -246,12 +251,20 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 }
                 ui.separator();
                 if menu_item(ui, "CSV에서 가져오기…", true, "") {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).pick_file() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("북마크를 가져올 CSV 파일 선택")
+                        .add_filter("CSV", &["csv"])
+                        .pick_file()
+                    {
                         app.import_bookmarks_csv(path);
                     }
                 }
                 if menu_item(ui, "Excel에서 가져오기…", true, "") {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("Excel", &["xlsx"]).pick_file() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("북마크를 가져올 엑셀 파일 선택")
+                        .add_filter("Excel", &["xlsx"])
+                        .pick_file()
+                    {
                         app.import_bookmarks_xlsx(path);
                     }
                 }
@@ -279,7 +292,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             });
 
             // ---- OCR (planning/ocr_feature_considerations.md)
-            hover_menu(ui, "ocr", "OCR", !ocr_busy, MENU_WIDTH, |ui| {
+            hover_menu(ui, "ocr", "OCR", free, MENU_WIDTH, |ui| {
                 if menu_item(ui, "전체 삭제…", has_file, "보이지 않는 텍스트(OCR 레이어)를 모두 지웁니다. 원본파일은 백업됩니다.") {
                     crate::ocr_dialogs::request_removal(ui.ctx(), app);
                 }
