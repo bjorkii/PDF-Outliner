@@ -639,16 +639,6 @@ enum Field {
     PdfLast,
 }
 
-fn kind_label(kind: PageKind) -> &'static str {
-    match kind {
-        PageKind::NoText => "텍스트 없음",
-        PageKind::ExistingOcrOnly => "기존 OCR만 있음",
-        PageKind::ScanWithExtras => "스캔 + 부가 텍스트",
-        PageKind::Digital => "디지털 페이지",
-        PageKind::Undetermined => "판단 불가",
-    }
-}
-
 fn has_existing(info: &PdfPageInfo) -> bool {
     info.existing_ocr || info.own_layer
 }
@@ -898,13 +888,8 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 }
             }
 
-            ui.add_space(6.0);
-            let mut counts = std::collections::BTreeMap::new();
-            for (index, _) in &mapped {
-                *counts.entry(kind_label(dialog.analysis.pdf_pages[*index].kind)).or_insert(0usize) += 1;
-            }
-            ui.weak(counts.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(" · "));
-
+            // 페이지 분류별 개수는 적지 않는다(2026-09-28 결정) — 분류 이름을 알아도 사용자가
+            // 할 일이 없다. 대신 아래에 "빠지는 페이지"만 이유별로 센다.
             ui.add_space(6.0);
             ui.checkbox(&mut dialog.overwrite_existing, "OCR이 있는 페이지는 덮어씌움").on_hover_text(
                 "보이지 않는 텍스트가 이미 있는 페이지는 그것을 지우고 새 OCR을 넣습니다. \
