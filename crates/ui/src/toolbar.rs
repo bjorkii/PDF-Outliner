@@ -209,7 +209,11 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             // ---- 파일
             hover_menu(ui, "file", "파일", free, RECENT_FILE_WIDTH, |ui| {
                 if menu_item(ui, "파일 열기…", true, "") {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).pick_file() {
+                    if let Some(path) = crate::file_dialog::Dialog::new("열려는 PDF 파일 선택")
+                        .prompt("열기")
+                        .filter("PDF", &["pdf"])
+                        .pick_file()
+                    {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
                         app.request_open_file(path);
                     }
@@ -230,41 +234,45 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             // ---- 북마크
             hover_menu(ui, "bookmark", "북마크", free, MENU_WIDTH, |ui| {
                 if menu_item(ui, "CSV로 내보내기…", true, "") {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .set_title("북마크를 저장할 CSV 파일 지정")
-                        .add_filter("CSV", &["csv"])
-                        .set_file_name(app.export_default_filename("csv"))
+                    if let Some(path) = crate::file_dialog::Dialog::new("북마크를 저장할 CSV 파일 지정")
+                        .prompt("내보내기")
+                        .filter("CSV", &["csv"])
+                        .file_name(app.export_default_filename("csv"))
                         .save_file()
                     {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
                         app.export_bookmarks_csv(path);
                     }
                 }
                 if menu_item(ui, "Excel로 내보내기…", true, "") {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .set_title("북마크를 내보낼 엑셀 파일 지정")
-                        .add_filter("Excel", &["xlsx"])
-                        .set_file_name(app.export_default_filename("xlsx"))
+                    if let Some(path) = crate::file_dialog::Dialog::new("북마크를 내보낼 엑셀 파일 지정")
+                        .prompt("내보내기")
+                        .filter("Excel", &["xlsx"])
+                        .file_name(app.export_default_filename("xlsx"))
                         .save_file()
                     {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
                         app.export_bookmarks_xlsx(path);
                     }
                 }
                 ui.separator();
                 if menu_item(ui, "CSV에서 가져오기…", true, "") {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .set_title("북마크를 가져올 CSV 파일 선택")
-                        .add_filter("CSV", &["csv"])
+                    if let Some(path) = crate::file_dialog::Dialog::new("북마크를 가져올 CSV 파일 선택")
+                        .prompt("가져오기")
+                        .filter("CSV", &["csv"])
                         .pick_file()
                     {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
                         app.import_bookmarks_csv(path);
                     }
                 }
                 if menu_item(ui, "Excel에서 가져오기…", true, "") {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .set_title("북마크를 가져올 엑셀 파일 선택")
-                        .add_filter("Excel", &["xlsx"])
+                    if let Some(path) = crate::file_dialog::Dialog::new("북마크를 가져올 엑셀 파일 선택")
+                        .prompt("가져오기")
+                        .filter("Excel", &["xlsx"])
                         .pick_file()
                     {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
                         app.import_bookmarks_xlsx(path);
                     }
                 }
@@ -279,7 +287,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     "폴더 안 모든 PDF에 북마크 파일(CSV/Excel)을 적용 — 원본은 .backup으로 보존",
                 ) {
                     if let Some(folder) =
-                        rfd::FileDialog::new().set_title("일괄 적용할 PDF 폴더 선택").pick_folder()
+                        crate::file_dialog::Dialog::new("북마크를 넣을 PDF가 담긴 폴더 선택").prompt("선택").pick_folder()
                     {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
                         app.start_batch_import(folder);
@@ -328,11 +336,13 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     .as_ref()
                     .map(|p| crate::app::display_filename(p))
                     .unwrap_or_else(|| "document.pdf".to_string());
-                if let Some(new_path) = rfd::FileDialog::new()
-                    .add_filter("PDF", &["pdf"])
-                    .set_file_name(&default_name)
+                if let Some(new_path) = crate::file_dialog::Dialog::new("북마크를 저장할 PDF 파일 지정")
+                    .prompt("저장")
+                    .filter("PDF", &["pdf"])
+                    .file_name(&default_name)
                     .save_file()
                 {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
                     app.save_bookmarks_as(new_path);
                 }
             }

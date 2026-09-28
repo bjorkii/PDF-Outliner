@@ -12,6 +12,7 @@ mod app;
 mod autosave;
 mod batch_import;
 mod crash_log;
+mod file_dialog;
 mod file_watch;
 mod fonts;
 #[cfg(target_os = "macos")]
@@ -112,6 +113,7 @@ fn main() -> eframe::Result<()> {
         native_options,
         Box::new(move |cc| {
             fonts::install_korean_font(&cc.egui_ctx);
+            fonts::install_style(&cc.egui_ctx);
             let mut app = PdfViewerApp::new(cc);
             // CLI 인자(더블클릭으로 특정 파일 열기)가 명시적으로 주어졌으면 그게 우선,
             // 없으면 지난 실행에서 열려있던 파일을 자동으로 이어서 연다.

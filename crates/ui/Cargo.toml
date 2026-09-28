@@ -45,3 +45,16 @@ winres = "0.1"
 # 패치된 winit을 쓰므로 버전만 맞추면 같은 인스턴스로 유니파이된다.
 [target.'cfg(target_os = "macos")'.dependencies]
 winit = "0.30"
+# 파일·폴더 선택 창을 직접 띄우기 위함(file_dialog.rs) — rfd의 macOS 백엔드는 창 제목을
+# 바꾸지 못하고 안내 줄만 붙인다. Windows·Linux는 그대로 rfd를 쓴다. 버전은 rfd 0.15가 쓰는
+# 것과 맞춰 같은 인스턴스로 유니파이된다.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSOpenPanel",
+    "NSPanel",
+    "NSResponder",
+    "NSSavePanel",
+    "NSWindow",
+] }

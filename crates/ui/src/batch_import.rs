@@ -207,7 +207,7 @@ pub fn prepare_job(folder: PathBuf) -> Result<BatchImportJob, String> {
 
     if !absent.is_empty() {
         setup_notes.push(format!(
-            "[무시] 폴더에 없는 PDF를 가리키는 행이 있습니다 — 파일명 {}종: {}",
+            "[무시] 폴더에 없는 PDF {}개에 대한 북마크 정보가 있습니다: {}",
             absent.len(),
             absent.iter().cloned().collect::<Vec<_>>().join(", ")
         ));

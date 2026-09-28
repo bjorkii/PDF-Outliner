@@ -210,10 +210,6 @@ pub struct RemovalConfirm {
 }
 
 impl OcrJob {
-    pub fn is_running(&self) -> bool {
-        matches!(self.phase, JobPhase::Running { .. })
-    }
-
     fn cancel(&mut self) {
         if let Some(mut worker) = self.worker.take() {
             worker.kill();
@@ -390,7 +386,7 @@ fn describe_batch(r: &crate::ocr_worker::BatchReport) -> Report {
 
 /// 메뉴 "폴더 일괄 삭제…" — 폴더를 고르면 바로 시작한다(파일마다 백업 후 교체).
 pub fn request_folder_removal(ctx: &egui::Context, app: &mut PdfViewerApp) {
-    let folder = rfd::FileDialog::new().set_title("OCR을 지울 PDF가 담긴 폴더를 선택하세요.").pick_folder();
+    let folder = crate::file_dialog::Dialog::new("OCR을 지울 PDF가 담긴 폴더 선택").prompt("선택").pick_folder();
     focus_window(ctx);
     let Some(folder) = folder else { return };
     let job = Job::RemoveFolder {
@@ -656,9 +652,9 @@ pub fn request_import(ctx: &egui::Context, app: &mut PdfViewerApp) {
         app.status_message = Some("원본 PDF를 찾을 수 없습니다(이름이 바뀌었거나 이동/삭제됨).".to_string());
         return;
     }
-    let files = rfd::FileDialog::new()
-        .set_title("가져올 hOCR 파일을 선택하세요. 복수 선택도 가능합니다.")
-        .add_filter("hOCR", &["hocr", "html", "htm", "xhtml"])
+    let files = crate::file_dialog::Dialog::new("가져올 hOCR 파일 선택(여러 개 고를 수 있음)")
+        .prompt("가져오기")
+        .filter("hOCR", &["hocr", "html", "htm", "xhtml"])
         .pick_files();
     focus_window(ctx);
     let Some(mut files) = files else { return };
@@ -1250,11 +1246,12 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
             .and_then(Path::file_stem)
             .map(|s| format!("{}.{extension}", crate::app::display_filename(Path::new(s))))
             .unwrap_or_else(|| format!("ocr.{extension}"));
-        let mut file_dialog =
-            rfd::FileDialog::new().set_title("OCR을 내보낼 위치를 지정하세요.").set_file_name(&default_name);
-        file_dialog = match extension {
-            "hocr" => file_dialog.add_filter("hOCR", &["hocr", "html"]),
-            _ => file_dialog.add_filter("텍스트", &["txt"]),
+        let file_dialog = crate::file_dialog::Dialog::new("OCR 텍스트를 저장할 파일 지정")
+            .prompt("내보내기")
+            .file_name(&default_name);
+        let file_dialog = match extension {
+            "hocr" => file_dialog.filter("hOCR", &["hocr", "html"]),
+            _ => file_dialog.filter("텍스트", &["txt"]),
         };
         let output = file_dialog.save_file();
         focus_window(ctx);
@@ -1366,19 +1363,37 @@ pub(crate) fn indented_box(
     max_height: f32,
     add: impl FnOnce(&mut egui::Ui),
 ) {
-    let width = (ui.available_width() - indent).max(120.0);
-    ui.indent(id, |ui| {
-        ui.set_max_width(width);
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
+    /// 왼쪽 세로선 두께와 그 선에서 글까지 띄울 폭.
+    const BAR: f32 = 3.0;
+    const GAP: f32 = 10.0;
+    // `ui.indent`는 쓰지 않는다 — egui가 옅은 세로선을 하나 더 그려서, 테두리까지 겹치면
+    // 선이 둘이 된다(2026-09-29 리포트: "정신이 없다").
+    let width = (ui.available_width() - indent - GAP).max(120.0);
+    let inner = egui::Frame::none()
+        .outer_margin(egui::Margin { left: indent, top: 2.0, bottom: 2.0, right: 0.0 })
+        .inner_margin(egui::Margin { left: GAP, right: 0.0, top: 2.0, bottom: 2.0 })
+        .show(ui, |ui| {
+            ui.set_width(width);
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             if scroll {
-                egui::ScrollArea::vertical().id_salt(id).max_height(max_height).show(ui, add);
+                // auto_shrink를 끄지 않으면 스크롤바가 내용 폭에 붙어 영역 가운데에 생긴다
+                // (2026-09-29 리포트).
+                egui::ScrollArea::vertical()
+                    .id_salt(id)
+                    .max_height(max_height)
+                    .auto_shrink([false, false])
+                    .show(ui, add);
             } else {
                 add(ui);
             }
         });
-    });
+    // 테두리 대신 왼쪽에 두꺼운 세로선 하나만 둔다.
+    let rect = inner.response.rect;
+    ui.painter().rect_filled(
+        egui::Rect::from_min_size(rect.left_top(), egui::vec2(BAR, rect.height())),
+        1.0,
+        note_color(ui).gamma_multiply(0.7),
+    );
 }
 
 /// 결과 창 아래 버튼 줄. `copy`는 "복사"가 클립보드에 넣을 평문.
