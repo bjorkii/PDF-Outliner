@@ -19,7 +19,7 @@
 //! 고친 결과 아무것도 그리지 않게 된 Form은 내용을 비우고 `/Resources`를 떼어, 거기서만 쓰던
 //! OCR 폰트가 저장 때 정리되게 한다.
 
-use crate::classify::{classify, covered_by_image, is_show_operator, HiddenKind, PageFacts, Verdict};
+use crate::classify::{classify, covered_by_image, is_show_operator, overlaps_image, HiddenKind, PageFacts, Verdict};
 use crate::content::interp::{interpret_page, resource_entry, Context, GraphicsState, Problem, Source, Visitor, XObjectKind};
 use crate::optional_content::OptionalContent;
 use crate::content::lexer::{tokenize, Operation};
@@ -228,9 +228,42 @@ struct Collector<'a> {
     fonts: HashMap<ObjectId, Option<FontMetrics>>,
     /// 페이지 전체에서 연산자가 실행된 순서.
     order: usize,
-    /// 그려진 이미지: (순서, 사용자 공간 사각형, 불투명 여부).
+    /// 그려진 이미지: (순서, 사용자 공간 사각형, 불투명 여부). `UnderImage`(H) 판정용이라
+    /// **여태 그려진 것만** 담긴다(순서를 봐야 하기 때문).
     images: Vec<(usize, [f64; 4], bool)>,
+    /// 페이지의 **모든** 이미지 상자 — 사전 패스에서 미리 모은다(→ `ImageBoxes`).
+    /// OCR 텍스트 판정에 쓴다(그리는 순서와 무관하게 "그 자리에 스캔이 있는가").
+    scans: Vec<(usize, [f64; 4], bool)>,
     pending: Vec<PendingShow>,
+}
+
+/// **사전 패스** — 페이지의 이미지 상자만 모은다.
+///
+/// OCR 텍스트 판정("이미지 영역 안이거나 걸친 `3 Tr`")에는 **페이지의 모든 이미지**가 필요하다.
+/// 실측(KKZ000160_01.pdf 등)에서 OCR 텍스트 Form이 스캔 이미지보다 **먼저** 그려지는 것을
+/// 확인했다 — 스캔이 그 위를 덮는 구성이다. 그래서 "여태 그려진 이미지"만 보면 OCR을 통째로
+/// 놓친다(9302건 → 0건이 되는 것을 실측으로 확인).
+///
+/// 판정을 페이지 끝으로 미루는 방법도 있지만, 그러면 지우기·`mark_painted`·빈 블록 정리가 얽힌
+/// 섬세한 흐름을 고쳐야 한다. 페이지를 한 번 더 읽는 편이 훨씬 안전하다 — 해석기는 렌더링 없이
+/// lopdf만 쓰므로 비용이 작고, 검증 단계의 렌더 비교가 어차피 시간을 지배한다.
+#[derive(Default)]
+struct ImageBoxes {
+    /// (순서, 사용자 공간 사각형, 불투명 여부) — `Collector::images`와 같은 모양.
+    images: Vec<(usize, [f64; 4], bool)>,
+    order: usize,
+}
+
+impl Visitor for ImageBoxes {
+    fn operation(&mut self, _context: &Context, _index: usize, _op: &Operation) {
+        self.order += 1;
+    }
+
+    fn xobject(&mut self, context: &Context, _name: &[u8], _id: Option<ObjectId>, kind: &XObjectKind) {
+        if matches!(kind, XObjectKind::Image { .. }) {
+            self.images.push((self.order, Collector::image_box(context.state), true));
+        }
+    }
 }
 
 impl Collector<'_> {
@@ -300,6 +333,18 @@ impl Collector<'_> {
         corners.iter().fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b, (x, y)| {
             [b[0].min(*x), b[1].min(*y), b[2].max(*x), b[3].max(*y)]
         })
+    }
+
+    /// 이 표시 연산자가 스캔 이미지 위에 있는지 — OCR 텍스트 판정(→ `classify::overlaps_image`).
+    ///
+    /// 글자 상자를 구하지 못한 경우(폰트 정보를 읽을 수 없는 등)에는 **페이지에 이미지가 있는지**로
+    /// 대신 본다. 모른다는 이유로 OCR 텍스트를 놓치는 쪽이 더 나쁘기 때문이다 — 글자 상자를 못
+    /// 구하는 파일은 그대로 "처리할 수 없는 페이지"로 보고되어 사용자가 알게 된다.
+    fn on_scan(&self, context: &Context) -> bool {
+        match context.show {
+            Some(show) => overlaps_image(&show.bbox, &self.scans),
+            None => !self.scans.is_empty(),
+        }
     }
 
     fn record(&mut self, kind: HiddenKind, index: usize, removal: Removal) {
@@ -391,6 +436,11 @@ impl Visitor for Collector<'_> {
         };
         match verdict {
             Verdict::Keep => {}
+            // `3 Tr`은 그 자리에 스캔 이미지가 있을 때만 OCR 텍스트로 본다(→ `overlaps_image`).
+            // 이미지와 무관한 `3 Tr`은 OCR이 만든 것이 아니므로 남긴다.
+            Verdict::Hidden(HiddenKind::InvisibleMode) if !self.on_scan(context) => {
+                self.mark_painted(frame_index); // 남는 글자라 블록이 비지 않는다
+            }
             Verdict::Hidden(kind) => self.record(kind, index, removal),
             Verdict::MaybeUnderImage => {
                 // 이미지가 나중에 덮는지는 페이지를 다 읽은 뒤에 판정한다. 그때까지는 남는
@@ -564,6 +614,11 @@ pub fn plan_for(doc: &Document, only: Option<&BTreeSet<usize>>, mode: Mode) -> R
         let crop = crate::geometry::PageFrame::from_page(doc, page_id)
             .map(|f| [f.crop.llx, f.crop.lly, f.crop.urx, f.crop.ury])
             .unwrap_or([f64::MIN / 4.0, f64::MIN / 4.0, f64::MAX / 4.0, f64::MAX / 4.0]);
+        // 이미지 상자를 먼저 모은다(→ `ImageBoxes`). 실패하면 빈 목록으로 두고 넘어간다 —
+        // 본 패스가 같은 오류를 만나 "처리할 수 없는 페이지"로 보고한다.
+        let mut prepass = ImageBoxes::default();
+        let _ = interpret_page(doc, page_id, &mut prepass);
+        let scans = prepass.images;
         let mut collector = Collector {
             doc,
             mode,
@@ -576,6 +631,7 @@ pub fn plan_for(doc: &Document, only: Option<&BTreeSet<usize>>, mode: Mode) -> R
             fonts: HashMap::new(),
             order: 0,
             images: Vec::new(),
+            scans,
             pending: Vec::new(),
         };
         if let Err(problem) = interpret_page(doc, page_id, &mut collector) {
@@ -971,8 +1027,22 @@ mod tests {
         resources.set("Font", dictionary! { "F1" => font });
     }
 
+    /// 지면을 덮는 이미지를 먼저 그린 뒤 `content`를 잇는다 — **실제 스캔 PDF와 같은 구성**.
+    ///
+    /// OCR 텍스트 판정이 "이미지 영역 안이거나 걸친 `3 Tr`"이므로(→ `classify::overlaps_image`),
+    /// 이미지가 없으면 `3 Tr` 텍스트는 OCR로 잡히지 않는다. 지우기 기계(이동량 보존·상태 유지·
+    /// Form 처리)를 시험하는 테스트들은 먼저 이 구성을 갖춰야 한다.
+    fn scanned_page(content: &[u8], xobjects: Vec<(&str, Stream)>) -> (Document, ObjectId) {
+        let image = Stream::new(dictionary! { "Type" => "XObject", "Subtype" => "Image" }, vec![]);
+        let mut all = vec![("Im0", image)];
+        all.extend(xobjects);
+        let mut full = b"q 612 0 0 792 0 0 cm /Im0 Do Q ".to_vec();
+        full.extend_from_slice(content);
+        one_page_doc(&full, all)
+    }
+
     fn run(content: &[u8]) -> (Document, ObjectId, RemovalPlan) {
-        let (mut doc, page) = one_page_doc(content, vec![]);
+        let (mut doc, page) = scanned_page(content, vec![]);
         add_font(&mut doc, page);
         let plan = plan(&doc);
         apply(&mut doc, &plan, &mut Applied::default()).unwrap();
@@ -998,20 +1068,57 @@ mod tests {
 
     #[test]
     fn quote_operators_keep_line_moves() {
-        let (doc, page, _) = run(b"BT /F1 10 Tf 12 TL 3 Tr (A) ' 1 2 (B) \" ET");
+        let (doc, page, _) = run(b"BT /F1 10 Tf 12 TL 1 0 0 1 20 700 Tm 3 Tr (A) ' 1 2 (B) \" ET");
         let text = page_text(&doc, page);
         assert!(text.contains(" T* "), "{text}");
         assert!(text.contains(" 1 Tw 2 Tc T* "), "{text}");
     }
 
     #[test]
-    fn transparent_and_zero_size_removed_clip_mode_only_reported() {
+    fn only_invisible_mode_is_removed_others_reported() {
         let (_, _, plan) = run(b"BT /F1 0 Tf (A) Tj ET /Clear gs BT /F1 10 Tf (A) Tj ET BT 7 Tr (B) Tj ET");
         let (t, r) = (plan.totals(), plan.reported_totals());
-        assert_eq!(t.get(HiddenKind::ZeroSize), 1);
-        assert_eq!(t.get(HiddenKind::Transparent), 1);
-        assert_eq!(t.get(HiddenKind::ClipMode), 0, "표준 모드에서는 지우지 않는다");
-        assert_eq!(r.get(HiddenKind::ClipMode), 1);
+        // 크기 0·투명·클리핑 모드는 안 보이기는 하지만 OCR 도구가 쓰는 기법이 아니다 —
+        // 찾아만 두고 지우지 않는다(2026-09-28 결정).
+        assert_eq!(t.removed(), 0, "3 Tr 외에는 지우지 않는다");
+        for kind in [HiddenKind::ZeroSize, HiddenKind::Transparent, HiddenKind::ClipMode] {
+            assert_eq!(r.get(kind), 1, "{kind:?}");
+        }
+    }
+
+    /// **OCR 텍스트는 "이미지 영역 안이거나 걸친 `3 Tr`"이다**(2026-09-28 확정).
+    ///
+    /// 이미지와 무관한 자리의 `3 Tr`은 OCR이 만든 것이 아니므로(디지털 문서의 숨긴 값 등)
+    /// 건드리지 않는다. 같은 `3 Tr`이라도 자리에 따라 판정이 갈린다는 것이 이 규칙의 요점이다.
+    #[test]
+    fn invisible_text_counts_as_ocr_only_where_a_scan_is() {
+        let image = || Stream::new(dictionary! { "Type" => "XObject", "Subtype" => "Image" }, vec![]);
+        // 이미지는 지면 왼쪽 아래 1/4에만 놓는다(0,0)-(306,396).
+        // 글자 셋: 이미지 안 · 이미지에 걸침(경계 위) · 이미지 밖.
+        let content: &[u8] = b"q 306 0 0 396 0 0 cm /Im0 Do Q \
+             BT /F1 10 Tf 3 Tr 1 0 0 1 100 100 Tm (A) Tj ET \
+             BT /F1 10 Tf 3 Tr 1 0 0 1 300 200 Tm (B) Tj ET \
+             BT /F1 10 Tf 3 Tr 1 0 0 1 400 600 Tm (C) Tj ET";
+        let (mut doc, page) = one_page_doc(content, vec![("Im0", image())]);
+        add_font(&mut doc, page);
+        let plan = plan(&doc);
+        assert_eq!(plan.totals().get(HiddenKind::InvisibleMode), 2, "이미지 안·걸친 것만");
+        apply(&mut doc, &plan, &mut Applied::default()).unwrap();
+        let text = page_text(&doc, page);
+        assert!(!text.contains("(A) Tj") && !text.contains("(B) Tj"), "{text}");
+        assert!(text.contains("(C) Tj"), "이미지 밖 3 Tr은 남는다: {text}");
+    }
+
+    /// 이미지가 아예 없는 페이지의 `3 Tr`은 손대지 않는다 — 디지털 문서의 숨긴 텍스트.
+    #[test]
+    fn invisible_text_without_any_image_is_left_alone() {
+        let (mut doc, page) = one_page_doc(b"BT /F1 10 Tf 3 Tr 1 0 0 1 100 100 Tm (A) Tj ET", vec![]);
+        add_font(&mut doc, page);
+        let plan = plan(&doc);
+        assert_eq!(plan.totals().removed(), 0);
+        assert!(!plan.has_changes());
+        apply(&mut doc, &plan, &mut Applied::default()).unwrap();
+        assert!(page_text(&doc, page).contains("(A) Tj"));
     }
 
     /// 적극 모드에서만 지우는 형태들 — 표준 모드에서는 보고만 한다.
@@ -1089,7 +1196,7 @@ mod tests {
     /// 되살려야 한다(실제로 이 순서를 빼먹어 되돌린 페이지가 빈 페이지가 됐다, 2026-09-23).
     #[test]
     fn rollback_after_pruning_restores_original_content() {
-        let (mut doc, page) = one_page_doc(b"BT /F1 10 Tf 3 Tr (A) Tj ET", vec![]);
+        let (mut doc, page) = scanned_page(b"BT /F1 10 Tf 3 Tr (A) Tj ET", vec![]);
         add_font(&mut doc, page);
         let original = page_text(&doc, page);
         let plan = plan(&doc);
@@ -1105,7 +1212,7 @@ mod tests {
     /// 태그된 마크드 콘텐츠의 글자를 지우면 "빈 태그"로 센다(껍데기는 남겨 구조 트리는 그대로).
     #[test]
     fn empty_tags_are_counted_not_removed() {
-        let (mut doc, page) = one_page_doc(
+        let (mut doc, page) = scanned_page(
             // 둘째 블록에서 0 Tr로 되돌린다 — 텍스트 상태는 ET 뒤에도 유지되기 때문.
             b"/P <</MCID 0>> BDC BT /F1 10 Tf 3 Tr (A) Tj ET EMC /P <</MCID 1>> BDC BT 0 Tr (B) Tj ET EMC",
             vec![],
@@ -1121,7 +1228,7 @@ mod tests {
 
     #[test]
     fn unknown_width_with_following_text_skips_page() {
-        let (mut doc, page) = one_page_doc(b"BT /F9 10 Tf 3 Tr (A) Tj 0 Tr (B) Tj ET", vec![]);
+        let (mut doc, page) = scanned_page(b"BT /F9 10 Tf 3 Tr (A) Tj 0 Tr (B) Tj ET", vec![]);
         let plan = plan(&doc);
         assert!(matches!(plan.pages[0].status, PageStatus::Skipped(_)));
         apply(&mut doc, &plan, &mut Applied::default()).unwrap();
@@ -1130,7 +1237,7 @@ mod tests {
 
     #[test]
     fn ocr_form_is_emptied_in_place() {
-        let (mut doc, page) = one_page_doc(b"q /X0 Do Q", vec![("X0", form(b"BT 3 Tr (x) Tj ET"))]);
+        let (mut doc, page) = scanned_page(b"q /X0 Do Q", vec![("X0", form(b"BT 3 Tr (x) Tj ET"))]);
         let form_id = resource_entry(&doc, &crate::content::interp::page_resources(&doc, page), b"XObject", b"X0")
             .unwrap()
             .as_reference()
@@ -1149,7 +1256,7 @@ mod tests {
     #[test]
     fn form_used_with_different_inherited_state_is_cloned_per_page() {
         // 같은 Form을 한 번은 3 Tr 아래, 한 번은 보이게 부른다 → 결과가 달라 제자리 수정 불가.
-        let (mut doc, page) = one_page_doc(b"3 Tr /X0 Do", vec![("X0", form(b"BT (x) Tj ET"))]);
+        let (mut doc, page) = scanned_page(b"3 Tr /X0 Do", vec![("X0", form(b"BT (x) Tj ET"))]);
         let form_id = resource_entry(&doc, &crate::content::interp::page_resources(&doc, page), b"XObject", b"X0")
             .unwrap()
             .as_reference()

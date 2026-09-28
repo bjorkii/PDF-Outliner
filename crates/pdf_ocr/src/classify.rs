@@ -57,8 +57,14 @@ impl HiddenKind {
     }
 
     /// 표준 모드에서도 지우는 형태인지.
+    /// 이 앱이 **지우는** 형태인지 — `InvisibleMode`(`3 Tr`) 하나뿐이다.
+    ///
+    /// 기능 이름이 "OCR 삭제"이므로 기준은 "확실히 안 보이는가"가 아니라 **"OCR 도구가 쓰는
+    /// 기법인가"**다(2026-09-28 사용자 결정). 투명(알파 0)·크기 0·흰 글씨·이미지에 덮임·꺼진
+    /// 레이어·지면 밖·클리핑 밖은 안 보이기는 하지만 OCR 도구가 쓰지 않는 기법이고, 사용자가
+    /// 그것들을 지울 동기도 없다. 그래서 찾아만 두고(`reported`) 지우지 않는다.
     pub fn is_standard(&self) -> bool {
-        matches!(self, HiddenKind::InvisibleMode | HiddenKind::ZeroSize | HiddenKind::Transparent)
+        matches!(self, HiddenKind::InvisibleMode)
     }
 }
 
@@ -151,4 +157,26 @@ pub fn classify(context: &Context, op: &Operation, facts: &PageFacts) -> Verdict
 /// 글자 상자가 나중에 그려진 불투명 이미지에 완전히 덮이는지(H).
 pub fn covered_by_image(bbox: &[f64; 4], order: usize, images: &[(usize, [f64; 4], bool)]) -> bool {
     images.iter().any(|(image_order, image_box, opaque)| *opaque && *image_order > order && contains_box(image_box, bbox))
+}
+
+/// 글자 상자가 **이미 그려진** 이미지 영역 안에 있거나 걸쳐 있는지 — OCR 텍스트 판정에 쓴다.
+///
+/// OCR 텍스트의 정의가 "XObject 이미지 영역 내에 있거나 걸쳐 있는 `3 Tr` 텍스트"이기 때문이다
+/// (2026-09-28 확정). 이미지와 무관한 자리의 `3 Tr` 텍스트는 OCR이 만든 것이 아니므로 건드리지
+/// 않는다(디지털 문서의 숨긴 값 등).
+///
+/// **이미 그려진** 이미지만 보는 것으로 충분하다 — OCR은 스캔 이미지를 깔고 그 위에 텍스트를
+/// 얹으므로 텍스트가 항상 나중이다. 그래서 페이지를 다 읽을 때까지 판정을 미룰 필요가 없다.
+/// 불투명 여부도 보지 않는다(덮여서 안 보이는지가 아니라, 그 자리에 스캔이 있는지가 기준이다).
+pub fn overlaps_image(bbox: &[f64; 4], images: &[(usize, [f64; 4], bool)]) -> bool {
+    images.iter().any(|(_, image_box, _)| overlaps_box(image_box, bbox))
+}
+
+/// 두 상자가 조금이라도 겹치거나 맞닿는지.
+///
+/// 경계가 닿는 것도 "걸쳐 있는" 것으로 본다. 그래야 글자 상자가 퇴화(폭·높이 0)한 경우에도
+/// 그 자리가 이미지 안이면 걸린 것으로 잡힌다 — 폰트 크기를 못 읽는 파일에서 OCR 텍스트를
+/// 놓치지 않게.
+fn overlaps_box(a: &[f64; 4], b: &[f64; 4]) -> bool {
+    a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3]
 }

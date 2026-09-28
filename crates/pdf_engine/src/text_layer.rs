@@ -24,7 +24,14 @@ pub struct PageChar {
     pub origin: Option<(f64, f64)>,
     /// pdfium이 추론해 넣은 공백·줄바꿈(원본 콘텐츠에는 없는 문자).
     pub generated: bool,
+    /// 어떤 이유로든 화면에 그려지지 않는다(렌더 모드 3·7, 알파 0, 크기 0).
     pub invisible: bool,
+    /// 렌더 모드가 **`3 Tr`(Invisible)** 이다 — OCR 도구가 쓰는 기법.
+    ///
+    /// `invisible`과 따로 두는 이유: OCR 텍스트의 정의가 "이미지 영역 안이거나 걸친 `3 Tr`"이라
+    /// (2026-09-28 확정), `7 Tr`·알파 0·크기 0은 안 보이기는 해도 OCR이 아니다. 내보내기가 이
+    /// 둘을 구분해야 한다.
+    pub invisible_mode: bool,
 }
 
 /// 페이지의 표시 영역 정보(pdfium 기준) — `pdf_ocr::geometry::PageFrame`을 만들 때 쓴다.
@@ -72,7 +79,9 @@ pub fn page_chars(page: &PdfPage) -> Result<Vec<PageChar>> {
         let bounds = ch.loose_bounds().map(|r| rect_to_array(&r)).unwrap_or([0.0; 4]);
         let origin = ch.origin().ok().map(|(x, y)| (x.value as f64, y.value as f64));
         let invisible = !generated && is_invisible(&ch, &bounds);
-        out.push(PageChar { ch: c, bounds, origin, generated, invisible });
+        let invisible_mode = !generated
+            && ch.render_mode().is_ok_and(|mode| matches!(mode, PdfPageTextRenderMode::Invisible));
+        out.push(PageChar { ch: c, bounds, origin, generated, invisible, invisible_mode });
     }
     Ok(out)
 }
