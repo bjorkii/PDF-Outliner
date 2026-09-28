@@ -2,6 +2,9 @@
 /dist
 .DS_Store
 .claude/settings.local.json
+# Claude Code가 플랜 모드에서 만드는 구현 계획 — 로컬 전용(2026-09-28 사용자 결정).
+# 저장소에 남기는 판단기록은 planning/에 따로 있다.
+.claude/plans/
 
 # 2026-07-17: pdf-samples/는 git에서 완전 제거(git filter-repo로 과거 히스토리까지 퍼지) —
 # 장차 저장소를 public으로 전환할 때 공개되면 안 되는 자료라서(사용자 결정). 폴더 전체를
