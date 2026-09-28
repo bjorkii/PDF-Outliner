@@ -98,6 +98,11 @@ fn page_aspect_of(app: &PdfViewerApp, page: u32) -> f32 {
     size.y / size.x.max(1.0)
 }
 
+/// 두 쪽의 판형이 사실상 같은지 — 렌더를 기다리는 동안 직전 화면을 그대로 둘 수 있는지 판단한다.
+fn same_page_shape(app: &PdfViewerApp, a: u32, b: u32) -> bool {
+    (page_aspect_of(app, a) - page_aspect_of(app, b)).abs() < 0.01
+}
+
 pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
     handle_scroll_zoom(ctx, &mut app.viewport);
 
@@ -390,16 +395,25 @@ fn show_single_page(
         let fresh = app.page_textures.get(page_number).map(|(texture, _)| texture.clone());
         let texture = match fresh {
             Some(texture) => {
-                app.page_textures.set_shown(&texture);
+                app.page_textures.set_shown(page_number, &texture);
                 Some(texture)
             }
             None => {
                 let since_switch = now - app.single_view_switched_at;
-                if since_switch < PAGE_SWITCH_GRACE_SECS {
+                // 직전 화면을 그대로 두는 것은 **판형이 같을 때만** 옳다. `image_rect`는 이미 새
+                // 쪽의 종횡비로 잡혀 있어서, 세로 쪽을 보다 가로 쪽으로 건너뛰면 옛 텍스처가
+                // 가로로 늘어나 보인다(SQ-main.pdf p.287 → p.293, 2026-09-28 리포트).
+                // 판형이 다르면 흰 페이지로 자리만 잡는다 — 잠깐 비는 편이 왜곡보다 낫다.
+                let reusable = app
+                    .page_textures
+                    .shown()
+                    .filter(|(shown, _)| same_page_shape(app, *shown, page_number))
+                    .map(|(_, texture)| texture.clone());
+                if since_switch < PAGE_SWITCH_GRACE_SECS && reusable.is_some() {
                     ctx.request_repaint_after(std::time::Duration::from_secs_f64(
                         PAGE_SWITCH_GRACE_SECS - since_switch,
                     ));
-                    app.page_textures.shown().cloned()
+                    reusable
                 } else {
                     None
                 }

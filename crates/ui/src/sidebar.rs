@@ -42,6 +42,8 @@ struct RenderOutcome {
     jump_page: Option<u32>,
     selected: Option<Uuid>,
     dirty: bool,
+    /// 확정된 제목 변경 (노드 id, 새 제목) — 되돌리기 기록을 먼저 남겨야 해서 호출 측에서 적용한다.
+    rename: Option<(Uuid, String)>,
 }
 
 pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
@@ -312,6 +314,16 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 // 북마크를 클릭한 경우엔 실제로 되돌림 — app::FocusArea 문서 참고).
                 app.focus_area = crate::app::FocusArea::Sidebar;
             }
+            // 제목 변경은 되돌리기 기록을 먼저 남기고 적용한다(그리기 중에는 app을 다시
+            // 빌릴 수 없어 호출 측으로 올려 보낸 것).
+            if let Some((id, title)) = outcome.rename {
+                app.push_bookmark_undo_snapshot();
+                if set_title(&mut app.bookmarks, id, title) {
+                    app.bookmarks_dirty = true;
+                } else {
+                    app.bookmark_undo_stack.pop_back();
+                }
+            }
             if outcome.dirty {
                 app.bookmarks_dirty = true;
             }
@@ -472,10 +484,16 @@ fn render_nodes(
                     drag_state.editing = None;
                 } else if enter_pressed || edit_response.lost_focus() {
                     // Enter뿐 아니라 다른 곳을 클릭해 포커스를 잃어도 커밋한다(Finder식 관례).
+                    //
+                    // **제목이 그대로면 아무것도 하지 않는다.** 전에는 내용이 같아도 변경으로
+                    // 표시해서, F2로 열어 제목만 복사하고 나와도 "저장하지 않은 북마크 변경사항이
+                    // 있습니다"가 떴다(2026-09-28 리포트 — 사용자는 사이드카에 옛 수정이 남은
+                    // 것으로 의심했다). 되돌리기 기록도 이때 남긴다 — 그러지 않으면 제목 변경만
+                    // Undo로 되돌릴 수 없었다.
                     let trimmed = buffer.trim();
-                    if !trimmed.is_empty() {
-                        node.title = trimmed.to_string();
-                        outcome.dirty = true;
+                    if !trimmed.is_empty() && trimmed != node.title {
+                        let new_title = trimmed.to_string();
+                        outcome.rename = Some((node.id, new_title));
                     }
                     drag_state.editing = None;
                 }
@@ -653,6 +671,20 @@ fn render_nodes(
         nodes.retain(|n| n.id != id);
         outcome.dirty = true;
     }
+}
+
+/// 해당 노드의 제목을 바꾼다. 찾았으면 `true`.
+fn set_title(nodes: &mut [bookmark::BookmarkNode], id: Uuid, title: String) -> bool {
+    for node in nodes {
+        if node.id == id {
+            node.title = title;
+            return true;
+        }
+        if set_title(&mut node.children, id, title.clone()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// 접힌 노드의 자식은 제외하고, 화면에 실제로 보이는 순서대로 id를 나열한다.

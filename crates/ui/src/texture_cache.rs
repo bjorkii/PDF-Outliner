@@ -18,9 +18,12 @@ use std::collections::HashMap;
 pub struct PageTextureCache {
     /// 페이지 번호 → (텍스처, 요청한 target_width).
     pages: HashMap<u32, (egui::TextureHandle, i32)>,
-    /// 쪽 단위 보기에서 마지막으로 그린 텍스처 — 페이지를 넘긴 직후 새 결과가 오기 전 잠깐
-    /// 그대로 보여주는 데 쓴다(viewer_panel `PAGE_SWITCH_GRACE_SECS`).
-    shown: Option<egui::TextureHandle>,
+    /// 쪽 단위 보기에서 마지막으로 그린 (페이지 번호, 텍스처) — 페이지를 넘긴 직후 새 결과가
+    /// 오기 전 잠깐 그대로 보여주는 데 쓴다(viewer_panel `PAGE_SWITCH_GRACE_SECS`).
+    ///
+    /// 페이지 번호를 함께 두는 이유: 그대로 보여주는 것이 **판형이 같을 때만** 옳다. 세로 쪽을
+    /// 보다 가로 쪽으로 건너뛰면 옛 텍스처가 새 쪽 자리에 가로로 늘어나 보인다(2026-09-28 리포트).
+    shown: Option<(u32, egui::TextureHandle)>,
     /// 이번 프레임에 캐시에서 빠진 텍스처 — 다음 프레임 `begin_frame`에서 해제.
     retired: Vec<egui::TextureHandle>,
     /// 직전 프레임에 그린 텍스처(기록용 — 바뀔 때만 trace에 남긴다).
@@ -84,15 +87,15 @@ impl PageTextureCache {
         }
     }
 
-    pub fn shown(&self) -> Option<&egui::TextureHandle> {
-        self.shown.as_ref()
+    pub fn shown(&self) -> Option<(u32, &egui::TextureHandle)> {
+        self.shown.as_ref().map(|(page, texture)| (*page, texture))
     }
 
-    pub fn set_shown(&mut self, texture: &egui::TextureHandle) {
-        if self.shown.as_ref().map(egui::TextureHandle::id) == Some(texture.id()) {
+    pub fn set_shown(&mut self, page: u32, texture: &egui::TextureHandle) {
+        if self.shown.as_ref().map(|(_, t)| t.id()) == Some(texture.id()) {
             return;
         }
-        if let Some(old) = self.shown.replace(texture.clone()) {
+        if let Some((_, old)) = self.shown.replace((page, texture.clone())) {
             trace::record(format_args!("직전 화면 교체: {:?} → {:?}", old.id(), texture.id()));
             self.retired.push(old);
         }
@@ -116,7 +119,7 @@ impl PageTextureCache {
             u8::from(self.shown.is_some())
         ));
         self.retired.extend(self.pages.drain().map(|(_, (texture, _))| texture));
-        self.retired.extend(self.shown.take());
+        self.retired.extend(self.shown.take().map(|(_, texture)| texture));
     }
 
     /// 이번 프레임에 그린 텍스처를 알린다 — 직전 프레임과 달라졌을 때만 기록한다.
@@ -183,20 +186,20 @@ mod tests {
         let first = texture(&ctx);
         let first_id = first.id();
         cache.insert(1, first.clone(), 900);
-        cache.set_shown(&first);
+        cache.set_shown(1, &first);
         drop(first);
 
         // 같은 텍스처를 매 프레임 다시 알려도 퇴역 목록이 쌓이지 않는다.
-        cache.set_shown(&cache.get(1).unwrap().0.clone());
+        cache.set_shown(1, &cache.get(1).unwrap().0.clone());
         assert!(cache.retired.is_empty());
 
         // 페이지를 넘겨 캐시에서 빠져도 "직전 화면"으로 계속 살아 있다.
         cache.retain(|_| false);
         cache.begin_frame(&ctx);
         assert!(allocated(&ctx, first_id));
-        assert_eq!(cache.shown().map(egui::TextureHandle::id), Some(first_id));
+        assert_eq!(cache.shown().map(|(_, t)| t.id()), Some(first_id));
 
-        cache.set_shown(&texture(&ctx));
+        cache.set_shown(2, &texture(&ctx));
         assert!(allocated(&ctx, first_id));
         cache.begin_frame(&ctx);
         assert!(!allocated(&ctx, first_id));
@@ -224,7 +227,7 @@ mod tests {
         let shown = texture(&ctx);
         let (page_id, shown_id) = (page.id(), shown.id());
         cache.insert(5, page, 1000);
-        cache.set_shown(&shown);
+        cache.set_shown(1, &shown);
         drop(shown);
 
         cache.clear();
