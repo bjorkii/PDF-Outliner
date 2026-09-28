@@ -1,4 +1,4 @@
-//! OCR 텍스트 레이어 작업의 PDF 구조 쪽 — 설계는 `plan/ocr_feature_considerations.md`.
+//! OCR 텍스트 레이어 작업의 PDF 구조 쪽 — 설계는 `planning/ocr_feature_considerations.md`.
 //!
 //! 이 크레이트의 원칙: **처리할 수 없는 경우를 감지해서 원본을 지키고 알린다.** 모든 PDF를
 //! 자동으로 완벽하게 처리하려 하지 않는다. 해석에 실패한 페이지는 건드리지 않고 이유를 돌려준다.

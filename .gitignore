@@ -12,5 +12,6 @@ pdf-samples/
 
 *.pdf
 
-# 설계 검토 메모(로컬 전용)
-plan/
+# 설계 검토 메모·판단기록(로컬 전용). 2026-09-27에 plan/ → planning/으로 바꿨다 —
+# Claude Code가 쓰는 .claude/plans/와 헷갈렸다(사용자 요청).
+planning/
