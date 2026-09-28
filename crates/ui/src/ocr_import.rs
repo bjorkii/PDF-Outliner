@@ -2,7 +2,7 @@
 //!
 //! 분석([`analyze`]): hOCR을 읽고, PDF 페이지마다 분류 신호(디지털 텍스트, 기존 보이지 않는 텍스트,
 //! 앱이 넣은 레이어, 큰 이미지 비율, 디지털 텍스트 손상 의심)를 모은다. 파일은 쓰지 않는다. 페이지
-//! 대응(시작 페이지)과 페이지별 삽입·덮어쓰기 결정은 UI가 이 결과로 정해 [`ImportJob`]에 담는다.
+//! 대응(hOCR·PDF 페이지 범위)과 페이지별 삽입·덮어쓰기 결정은 UI가 이 결과로 정해 [`ImportJob`]에 담는다.
 //!
 //! 실행([`run`]): hOCR 좌표를 페이지 좌표로 바꾸고(가로세로 비율이 맞지 않는 페이지는 건너뜀),
 //! 디지털 텍스트와 겹치는 단어를 빼고(문자 단위 중복 제거), 덮어쓸 페이지의 기존 보이지 않는
@@ -83,18 +83,34 @@ pub struct ImportAnalysis {
     pub linearized: bool,
 }
 
+/// 페이지 대응은 **범위 대 범위**로 받는다(2026-09-28 개편). 예전에는 "hOCR 첫 페이지를 PDF n쪽에
+/// 맞춤" 한 칸이었는데, 그것으로는 hOCR의 앞뒤 일부만 가져오는 것을 말할 수 없었다. 두 범위의
+/// 쪽수는 UI가 항상 같게 맞춰 보낸다(`ImportDialog::sync`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportJob {
     pub pdf: PathBuf,
     pub hocr_files: Vec<PathBuf>,
     pub temp_output: PathBuf,
-    /// hOCR 첫 페이지를 대응시킬 PDF 페이지(1부터).
-    pub start_page: usize,
+    /// 가져올 hOCR 페이지 범위(1부터, 양끝 포함).
+    pub hocr_first: usize,
+    pub hocr_last: usize,
+    /// 그 범위의 첫 페이지를 놓을 PDF 페이지(1부터). 끝은 쪽수로 정해진다.
+    pub pdf_first: usize,
     /// 넣을 PDF 페이지(0부터).
     pub insert_pages: Vec<usize>,
     /// 넣기 전에 기존 보이지 않는 텍스트를 지울 페이지(0부터, `insert_pages`의 부분집합).
     pub overwrite_pages: Vec<usize>,
-    pub dedupe: bool,
+}
+
+impl ImportJob {
+    /// hOCR 페이지(0부터)를 놓을 PDF 페이지(0부터). 가져올 범위 밖이면 `None`.
+    pub fn pdf_index_for(&self, hocr_index: usize) -> Option<usize> {
+        let page = hocr_index + 1;
+        if page < self.hocr_first || page > self.hocr_last {
+            return None;
+        }
+        Some(self.pdf_first.max(1) - 1 + (page - self.hocr_first))
+    }
 }
 
 /// 검증에서 문제가 된 자리 — 리포트의 "보기"가 뷰어에 표시한다.
@@ -347,7 +363,7 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
     let document = engine.open_document(&job.pdf).map_err(|e| open_error_message(e, Action::Import))?;
     let mut targets = Vec::new();
     for (k, page) in hocr.iter().enumerate() {
-        let Some(index) = (job.start_page + k).checked_sub(1).filter(|i| *i < page_ids.len()) else { continue };
+        let Some(index) = job.pdf_index_for(k).filter(|i| *i < page_ids.len()) else { continue };
         if !insert.contains(&index) {
             continue;
         }
@@ -359,7 +375,10 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
                 continue;
             }
         };
-        if job.dedupe {
+        // 중복 제거는 늘 한다 — 끄고 넣을 이유가 없어 선택지를 없앴다(2026-09-28 요청).
+        // 쪽번호·머리글처럼 디지털로 들어간 글자 자리에 OCR 단어를 겹쳐 넣으면 추출할 때 같은
+        // 글자가 두 번 나온다.
+        {
             let chars = document.pages().get(index as i32).map(|p| digital_chars(&p, &frame)).unwrap_or_default();
             let stats = dedupe(&mut lines, &chars, looks_damaged(&chars));
             report.dedupe_same += stats.same;
