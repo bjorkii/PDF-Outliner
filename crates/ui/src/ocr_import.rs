@@ -5,7 +5,7 @@
 //! 대응(hOCR·PDF 페이지 범위)과 페이지별 삽입·덮어쓰기 결정은 UI가 이 결과로 정해 [`ImportJob`]에 담는다.
 //!
 //! 실행([`run`]): hOCR 좌표를 페이지 좌표로 바꾸고(가로세로 비율이 맞지 않는 페이지는 건너뜀),
-//! 디지털 텍스트와 겹치는 단어를 빼고(문자 단위 중복 제거), 덮어쓸 페이지의 기존 보이지 않는
+//! 덮어쓸 페이지의 기존 보이지 않는
 //! 텍스트를 지운 뒤(삭제 기능과 같은 규칙) 텍스트 레이어를 넣고 전체 재작성한다. 그 뒤 페이지마다
 //! 원본과 화면·보이는 텍스트를 비교하고 넣은 글자가 그대로 추출되는지 확인해, 실패한 페이지는 삭제와
 //! 삽입을 함께 되돌린다.
@@ -14,7 +14,7 @@ use crate::ocr_worker::{open_error_message, open_for_edit, verify_pages, Action,
 use pdf_engine::{text_layer, PdfEngine};
 use pdf_ocr::geometry::PageFrame;
 use pdf_ocr::hocr::{parse, HocrPage};
-use pdf_ocr::import::{classify_page, dedupe, layer_lines, looks_damaged, only_in_margins, DigitalChar, PageClass, PageSignals};
+use pdf_ocr::import::{classify_page, layer_lines, looks_damaged, only_in_margins, DigitalChar, PageClass, PageSignals};
 use pdf_ocr::lopdf::{Document, ObjectId};
 use pdf_ocr::remove::{Applied, PageStatus};
 use serde::{Deserialize, Serialize};
@@ -135,11 +135,6 @@ pub struct ImportReport {
     pub pages_overwritten: usize,
     /// (페이지 번호, 이유) — 넣지 못한 페이지(비율 불일치, 넣을 단어 없음 등).
     pub skipped: Vec<(usize, String)>,
-    pub dedupe_same: usize,
-    pub dedupe_conflicts: usize,
-    pub dedupe_kept_over_damaged: usize,
-    /// 내용이 달랐던 예 (페이지, OCR, 디지털).
-    pub dedupe_samples: Vec<(usize, String, String)>,
     pub rolled_back: Vec<(usize, String)>,
     /// 넣은 글자가 기대대로 추출되지 않은 자리(되돌린 페이지 + 확인 권장).
     pub marks: Vec<ProblemMark>,
@@ -358,9 +353,9 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
     let insert: BTreeSet<usize> = job.insert_pages.iter().copied().collect();
     let overwrite: BTreeSet<usize> = job.overwrite_pages.iter().copied().filter(|p| insert.contains(p)).collect();
 
-    // 1. 넣을 줄 준비(원본 문서 기준 — 중복 제거는 지우기 전의 디지털 텍스트와 비교한다).
-    emit(Event::Stage("단어 배치·중복 제거 중".to_string()));
-    let document = engine.open_document(&job.pdf).map_err(|e| open_error_message(e, Action::Import))?;
+    // 1. 넣을 줄 준비. 중복 제거가 없어져 여기서 pdfium으로 페이지를 열 일이 없다 — hOCR 좌표를
+    // 페이지 좌표로 옮기는 것은 lopdf에서 읽은 표시 프레임만으로 된다.
+    emit(Event::Stage("단어 배치 중".to_string()));
     let mut targets = Vec::new();
     for (k, page) in hocr.iter().enumerate() {
         let Some(index) = job.pdf_index_for(k).filter(|i| *i < page_ids.len()) else { continue };
@@ -368,28 +363,13 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
             continue;
         }
         let frame = PageFrame::from_page(&doc, page_ids[index])?;
-        let mut lines = match layer_lines(page, &frame) {
+        let lines = match layer_lines(page, &frame) {
             Ok(lines) => lines,
             Err(err) => {
                 report.skipped.push((index + 1, format!("{err:#}")));
                 continue;
             }
         };
-        // 중복 제거는 늘 한다 — 끄고 넣을 이유가 없어 선택지를 없앴다(2026-09-28 요청).
-        // 쪽번호·머리글처럼 디지털로 들어간 글자 자리에 OCR 단어를 겹쳐 넣으면 추출할 때 같은
-        // 글자가 두 번 나온다.
-        {
-            let chars = document.pages().get(index as i32).map(|p| digital_chars(&p, &frame)).unwrap_or_default();
-            let stats = dedupe(&mut lines, &chars, looks_damaged(&chars));
-            report.dedupe_same += stats.same;
-            report.dedupe_conflicts += stats.conflicts;
-            report.dedupe_kept_over_damaged += stats.kept_over_damaged;
-            for (ocr, digital) in stats.samples {
-                if report.dedupe_samples.len() < 10 {
-                    report.dedupe_samples.push((index + 1, ocr, digital));
-                }
-            }
-        }
         if lines.is_empty() {
             report.skipped.push((index + 1, "넣을 단어가 없음".to_string()));
             continue;
@@ -397,7 +377,6 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
         targets.push((index, page_ids[index], frame, lines));
         emit(Event::Progress { done: k + 1, total: hocr.len() });
     }
-    drop(document);
     let target_pages: BTreeSet<usize> = targets.iter().map(|t| t.0).collect();
     if targets.is_empty() {
         report.nothing_to_do = true;

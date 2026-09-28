@@ -122,7 +122,7 @@ enum JobPhase {
 }
 
 enum JobKind {
-    Export { describe: Box<dyn Fn(&ExportReport) -> String> },
+    Export { describe: Box<dyn Fn(&ExportReport) -> String>, output: PathBuf },
     AnalyzeRemoval { pdf: PathBuf },
     Remove { pdf: PathBuf },
     AnalyzeImport { pdf: PathBuf, files: Vec<PathBuf> },
@@ -151,6 +151,9 @@ pub struct OcrJob {
     kind: JobKind,
     /// 결과 창에서 "보기"로 뷰어에 표시할 자리(가져오기 검증 결과).
     marks: Vec<ProblemMark>,
+    /// 결과 창의 "…위치 열기" 버튼 — (버튼 이름, 열 파일). 결과 본문에 전체 경로를 적는 대신
+    /// 이 버튼을 둔다(2026-09-28 요청).
+    reveal: Option<(&'static str, PathBuf)>,
 }
 
 /// 전체 삭제 확인 창 상태.
@@ -180,7 +183,7 @@ impl OcrJob {
             Ok(worker) => (Some(worker), JobPhase::Running { done: 0, total: 0 }),
             Err(err) => (None, JobPhase::Failed(format!("작업 프로세스를 시작하지 못했습니다: {err}"))),
         };
-        Self { title, worker, temp_output, phase, stage: None, kind, marks: Vec::new() }
+        Self { title, worker, temp_output, phase, stage: None, kind, marks: Vec::new(), reveal: None }
     }
 
     fn finish(&mut self, text: String) {
@@ -225,10 +228,11 @@ fn poll_events(app: &mut PdfViewerApp) {
             }
             WorkerPoll::Event(Event::Progress { done, total }) => job.phase = JobPhase::Running { done, total },
             WorkerPoll::Event(Event::ExportDone(report)) => {
-                let text = match &job.kind {
-                    JobKind::Export { describe } => describe(&report),
-                    _ => String::new(),
+                let (text, output) = match &job.kind {
+                    JobKind::Export { describe, output } => (describe(&report), Some(output.clone())),
+                    _ => (String::new(), None),
                 };
+                job.reveal = output.map(|path| ("저장 위치 열기", path));
                 job.finish(text); // 결과 파일로 이미 옮겨짐
             }
             WorkerPoll::Event(Event::RemovalAnalysis(analysis)) => {
@@ -245,14 +249,19 @@ fn poll_events(app: &mut PdfViewerApp) {
                 let outcome = finish_removal(app, &pdf, temp.as_deref(), &report);
                 if let Some(job) = app.ocr_job.as_mut() {
                     match outcome {
-                        Ok(text) => job.finish(text),
+                        Ok((text, backup)) => {
+                            job.reveal = backup.map(|path| ("백업 위치 열기", path));
+                            job.finish(text);
+                        }
                         Err(message) => job.fail(message),
                     }
                 }
             }
             WorkerPoll::Event(Event::BatchDone(report)) => {
+                job.reveal = report.log.as_ref().map(|log| ("결과 로그 파일(csv) 위치 열기", PathBuf::from(log)));
                 job.finish(describe_batch(&report));
-                app.status_message = Some(format!("폴더 일괄 OCR 삭제: {}개 파일 바꿈", report.changed.len()));
+                app.status_message =
+                    Some(format!("폴더 내 {}개 PDF의 OCR 텍스트를 지웠습니다.", report.changed.len()));
             }
             WorkerPoll::Event(Event::ImportAnalysis(analysis)) => {
                 let JobKind::AnalyzeImport { pdf, files } = &job.kind else { return };
@@ -269,15 +278,16 @@ fn poll_events(app: &mut PdfViewerApp) {
                     if let Some(temp) = &temp {
                         let _ = std::fs::remove_file(temp);
                     }
-                    Ok(describe_import(&report, &skipped, "파일을 바꾸지 않았습니다."))
+                    Ok(None)
                 } else {
                     swap_in_result(app, &pdf, temp.as_deref(), "OCR 텍스트를 가져왔습니다.", "OCR을 가져올 수 없습니다")
-                        .map(|backup_note| describe_import(&report, &skipped, &backup_note))
+                        .map(Some)
                 };
                 if let Some(job) = app.ocr_job.as_mut() {
                     match outcome {
-                        Ok(text) => {
-                            job.finish(text);
+                        Ok(backup) => {
+                            job.reveal = backup.map(|path| ("백업 위치 열기", path));
+                            job.finish(describe_import(&report, &skipped));
                             job.marks = report.marks;
                         }
                         Err(message) => job.fail(message),
@@ -321,29 +331,16 @@ fn describe_batch(r: &crate::ocr_worker::BatchReport) -> String {
         r.skipped.len(),
         r.failed.len()
     )];
-    for (name, pages, removed) in r.changed.iter().take(30) {
-        lines.push(format!("  {name}: {pages}쪽에서 {removed}건 지움"));
-    }
-    if r.changed.len() > 30 {
-        lines.push(format!("  … 외 {}개", r.changed.len() - 30));
-    }
-    for (name, reason) in r.skipped.iter().take(10) {
-        lines.push(format!("  건너뜀 {name}: {reason}"));
-    }
-    for (name, reason) in r.failed.iter().take(10) {
-        lines.push(format!("  실패 {name}: {reason}"));
-    }
+    // 파일별 목록은 적지 않는다(2026-09-28 결정) — 같은 내용이 CSV에 그대로 있고, CSV는 아래
+    // "결과 로그 파일(csv) 위치 열기" 버튼으로 바로 갈 수 있다.
     lines.push("원본은 파일마다 '파일명.pdf-실행시각.backup'으로 보존했습니다.".to_string());
-    if let Some(log) = &r.log {
-        lines.push(format!("로그(CSV): {log}"));
-    }
     lines.join("
 ")
 }
 
 /// 메뉴 "폴더 일괄 삭제…" — 폴더를 고르면 바로 시작한다(파일마다 백업 후 교체).
 pub fn request_folder_removal(ctx: &egui::Context, app: &mut PdfViewerApp) {
-    let folder = rfd::FileDialog::new().set_title("OCR을 지울 PDF 폴더 선택(하위 폴더 포함)").pick_folder();
+    let folder = rfd::FileDialog::new().set_title("OCR을 지울 PDF가 담긴 폴더를 선택하세요.").pick_folder();
     focus_window(ctx);
     let Some(folder) = folder else { return };
     let job = Job::RemoveFolder {
@@ -401,8 +398,21 @@ fn show_needs_save_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
     }
 }
 
-/// 확인 창에 보여 줄 백업 안내. 실제 이름은 작업할 때 정해지므로 형식만 알려 준다.
-const BACKUP_NOTE: &str = "원본은 같은 자리에 '파일명.pdf-실행시각.backup'으로 보존합니다(실행마다 따로 남습니다).";
+/// 확인 창 본문의 한 줄. 항목을 불릿으로 구분한다(2026-09-28 요청) — 줄이 여러 개 이어지면
+/// 어디서 한 항목이 끝나는지 보이지 않았다.
+fn bullet(ui: &mut egui::Ui, text: impl Into<String>) {
+    ui.label(format!("• {}", text.into()));
+}
+
+/// 곁들이는 설명 한 줄(흐린 글씨 + 불릿).
+fn weak_bullet(ui: &mut egui::Ui, text: impl Into<String>) {
+    ui.weak(format!("• {}", text.into()));
+}
+
+/// PDF/A 안내 — 삭제 창과 가져오기 창이 같은 문구를 쓴다(2026-09-28 결정).
+fn pdfa_note(version: &str) -> String {
+    format!("PDF/A-{version} 선언은 유지되지만 규격 준수는 보장하지 않습니다. 외부 검증(veraPDF 등)을 권합니다.")
+}
 
 fn show_removal_confirm(ctx: &egui::Context, app: &mut PdfViewerApp) {
     if app.ocr_removal_confirm.is_some() && crate::app::escape_to_close(ctx) {
@@ -424,24 +434,24 @@ fn show_removal_confirm(ctx: &egui::Context, app: &mut PdfViewerApp) {
             ui.set_max_width(460.0);
             let removed = a.counts.removed() + a.own_layer_pages;
             if removed == 0 {
-                ui.label("지울 보이지 않는 텍스트가 없습니다.");
+                ui.label("삭제할 OCR 텍스트 정보가 없습니다.");
             } else {
-                ui.label(format!("{}쪽 중 {}쪽에서 보이지 않는 텍스트를 지웁니다.", a.pages, a.pages_with_hidden_text));
-                let mut kinds = Vec::new();
-                if a.own_layer_pages > 0 {
-                    kinds.push(format!("이 앱이 넣은 OCR 레이어 {}쪽", a.own_layer_pages));
-                }
-                if !a.counts.0.is_empty() {
-                    kinds.push(a.counts.describe());
-                }
-                ui.weak(kinds.join(" · "));
-                ui.weak("지운 뒤 페이지마다 원본과 화면·보이는 텍스트를 비교해, 달라진 페이지는 원래대로 되돌립니다.");
+                bullet(ui, format!(
+                    "{}쪽 중 OCR 텍스트가 있는 것으로 판정된 {}쪽의 텍스트 정보를 지웁니다. 원본파일은 같은 위치에 백업됩니다.",
+                    a.pages, a.pages_with_hidden_text
+                ));
+                // 형태별 개수는 적지 않는다(2026-09-28 결정) — 지울 대상이 OCR 텍스트 하나뿐이라
+                // 형태를 나눠 셀 것이 없고, 글자 수는 사용자가 관심 가질 정보가 아니다.
+                weak_bullet(ui, "각 페이지마다 OCR 텍스트를 지운 뒤 원본과 외관을 비교해 차이가 발생할 경우 해당 부분만 원상복구합니다.");
             }
             if !a.skipped.is_empty() {
                 ui.add_space(6.0);
-                ui.label(format!("처리할 수 없어 그대로 둘 페이지: {}쪽", a.skipped.len()));
+                bullet(ui, format!("처리할 수 없어 원본 그대로 유지해야 하는 페이지가 {}쪽 있습니다.", a.skipped.len()));
                 for (page, reason) in a.skipped.iter().take(5) {
-                    ui.weak(format!("  p.{page}: {reason}"));
+                    weak_bullet(ui, format!("  p.{page}: {reason}"));
+                }
+                if a.skipped.len() > 5 {
+                    weak_bullet(ui, "  …");
                 }
             }
             // OCR 텍스트 기준이 "이미지 영역 안이거나 걸친 3 Tr"이라, 같은 자리에 그렇게 넣은
@@ -451,29 +461,23 @@ fn show_removal_confirm(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 ui.add_space(6.0);
                 ui.colored_label(
                     ui.visuals().warn_fg_color,
-                    "이 앱에서 추가하지 않은 대체텍스트, 워터마크가 있을 경우 함께 삭제될 수 있습니다.",
+                    "• 이 앱에서 추가하지 않은 대체텍스트, 워터마크가 있을 경우 함께 삭제될 수 있습니다.",
                 );
             }
 
             ui.add_space(6.0);
             if a.signed {
-                ui.colored_label(ui.visuals().warn_fg_color, "디지털 서명된 PDF입니다. 파일을 새로 쓰면 서명이 무효가 됩니다.");
-                ui.checkbox(&mut confirm.signature_ack, "서명이 무효가 되는 것을 이해했습니다");
+                ui.colored_label(ui.visuals().warn_fg_color, "• 디지털 서명된 PDF입니다. 파일을 새로 쓰면 서명이 무효가 됩니다.");
+                ui.checkbox(&mut confirm.signature_ack, "그래도 진행합니다.");
             }
             if a.tagged {
-                ui.weak(format!(
-                    "태그(접근성 구조)가 있는 PDF입니다. 태그 껍데기는 남겨 구조는 유지하지만, 내용이 비는 태그가 {}개 생깁니다.",
-                    a.empty_tags
-                ));
+                weak_bullet(ui, "스크린 리더용 태그가 있는 PDF입니다. 처리 후에는 읽기 기능이 작동하지 않습니다.");
             }
             if let Some(pdfa) = &a.pdfa {
-                ui.weak(format!("PDF/A-{pdfa} 선언은 유지하지만 규격 준수는 보장하지 않습니다. 외부 검증(veraPDF 등)을 권합니다."));
+                weak_bullet(ui, pdfa_note(pdfa));
             }
             if a.linearized {
-                ui.weak("빠른 웹 보기(선형화)가 해제됩니다.");
-            }
-            if removed > 0 {
-                ui.weak(BACKUP_NOTE);
+                weak_bullet(ui, "빠른 웹 보기(선형화)가 해제됩니다.");
             }
 
             ui.add_space(8.0);
@@ -512,23 +516,30 @@ fn show_removal_confirm(ctx: &egui::Context, app: &mut PdfViewerApp) {
 
 /// 검증을 통과한 임시 파일로 원본을 바꾼다: 백업 → 원자적 rename → 다시 열기. 리포트 문장 또는
 /// 실패 이유(원본은 그대로).
-fn finish_removal(app: &mut PdfViewerApp, pdf: &Path, temp: Option<&Path>, report: &RemovalReport) -> Result<String, String> {
+fn finish_removal(
+    app: &mut PdfViewerApp,
+    pdf: &Path,
+    temp: Option<&Path>,
+    report: &RemovalReport,
+) -> Result<(String, Option<PathBuf>), String> {
+    // "지울 것이 없음"은 확인 창에서 먼저 알리고 닫으므로 여기까지 오지 않는다. 남은 갈래는
+    // **지워 봤는데 모두 되돌린** 경우다 — 실행해 봐야 알 수 있어 여기서 말해야 한다.
     if report.nothing_to_do {
-        if report.rolled_back.is_empty() {
-            return Ok("지울 보이지 않는 텍스트가 없습니다. 파일을 바꾸지 않았습니다.".to_string());
-        }
-        return Ok(format!(
-            "지울 수 있는 것이 없었습니다 — 지워 본 {}쪽 모두 화면이나 보이는 텍스트가 달라져 되돌렸습니다(파일을 바꾸지 않음).\n{}",
-            report.rolled_back.len(),
-            describe_removal(report, "원본 그대로")
+        return Ok((
+            format!(
+                "지울 수 있는 것이 없었습니다 — 지워 본 {}쪽 모두 화면이나 보이는 텍스트가 달라져 되돌렸습니다(파일을 바꾸지 않음).\n{}",
+                report.rolled_back.len(),
+                describe_removal(report)
+            ),
+            None,
         ));
     }
-    let backup_note = swap_in_result(app, pdf, temp, "OCR 텍스트를 지웠습니다.", "OCR을 삭제할 수 없습니다")?;
-    Ok(describe_removal(report, &backup_note))
+    let backup = swap_in_result(app, pdf, temp, "OCR 텍스트를 지웠습니다.", "OCR을 삭제할 수 없습니다")?;
+    Ok((describe_removal(report), Some(backup)))
 }
 
-/// 원본을 `.backup`으로 복사(이미 있으면 유지)하고 임시 파일로 바꾼 뒤 다시 연다. 백업 안내 문장
-/// 또는 실패 이유(원본은 그대로).
+/// 원본을 백업으로 복사하고 임시 파일로 바꾼 뒤 다시 연다. **만든 백업의 경로** 또는 실패
+/// 이유(원본은 그대로).
 ///
 /// `action`은 실패 문장에 들어갈 작업 이름(예: "OCR을 삭제할 수 없습니다") — 파일이 다른 앱에
 /// 열려 있어 쓰기가 막히는 경우를 그 자리에 맞게 설명하기 위해서다(2026-09-27 요청).
@@ -538,7 +549,7 @@ fn swap_in_result(
     temp: Option<&Path>,
     status: &str,
     action: &str,
-) -> Result<String, String> {
+) -> Result<PathBuf, String> {
     let temp = temp.ok_or("결과 파일 경로가 없습니다.")?;
     // 쓰기가 권한 문제로 막히는 가장 흔한 원인은 그 파일을 다른 앱이 붙잡고 있는 것이다
     // (Windows는 열린 파일의 교체를 막는다). 원인을 짚어 주지 않으면 사용자가 손쓸 데가 없다.
@@ -553,7 +564,6 @@ fn swap_in_result(
         return Err(write_blocked(&err)
             .unwrap_or_else(|| format!("원본 백업 실패({err}) — 원본은 바뀌지 않았습니다.")));
     }
-    let backup_note = format!("원본 백업: {}", crate::app::display_filename(&backup));
     if let Err(err) = std::fs::rename(temp, pdf) {
         let _ = std::fs::remove_file(temp);
         return Err(write_blocked(&err)
@@ -563,7 +573,7 @@ fn swap_in_result(
         app.reload_current_document();
     }
     app.status_message = Some(status.to_string());
-    Ok(backup_note)
+    Ok(backup)
 }
 
 // ---------------------------------------------------------------- 가져오기
@@ -582,7 +592,7 @@ pub fn request_import(ctx: &egui::Context, app: &mut PdfViewerApp) {
         return;
     }
     let files = rfd::FileDialog::new()
-        .set_title("가져올 hOCR 파일 선택(페이지별 파일이면 여러 개)")
+        .set_title("가져올 hOCR 파일을 선택하세요. 복수 선택도 가능합니다.")
         .add_filter("hOCR", &["hocr", "html", "htm", "xhtml"])
         .pick_files();
     focus_window(ctx);
@@ -806,22 +816,12 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
             let (hocr_count, pdf_count) = (dialog.hocr_count(), dialog.pdf_count());
             {
                 let a = &dialog.analysis;
-                ui.label(format!(
-                    "hOCR {}쪽(파일 {}개{}) → PDF {}쪽",
-                    a.hocr_pages.len(),
-                    dialog.files.len(),
-                    if a.ordered_by_ppageno { ", ppageno 순서" } else { "" },
-                    a.pdf_pages.len()
-                ));
-                // 주어를 밝힌다 — 빠진 항목은 hOCR 쪽 이야기다(2026-09-28 요청).
+                bullet(ui, format!("hOCR에 총 {}쪽의 OCR 텍스트 정보가 담겨 있습니다.", a.hocr_pages.len()));
                 if a.dropped_items + a.empty_words > 0 {
-                    ui.weak(format!(
-                        "hOCR에서 위치 정보가 없거나 비어 있어 뺀 항목: {}개",
+                    weak_bullet(ui, format!(
+                        "이 중 위치 정보가 없거나 비어 있는 {}개 항목은 제외합니다.",
                         a.dropped_items + a.empty_words
                     ));
-                }
-                if a.hocr_pages.len() != a.pdf_pages.len() {
-                    ui.colored_label(ui.visuals().warn_fg_color, "hOCR과 PDF의 페이지 수가 다릅니다.");
                 }
                 // 같은 페이지의 hOCR을 여러 개 골랐을 때 — 중복이 페이지 하나씩 차지해 뒤의 대응이
                 // 통째로 밀리므로, 조용히 넘기지 않고 짚어 준다(2026-09-27 요청).
@@ -829,8 +829,7 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     ui.colored_label(
                         ui.visuals().error_fg_color,
                         format!(
-                            "같은 페이지의 hOCR을 여러 개 고른 것으로 보입니다 — 겹치는 페이지: {}. \
-                             이대로 넣으면 뒤쪽 대응이 한 칸씩 밀립니다. 파일 선택을 다시 확인하세요.",
+                            "• 여러 개의 hOCR 파일이 같은 페이지(p.{})를 가리키고 있습니다.",
                             summarize_pages(&a.duplicate_page_numbers)
                         ),
                     );
@@ -843,7 +842,7 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
             let count_before = dialog.count();
             let mut edited = None;
             ui.horizontal(|ui| {
-                ui.label("hOCR");
+                ui.label("hOCR  pp.");
                 if ui.add(egui::DragValue::new(&mut dialog.hocr_first).range(1..=hocr_count)).changed() {
                     edited = Some(Field::HocrFirst);
                 }
@@ -851,7 +850,7 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 if ui.add(egui::DragValue::new(&mut dialog.hocr_last).range(1..=hocr_count)).changed() {
                     edited = Some(Field::HocrLast);
                 }
-                ui.label("쪽   →   PDF");
+                ui.label("→   PDF  pp.");
                 if ui.add(egui::DragValue::new(&mut dialog.pdf_first).range(1..=pdf_count)).changed() {
                     edited = Some(Field::PdfFirst);
                 }
@@ -859,12 +858,10 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 if ui.add(egui::DragValue::new(&mut dialog.pdf_last).range(1..=pdf_count)).changed() {
                     edited = Some(Field::PdfLast);
                 }
-                ui.label("쪽");
             });
             if let Some(field) = edited {
                 dialog.sync(field, count_before);
             }
-            ui.weak(format!("대응되는 쪽수: {}쪽", dialog.count()));
 
             let mapped = dialog.mapped();
             let bad_aspect: Vec<usize> = mapped.iter().filter(|(i, k)| !dialog.aspect_ok(*i, *k)).map(|(i, _)| i + 1).collect();
@@ -874,14 +871,13 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 if bad_aspect.len() == mapped.len() {
                     ui.colored_label(
                         ui.visuals().error_fg_color,
-                        "이 PDF의 hOCR이 아닌 것 같습니다 — 대응되는 모든 페이지의 가로세로 비율이 맞지 않습니다.",
+                        "• 이 PDF의 hOCR이 아닌 것 같습니다. 대응되는 모든 페이지의 종횡비가 맞지 않습니다.",
                     );
                 } else {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
                         format!(
-                            "가로세로 비율이 맞지 않아 건너뛸 페이지 {}쪽(회전된 스캔이거나 다른 파일의 hOCR일 수 있음): {}",
-                            bad_aspect.len(),
+                            "• 다음 페이지는 페이지가 회전됐거나 종횡비가 맞지 않아 건너뜁니다: p.{}",
                             summarize_pages(&bad_aspect)
                         ),
                     );
@@ -899,30 +895,26 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
             {
                 let a = &dialog.analysis;
                 if a.signed {
-                    ui.colored_label(ui.visuals().warn_fg_color, "디지털 서명된 PDF입니다. 파일을 새로 쓰면 서명이 무효가 됩니다.");
-                    ui.checkbox(&mut dialog.signature_ack, "서명이 무효가 되는 것을 이해했습니다");
+                    ui.colored_label(ui.visuals().warn_fg_color, "• 디지털 서명된 PDF입니다. 파일을 새로 쓰면 서명이 무효가 됩니다.");
+                    ui.checkbox(&mut dialog.signature_ack, "그래도 진행합니다.");
                 }
                 if a.tagged {
-                    ui.weak("태그(접근성 구조)가 있는 PDF입니다. 넣는 텍스트는 태그 구조에 들어가지 않습니다.");
+                    weak_bullet(ui, "스크린 리더용 태그가 있는 PDF입니다. 가져온 OCR 텍스트는 태그에 영향을 미치지 않습니다.");
                 }
                 if let Some(pdfa) = &a.pdfa {
-                    ui.weak(format!("PDF/A-{pdfa} 선언은 유지하지만 규격 준수는 보장하지 않습니다. 외부 검증(veraPDF 등)을 권합니다."));
+                    weak_bullet(ui, pdfa_note(pdfa));
                 }
             }
 
             let (insert, overwrite, skipped) = dialog.selection();
             ui.add_space(6.0);
-            ui.label(format!(
-                "넣을 페이지 {}쪽(그중 기존 OCR 덮어쓰기 {}쪽)",
-                insert.len(),
-                overwrite.len()
-            ));
+            bullet(ui, format!("가져올 페이지 {}쪽 중 {}쪽은 기존 OCR을 덮어씁니다.", insert.len(), overwrite.len()));
             // 페이지 목록이 없으니(2026-09-28 개편) 빠지는 페이지는 이유별 개수로 알린다 —
             // 조용히 빠지면 사용자가 알 길이 없다.
             if !skipped.is_empty() {
-                ui.weak(format!("건너뛸 페이지 — {}", describe_skips(&skipped)));
+                weak_bullet(ui, format!("건너뛰는 페이지: {}", describe_skips(&skipped)));
             }
-            ui.weak(BACKUP_NOTE);
+            bullet(ui, "원본PDF는 같은 위치에 백업됩니다.");
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 let allowed = !insert.is_empty() && (!dialog.analysis.signed || dialog.signature_ack);
@@ -980,7 +972,7 @@ fn summarize_pages(pages: &[usize]) -> String {
     parts.join(", ")
 }
 
-fn describe_import(r: &ImportReport, skipped_by_plan: &str, backup_note: &str) -> String {
+fn describe_import(r: &ImportReport, skipped_by_plan: &str) -> String {
     let mut lines = Vec::new();
     if !skipped_by_plan.is_empty() {
         lines.push(format!("대상에서 뺀 페이지 — {skipped_by_plan}"));
@@ -993,15 +985,6 @@ fn describe_import(r: &ImportReport, skipped_by_plan: &str, backup_note: &str) -
             lines.push(format!("기존 OCR을 지우고 넣은 페이지: {}쪽", r.pages_overwritten));
         }
         lines.push(format!("파일 크기: {} → {}", human_size(r.size_before), human_size(r.size_after)));
-    }
-    if r.dedupe_same + r.dedupe_conflicts + r.dedupe_kept_over_damaged > 0 {
-        lines.push(format!(
-            "중복 제거: 디지털 텍스트와 같아 뺀 단어 {}, 내용이 달라 디지털을 우선한 단어 {}, 디지털 손상 의심으로 남긴 단어 {}",
-            r.dedupe_same, r.dedupe_conflicts, r.dedupe_kept_over_damaged
-        ));
-        for (page, ocr, digital) in r.dedupe_samples.iter().take(5) {
-            lines.push(format!("  p.{page}: OCR \"{ocr}\" ↔ 디지털 \"{digital}\""));
-        }
     }
     if !r.skipped.is_empty() {
         lines.push(format!("넣지 못한 페이지: {}쪽", r.skipped.len()));
@@ -1023,19 +1006,19 @@ fn describe_import(r: &ImportReport, skipped_by_plan: &str, backup_note: &str) -
             r.also_reverted.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
         ));
     }
-    lines.push(backup_note.to_string());
     lines.join("\n")
 }
 
-fn describe_removal(r: &RemovalReport, backup_note: &str) -> String {
+fn describe_removal(r: &RemovalReport) -> String {
     let a = &r.analysis;
+    // 지운 텍스트의 건수·형태별 개수는 적지 않는다(2026-09-28 결정) — 글자를 하나하나 세어 준
+    // 값은 사용자가 관심 가질 정보가 아니다. 규모는 쪽 단위로만 말한다.
     let mut lines = vec![
-        format!("바뀐 페이지: {}쪽 / 전체 {}쪽", r.pages_changed, a.pages),
         format!(
-            "지운 텍스트: {}건({}){}",
-            a.counts.removed(),
-            a.counts.describe(),
-            if a.own_layer_pages > 0 { format!(" + 이 앱이 넣은 레이어 {}쪽", a.own_layer_pages) } else { String::new() }
+            "바뀐 페이지: {}쪽 / 전체 {}쪽{}",
+            r.pages_changed,
+            a.pages,
+            if a.own_layer_pages > 0 { format!(" (이 앱이 넣은 레이어 {}쪽 포함)", a.own_layer_pages) } else { String::new() }
         ),
         format!("파일 크기: {} → {}", human_size(r.size_before), human_size(r.size_after)),
     ];
@@ -1062,7 +1045,6 @@ fn describe_removal(r: &RemovalReport, backup_note: &str) -> String {
     for (page, note) in a.notes.iter().take(10) {
         lines.push(format!("참고 p.{page}: {note}"));
     }
-    lines.push(backup_note.to_string());
     lines.join("\n")
 }
 
@@ -1122,10 +1104,10 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 let allow = |wanted: bool| kinds.is_none_or(|k| if wanted { k.invisible } else { k.visible });
                 let same_either_way = kinds.is_some_and(|k| !k.visible);
                 ui.add_enabled_ui(!same_either_way && allow(true), |ui| {
-                    ui.radio_value(&mut dialog.invisible_only, true, "보이지 않는 텍스트만(OCR 레이어)");
+                    ui.radio_value(&mut dialog.invisible_only, true, "OCR 텍스트만");
                 });
                 ui.add_enabled_ui(!same_either_way && allow(false), |ui| {
-                    ui.radio_value(&mut dialog.invisible_only, false, "페이지의 모든 텍스트");
+                    ui.radio_value(&mut dialog.invisible_only, false, "모든 텍스트");
                 });
                 if same_either_way {
                     ui.weak("이 문서에는 보이는 텍스트가 없어 어느 쪽을 골라도 결과가 같습니다.");
@@ -1134,10 +1116,10 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 }
                 if dialog.format == ExportFormat::Txt {
                     ui.add_space(6.0);
-                    ui.checkbox(&mut dialog.txt_page_labels, "페이지 레이블 함께 표기")
+                    ui.checkbox(&mut dialog.txt_page_labels, "페이지 번호 함께 표기")
                         .on_hover_text("PDF의 페이지 레이블이 물리 번호와 다르면 === [p. 12 | xii] === 처럼 함께 적습니다.");
-                    ui.checkbox(&mut dialog.txt_crlf, "줄바꿈을 CRLF로(Windows 호환)");
-                    ui.checkbox(&mut dialog.txt_form_feed, "페이지 사이에 폼피드 넣기(pdftotext 호환)");
+                    ui.checkbox(&mut dialog.txt_crlf, "줄바꿈을 CRLF로 처리(Windows 호환)");
+                    ui.checkbox(&mut dialog.txt_form_feed, "페이지 사이에 경계 표식 삽입(pdftotext 호환)");
                     ui.add_space(4.0);
                     ui.weak("txt에는 위치 정보가 없어 OCR 가져오기에 쓸 수 없습니다.");
                 } else {
@@ -1186,7 +1168,8 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
             .and_then(Path::file_stem)
             .map(|s| format!("{}.{extension}", crate::app::display_filename(Path::new(s))))
             .unwrap_or_else(|| format!("ocr.{extension}"));
-        let mut file_dialog = rfd::FileDialog::new().set_file_name(&default_name);
+        let mut file_dialog =
+            rfd::FileDialog::new().set_title("OCR을 내보낼 위치를 지정하세요.").set_file_name(&default_name);
         file_dialog = match extension {
             "hocr" => file_dialog.add_filter("hOCR", &["hocr", "html"]),
             _ => file_dialog.add_filter("텍스트", &["txt"]),
@@ -1224,16 +1207,15 @@ fn start_export(ctx: &egui::Context, app: &mut PdfViewerApp, output: PathBuf) {
         ExportFormat::Hocr => "hOCR",
         ExportFormat::Txt => "txt",
     };
-    let source_label = if dialog.invisible_only { "보이지 않는 텍스트만" } else { "모든 텍스트" };
+    let source_label = if dialog.invisible_only { "OCR 텍스트만" } else { "모든 텍스트" };
     let invisible_only = dialog.invisible_only;
-    let output_label = output.display().to_string();
-    let describe = move |r: &ExportReport| describe_export(r, format_label, source_label, invisible_only, &output_label);
+    let describe = move |r: &ExportReport| describe_export(r, format_label, source_label, invisible_only);
 
     app.ocr_job = Some(OcrJob::spawn(
         ctx,
         format!("OCR 텍스트 내보내기({format_label})"),
         &Job::Export(job),
-        JobKind::Export { describe: Box::new(describe) },
+        JobKind::Export { describe: Box::new(describe), output },
         Some(temp_output),
     ));
 }
@@ -1245,7 +1227,7 @@ fn partial_path(output: &Path) -> PathBuf {
     output.with_file_name(name)
 }
 
-fn describe_export(r: &ExportReport, format: &str, source: &str, invisible_only: bool, output: &str) -> String {
+fn describe_export(r: &ExportReport, format: &str, source: &str, invisible_only: bool) -> String {
     let mut lines = vec![
         format!("형식: {format} ({source})"),
         format!("페이지: {}쪽 중 텍스트 있음 {}쪽, 단어 {}개", r.pages, r.pages_with_text, r.words),
@@ -1263,9 +1245,8 @@ fn describe_export(r: &ExportReport, format: &str, source: &str, invisible_only:
         }
     }
     if r.pages_with_text == 0 && invisible_only {
-        lines.push("보이지 않는 텍스트가 없습니다. '페이지의 모든 텍스트'로 다시 내보내 보세요.".to_string());
+        lines.push("OCR 텍스트가 없습니다. '모든 텍스트'로 다시 내보내 보세요.".to_string());
     }
-    lines.push(format!("저장 위치: {output}"));
     lines.join("\n")
 }
 
@@ -1275,6 +1256,7 @@ fn show_job_window(ctx: &egui::Context, app: &mut PdfViewerApp) {
     // 닫힌다(2026-09-27 요청).
     let mut close = job.is_finished() && crate::app::escape_to_close(ctx);
     let mut show_mark: Option<ProblemMark> = None;
+    let mut reveal: Option<PathBuf> = None;
     // 고정하지 않는다 — 결과의 "보기"로 페이지를 확인할 때 창을 옆으로 옮길 수 있게.
     egui::Window::new(job.title.clone())
         .collapsible(false)
@@ -1321,6 +1303,11 @@ fn show_job_window(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
+                    if let Some((label, path)) = &job.reveal {
+                        if ui.button(*label).clicked() {
+                            reveal = Some(path.clone());
+                        }
+                    }
                     if ui.button("복사").clicked() {
                         ui.output_mut(|o| o.copied_text = report.clone());
                     }
@@ -1330,6 +1317,11 @@ fn show_job_window(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 });
             }
         });
+    if let Some(path) = reveal {
+        if let Err(err) = crate::app::reveal_in_file_manager(&path) {
+            app.status_message = Some(format!("위치를 열 수 없습니다({err}): {}", path.display()));
+        }
+    }
     if let Some(mark) = show_mark {
         let page = mark.page as u32;
         app.ocr_mark = Some(mark);

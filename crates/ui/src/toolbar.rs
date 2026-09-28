@@ -280,21 +280,27 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
 
             // ---- OCR (planning/ocr_feature_considerations.md)
             hover_menu(ui, "ocr", "OCR", !ocr_busy, MENU_WIDTH, |ui| {
-                if menu_item(ui, "전체 삭제…", has_file, "보이지 않는 텍스트(OCR 레이어)를 지웁니다 — 원본은 .backup으로 보존") {
+                if menu_item(ui, "전체 삭제…", has_file, "보이지 않는 텍스트(OCR 레이어)를 모두 지웁니다. 원본파일은 백업됩니다.") {
                     crate::ocr_dialogs::request_removal(ui.ctx(), app);
                 }
-                if menu_item(ui, "폴더 일괄 삭제…", true, "고른 폴더(하위 폴더 포함)의 모든 PDF에서 지웁니다 — 결과는 CSV 로그") {
+                if menu_item(
+                    ui,
+                    "폴더 일괄 삭제…",
+                    true,
+                    "선택하는 폴더 및 하위 폴더의 모든 PDF에서 OCR 정보를 일괄 삭제합니다. \
+                     원본파일은 모두 백업되고, 세부 로그는 CSV에 기록됩니다.",
+                ) {
                     crate::ocr_dialogs::request_folder_removal(ui.ctx(), app);
                 }
                 ui.separator();
-                if menu_item(ui, "가져오기…", has_file, "hOCR 파일의 텍스트를 보이지 않는 텍스트 레이어로 넣습니다") {
+                if menu_item(ui, "가져오기…", has_file, "hOCR 파일로부터 현재 열린 PDF로 OCR 텍스트를 가져옵니다.") {
                     crate::ocr_dialogs::request_import(ui.ctx(), app);
                 }
                 use crate::ocr_worker::ExportFormat;
-                if menu_item(ui, "hOCR로 내보내기…", has_file, "단어 위치가 담긴 hOCR — 가져오기에 다시 쓸 수 있음") {
+                if menu_item(ui, "hOCR로 내보내기…", has_file, "현재 열린 PDF의 OCR 정보를 hOCR 파일로 내보냅니다.") {
                     crate::ocr_dialogs::request_export(ui.ctx(), app, ExportFormat::Hocr);
                 }
-                if menu_item(ui, "txt로 내보내기…", has_file, "페이지 번호 표기가 붙은 텍스트") {
+                if menu_item(ui, "txt로 내보내기…", has_file, "현재 열린 PDF의 각 페이지별 OCR 정보를 txt 파일로 내보냅니다.") {
                     crate::ocr_dialogs::request_export(ui.ctx(), app, ExportFormat::Txt);
                 }
             });

@@ -57,9 +57,8 @@ impl RemovalCounts {
         self.0.iter().map(|(_, n)| n).sum()
     }
 
-    pub fn describe(&self) -> String {
-        self.0.iter().map(|(kind, n)| format!("{kind} {n}")).collect::<Vec<_>>().join(" · ")
-    }
+    // 형태별 개수를 문장으로 잇던 `describe`는 없앴다(2026-09-28 결정) — 지울 대상이 OCR
+    // 텍스트 하나뿐이라 형태를 나눌 것이 없고, 글자 수는 사용자가 관심 가질 정보가 아니다.
 }
 
 impl From<pdf_ocr::remove::KindCounts> for RemovalCounts {
@@ -526,7 +525,9 @@ pub(crate) fn open_for_edit(
     let preflight = pdf_ocr::preflight::Preflight::inspect(&doc, &raw);
     drop(raw);
     if preflight.encrypted {
-        bail!("암호화된 PDF는 아직 지원하지 않습니다. 다시 저장하면 암호화가 풀리거나 바뀔 수 있어서입니다.");
+        // 빈 사용자 암호로 열리는 암호 PDF도 있어 pdfium보다 먼저 구조에서 막는다. 문구는 pdfium
+        // 열기 실패와 같게 맞춘다 — 같은 상황을 두 가지로 말하지 않는다(2026-09-28 md 지적).
+        return Err(password_protected(action));
     }
     let pdfium_pages = engine.open_document(pdf).map_err(|e| open_error_message(e, action))?.pages().len() as usize;
     if pdfium_pages != preflight.page_count {
@@ -825,7 +826,7 @@ pub(crate) fn verify_pages(
                 let actual = pdf_engine::verify::sorted_chars_in_font(&after_page, pdf_ocr::glyphless::FONT_NAME)?;
                 if &actual != expected {
                     return Ok(Err(format!(
-                        "넣은 텍스트가 기대와 다르게 추출됨(기대 {}자, 추출 {}자)",
+                        "가져온 텍스트가 기대와 다르게 추출됨(기대 {}자, 추출 {}자)",
                         expected.len(),
                         actual.len()
                     )));
@@ -869,13 +870,21 @@ impl Action {
     }
 }
 
+/// "암호로 보호된 파일" 안내 — 구조 점검과 pdfium 열기 실패가 같은 문구를 쓴다.
+fn password_protected(action: Action) -> anyhow::Error {
+    match action.phrase() {
+        None => anyhow::anyhow!("암호로 보호된 파일"),
+        Some(phrase) => anyhow::anyhow!("파일이 암호로 보호돼 있어서 {phrase}."),
+    }
+}
+
 /// pdfium의 열기 오류를 사용자에게 보일 문장으로 바꾼다.
 pub(crate) fn open_error_message(err: anyhow::Error, action: Action) -> anyhow::Error {
     use pdfium_render::prelude::{PdfiumError, PdfiumInternalError};
     // (짧은 이름꼴, 긴 문장의 "…해서" 부분)
     let (short, because) = match err.downcast_ref::<PdfiumError>() {
         Some(PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError)) => {
-            ("암호로 보호된 파일", "파일이 암호로 보호돼 있어서")
+            return password_protected(action)
         }
         Some(PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::FormatError)) => {
             ("형식이 손상된 파일", "파일 형식이 손상돼 있어서")

@@ -3,12 +3,12 @@
 //! - hOCR 픽셀 좌표 → 표시 페이지 프레임([`layer_lines`]).
 //! - 페이지를 덮는 큰 이미지 비율([`image_coverage`]).
 //! - 페이지 분류(6.3.2, [`classify_page`]).
-//! - 문자 단위 중복 제거(6.3.3, [`dedupe`]): hOCR 단어마다 bbox가 겹치는 디지털 **문자**를 모아
-//!   비교한다. 디지털 텍스트와 OCR은 단어를 나누는 방식이 달라서(디지털 "제1장" ↔ OCR "제1", "장")
-//!   단어끼리 비교하면 놓친다. 겹침은 IoU가 아니라 "작은 쪽(문자) 면적 대비 교차 면적"으로 판정한다.
 //! - 디지털 텍스트 손상 추정([`looks_damaged`]): ToUnicode가 망가진 PDF는 보이는 글자를 복사하면
-//!   깨진다. 그런 페이지에서 "내용이 다르면 디지털 우선" 규칙을 쓰면 깨진 텍스트만 남으므로,
-//!   OCR을 우선하고 사용자 확인으로 돌린다.
+//!   깨진다. 페이지 분류에서 "판단 불가"로 돌리는 신호로 쓴다.
+//!
+//! 여기 있던 **문자 단위 중복 제거**(6.3.3)는 폐기했다(2026-09-28 결정). 쪽번호·면주가 디지털로
+//! 심어진 자리에 OCR이 겹치는 문제는 내보낼·가져올 **영역을 지정하는 기능**으로 원천에서 풀기로
+//! 했다(예약 12).
 //!
 //! 기준값은 [`Thresholds`] 한 곳에 모아 두고 리포트에 함께 적는다. 설정 화면에는 내놓지 않는다.
 
@@ -26,8 +26,6 @@ pub struct Thresholds {
     pub big_image: f64,
     /// 페이지 가장자리 여백 폭(가로·세로 각각의 비율).
     pub margin: f64,
-    /// 문자가 hOCR 단어와 이 비율 이상 겹치면 그 단어에 속한 것으로 본다.
-    pub overlap: f64,
     /// 디지털 글자 중 사용자 정의 영역·대체 문자·제어 문자가 이 비율을 넘으면 손상 의심.
     pub damaged_ratio: f64,
     /// hOCR 페이지와 PDF 페이지의 가로세로 비율 허용 오차(상대).
@@ -35,7 +33,7 @@ pub struct Thresholds {
 }
 
 pub const THRESHOLDS: Thresholds =
-    Thresholds { big_image: 0.8, margin: 0.1, overlap: 0.5, damaged_ratio: 0.3, aspect_tolerance: 0.03 };
+    Thresholds { big_image: 0.8, margin: 0.1, damaged_ratio: 0.3, aspect_tolerance: 0.03 };
 
 /// hOCR 페이지의 줄을 표시 프레임 좌표로. 가로세로 비율이 맞지 않으면 오류(그 페이지는 건너뜀).
 pub fn layer_lines(page: &HocrPage, frame: &PageFrame) -> anyhow::Result<Vec<LayerLine>> {
@@ -199,75 +197,6 @@ pub fn looks_damaged(chars: &[DigitalChar]) -> bool {
     bad as f64 / chars.len() as f64 > THRESHOLDS.damaged_ratio
 }
 
-// ------------------------------------------------------------------ 중복 제거
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct DedupeStats {
-    /// 같은 내용이라 넣지 않은 단어.
-    pub same: usize,
-    /// 겹치는데 내용이 달라 디지털을 우선하고 뺀 단어(OCR 오인식 추정).
-    pub conflicts: usize,
-    /// 손상 의심 페이지라 OCR을 우선해 남긴 단어.
-    pub kept_over_damaged: usize,
-    /// 내용이 달랐던 예(최대 5개) — (OCR, 디지털).
-    pub samples: Vec<(String, String)>,
-}
-
-fn compact(text: &str) -> String {
-    use unicode_normalization::UnicodeNormalization;
-    text.nfc().filter(|c| !c.is_whitespace()).collect()
-}
-
-fn overlap_ratio(small: &DRect, big: &DRect) -> f64 {
-    let w = (small.x1.min(big.x1) - small.x0.max(big.x0)).max(0.0);
-    let h = (small.y1.min(big.y1) - small.y0.max(big.y0)).max(0.0);
-    let area = small.width() * small.height();
-    if area <= 0.0 {
-        // 폭 0 글자: 중심이 안에 있으면 겹친 것으로 본다.
-        let (cx, cy) = ((small.x0 + small.x1) / 2.0, (small.y0 + small.y1) / 2.0);
-        return if cx >= big.x0 && cx <= big.x1 && cy >= big.y0 && cy <= big.y1 { 1.0 } else { 0.0 };
-    }
-    w * h / area
-}
-
-/// hOCR 단어 중 디지털 텍스트와 겹치는 것을 뺀다(6.3.3). `prefer_ocr`면(손상 의심) 내용이 다를 때
-/// OCR 단어를 남긴다.
-pub fn dedupe(lines: &mut Vec<LayerLine>, digital: &[DigitalChar], prefer_ocr: bool) -> DedupeStats {
-    let mut stats = DedupeStats::default();
-    if digital.is_empty() {
-        return stats;
-    }
-    for line in lines.iter_mut() {
-        line.words.retain(|word| {
-            let overlapping: String = digital
-                .iter()
-                .filter(|c| overlap_ratio(&c.rect, &word.rect) >= THRESHOLDS.overlap)
-                .map(|c| c.ch)
-                .collect();
-            if overlapping.trim().is_empty() {
-                return true;
-            }
-            let (ocr, digital) = (compact(&word.text), compact(&overlapping));
-            if ocr == digital {
-                stats.same += 1;
-                return false;
-            }
-            if stats.samples.len() < 5 {
-                stats.samples.push((word.text.clone(), overlapping.trim().to_string()));
-            }
-            if prefer_ocr {
-                stats.kept_over_damaged += 1;
-                true
-            } else {
-                stats.conflicts += 1;
-                false
-            }
-        });
-    }
-    lines.retain(|line| !line.words.is_empty());
-    stats
-}
-
 // ------------------------------------------------------------------ 검증 보조
 
 /// 넣으려던 글자(`expected`: 글자, 칸 중심)와 추출된 글자(`extracted`: 글자, 중심)를 비교해 추출되지
@@ -399,33 +328,4 @@ mod tests {
         assert!(!looks_damaged(&[body]));
     }
 
-    #[test]
-    fn dedupe_by_characters_across_word_splits() {
-        // 디지털 "제1장"(글자 3개) ↔ OCR "제1" + "장"
-        let digital: Vec<DigitalChar> = "제1장"
-            .chars()
-            .enumerate()
-            .map(|(i, ch)| DigitalChar { ch, rect: r(10.0 + i as f64 * 10.0, 0.0, 20.0 + i as f64 * 10.0, 10.0) })
-            .collect();
-        let line = |words: Vec<(&str, DRect)>| LayerLine {
-            words: words.into_iter().map(|(t, rect)| LayerWord { text: t.to_string(), rect }).collect(),
-            angle: 0.0,
-            slope: 0.0,
-        };
-        let mut lines = vec![
-            line(vec![("제1", r(10.0, 0.0, 30.0, 10.0)), ("장", r(30.0, 0.0, 40.0, 10.0)), ("본문", r(100.0, 0.0, 120.0, 10.0))]),
-        ];
-        let stats = dedupe(&mut lines, &digital, false);
-        assert_eq!(stats.same, 2);
-        assert_eq!(lines[0].words.len(), 1);
-        assert_eq!(lines[0].words[0].text, "본문");
-
-        // 내용이 다르면 디지털 우선(뺀다), 손상 의심이면 OCR 우선(남긴다)
-        let mut lines = vec![line(vec![("제l장", r(10.0, 0.0, 40.0, 10.0))])];
-        let stats = dedupe(&mut lines, &digital, false);
-        assert_eq!((stats.conflicts, lines.len()), (1, 0));
-        let mut lines = vec![line(vec![("제l장", r(10.0, 0.0, 40.0, 10.0))])];
-        let stats = dedupe(&mut lines, &digital, true);
-        assert_eq!((stats.kept_over_damaged, lines.len()), (1, 1));
-    }
 }

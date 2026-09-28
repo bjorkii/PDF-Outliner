@@ -394,6 +394,8 @@ pub struct PdfViewerApp {
     pub ocr_export_probe: Option<crate::ocr_worker::WorkerHandle>,
     /// 실행 중이거나 결과를 보여 주는 OCR 작업(`ocr_dialogs`, `ocr_worker`).
     pub ocr_job: Option<crate::ocr_dialogs::OcrJob>,
+    /// 파일 하나를 만들고 끝나는 작업(북마크 내보내기)의 결과 알림 — "저장 위치 열기" 버튼 자리.
+    pub saved_file_notice: Option<SavedFileNotice>,
     /// OCR 전체 삭제 확인 창(분석 결과, `ocr_dialogs`).
     pub ocr_removal_confirm: Option<crate::ocr_dialogs::RemovalConfirm>,
     /// OCR 삭제·가져오기 전에 북마크 저장을 묻는 창.
@@ -536,6 +538,7 @@ impl PdfViewerApp {
             ocr_export_dialog: None,
             ocr_export_probe: None,
             ocr_job: None,
+            saved_file_notice: None,
             ocr_removal_confirm: None,
             ocr_needs_save: None,
             ocr_import_dialog: None,
@@ -1043,7 +1046,7 @@ impl PdfViewerApp {
     pub fn export_bookmarks_csv(&mut self, path: PathBuf) {
         let rows = bookmark::flatten_tree(&self.bookmarks, &self.current_filename_for_export());
         match import_export::export_csv(&rows, &path) {
-            Ok(()) => self.status_message = Some(format!("CSV로 내보냈습니다: {:?}", path)),
+            Ok(()) => self.notice_saved("CSV로 내보내기", rows.len(), path),
             Err(err) => self.status_message = Some(format!("CSV 내보내기 실패: {err}")),
         }
     }
@@ -1051,9 +1054,20 @@ impl PdfViewerApp {
     pub fn export_bookmarks_xlsx(&mut self, path: PathBuf) {
         let rows = bookmark::flatten_tree(&self.bookmarks, &self.current_filename_for_export());
         match import_export::export_xlsx(&rows, &path) {
-            Ok(()) => self.status_message = Some(format!("Excel로 내보냈습니다: {:?}", path)),
+            Ok(()) => self.notice_saved("Excel로 내보내기", rows.len(), path),
             Err(err) => self.status_message = Some(format!("Excel 내보내기 실패: {err}")),
         }
+    }
+
+    /// 내보내기가 끝났음을 알린다. 전체 경로를 문구에 적는 대신 "저장 위치 열기" 버튼을
+    /// 둔다(2026-09-28 요청).
+    fn notice_saved(&mut self, title: &str, rows: usize, path: PathBuf) {
+        self.status_message = Some(format!("북마크 {rows}개를 내보냈습니다."));
+        self.saved_file_notice = Some(SavedFileNotice {
+            title: title.to_string(),
+            message: format!("북마크 {rows}개를 {}(으)로 내보냈습니다.", display_filename(&path)),
+            path,
+        });
     }
 
     pub fn import_bookmarks_csv(&mut self, path: PathBuf) {
@@ -2140,6 +2154,73 @@ pub(crate) fn backup_path(file: &Path, stamp: &str) -> PathBuf {
     file.with_file_name(name)
 }
 
+/// 파일 하나를 만들고 끝난 작업의 결과 알림.
+pub struct SavedFileNotice {
+    pub title: String,
+    pub message: String,
+    pub path: PathBuf,
+}
+
+fn show_saved_file_notice(ctx: &egui::Context, app: &mut PdfViewerApp) {
+    if app.saved_file_notice.is_some() && escape_to_close(ctx) {
+        app.saved_file_notice = None;
+        return;
+    }
+    let Some(notice) = app.saved_file_notice.as_ref() else { return };
+    let (title, message, path) = (notice.title.clone(), notice.message.clone(), notice.path.clone());
+    let mut close = false;
+    let mut failed = None;
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(false)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.screen_rect().center())
+        .show(ctx, |ui| {
+            ui.label(message);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("저장 위치 열기").clicked() {
+                    if let Err(err) = reveal_in_file_manager(&path) {
+                        failed = Some(format!("저장 위치를 열 수 없습니다({err}): {}", path.display()));
+                    }
+                }
+                if ui.button("닫기").clicked() {
+                    close = true;
+                }
+            });
+        });
+    if let Some(message) = failed {
+        app.status_message = Some(message);
+    }
+    if close {
+        app.saved_file_notice = None;
+    }
+}
+
+/// 파일 관리자에서 이 파일이 있는 자리를 연다(macOS는 Finder에서 그 파일을 고른 상태로).
+///
+/// 결과 창에 전체 경로를 적는 대신 이 버튼을 둔다(2026-09-28 요청) — 경로 문자열은 길어서 창을
+/// 늘리고, 정작 그 자리로 가려면 사용자가 손으로 옮겨 붙여야 했다.
+///
+/// Windows의 `explorer`는 성공해도 종료 코드가 0이 아니라, 띄우기만 하고 결과를 보지 않는다.
+pub(crate) fn reveal_in_file_manager(path: &Path) -> std::io::Result<()> {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    } else if cfg!(target_os = "windows") {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(format!("/select,{}", path.display()));
+        c
+    } else {
+        // 파일을 고르는 표준 방법이 없으므로 담긴 폴더를 연다.
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
+    };
+    command.spawn().map(|_| ())
+}
+
 /// 백업 이름에 넣을 실행 시각 `YYYYMMDDHHMMSS`.
 pub(crate) fn backup_stamp() -> String {
     chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
@@ -2512,6 +2593,7 @@ impl eframe::App for PdfViewerApp {
         show_search_no_results_dialog(ctx, self);
         show_rename_dialog(ctx, self);
         show_clear_bookmarks_dialog(ctx, self);
+        show_saved_file_notice(ctx, self);
         crate::ocr_dialogs::show(ctx, self);
         crate::viewer_panel::show(ctx, self);
         // 분리된 검색 결과 창(항상 위) — 별도 OS 창이라 메인 창 레이아웃과 무관.
