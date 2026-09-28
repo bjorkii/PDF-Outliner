@@ -1065,7 +1065,7 @@ impl PdfViewerApp {
         self.status_message = Some(format!("북마크 {rows}개를 내보냈습니다."));
         self.saved_file_notice = Some(SavedFileNotice {
             title: title.to_string(),
-            message: format!("북마크 {rows}개를 {}(으)로 내보냈습니다.", display_filename(&path)),
+            message: format!("북마크 {rows}개를 {}로 내보냈습니다.", display_filename(&path)),
             path,
         });
     }

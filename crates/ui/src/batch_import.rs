@@ -174,11 +174,14 @@ pub fn prepare_job(folder: PathBuf) -> Result<BatchImportJob, String> {
             if let Some(first_source) = source_of.get(&name) {
                 // 이미 앞선(우선순위 높은) 북마크 파일이 이 PDF의 행을 제공함 — 중복은
                 // 적용하지 않고 건너뛴다(2026-07-19 사용자 지정).
+                // 겹친 것은 **시트 안의 '파일명' 열 값**이다 — 시트 파일 이름이 아니다.
+                // 예전 문구("'A'의 'X.pdf' 행 4개 건너뜀")는 그 점이 드러나지 않아 읽히지
+                // 않았다(2026-09-28 사용자 지적).
                 setup_notes.push(format!(
-                    "[중복] '{}'의 '{name}' 행 {}개 건너뜀 — 먼저 읽은 '{}'의 행을 적용",
+                    "[중복] '{name}'에 넣을 북마크가 두 파일에 있습니다 — 먼저 읽은 '{}'의 행을 적용하고 '{}'의 행 {}개는 건너뜁니다.",
+                    rel_display(first_source, &folder),
                     rel_display(sheet, &folder),
-                    group.len(),
-                    rel_display(first_source, &folder)
+                    group.len()
                 ));
                 continue;
             }
@@ -384,7 +387,10 @@ pub fn show_panel(ui: &mut egui::Ui, app: &mut crate::app::PdfViewerApp) {
         return;
     };
 
-    ui.heading("폴더 일괄 북마크 적용");
+    ui.heading(match job.phase {
+        JobPhase::Finished => "폴더 내 모든 PDF의 북마크를 내보냈습니다.",
+        _ => "폴더 내 모든 PDF에 북마크 내보내기",
+    });
     ui.add_space(6.0);
     ui.label(format!("대상 폴더: {}", job.folder.to_string_lossy().nfc().collect::<String>()));
     // 자동 인식된 북마크 파일들 — 어떤 파일이 어떤 순서로 적용되는지 사용자가 확인

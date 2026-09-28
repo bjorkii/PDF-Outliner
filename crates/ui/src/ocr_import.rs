@@ -131,6 +131,8 @@ pub struct ProblemMark {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ImportReport {
     pub pages_inserted: usize,
+    /// 실제로 넣은 PDF 페이지 번호(1부터, 되돌린 페이지 제외) — 결과 창 머리글에 쓴다.
+    pub inserted: Vec<usize>,
     pub words_inserted: usize,
     pub pages_overwritten: usize,
     /// (페이지 번호, 이유) — 넣지 못한 페이지(비율 불일치, 넣을 단어 없음 등).
@@ -371,7 +373,7 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
             }
         };
         if lines.is_empty() {
-            report.skipped.push((index + 1, "넣을 단어가 없음".to_string()));
+            report.skipped.push((index + 1, "가져올 OCR 텍스트가 없음".to_string()));
             continue;
         }
         targets.push((index, page_ids[index], frame, lines));
@@ -446,6 +448,7 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
     }
     let kept: Vec<_> = targets.iter().filter(|t| !reverted.contains(&t.0)).collect();
     report.pages_inserted = kept.len();
+    report.inserted = kept.iter().map(|t| t.0 + 1).collect();
     report.words_inserted = kept.iter().map(|t| t.3.iter().map(|l| l.words.len()).sum::<usize>()).sum();
     report.size_after = std::fs::metadata(&job.temp_output).map(|m| m.len()).unwrap_or(0);
     // 결과 파일 구조 확인.
