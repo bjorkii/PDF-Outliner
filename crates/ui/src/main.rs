@@ -21,6 +21,7 @@ mod ocr_import;
 mod ocr_worker;
 mod render_worker;
 mod search_panel;
+mod status_bar;
 mod texture_cache;
 mod toolbar;
 mod trace;

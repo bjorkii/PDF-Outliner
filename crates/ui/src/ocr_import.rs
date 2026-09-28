@@ -10,7 +10,7 @@
 //! 원본과 화면·보이는 텍스트를 비교하고 넣은 글자가 그대로 추출되는지 확인해, 실패한 페이지는 삭제와
 //! 삽입을 함께 되돌린다.
 
-use crate::ocr_worker::{open_error_message, open_for_edit, verify_pages, Event};
+use crate::ocr_worker::{open_error_message, open_for_edit, verify_pages, Action, Event};
 use pdf_engine::{text_layer, PdfEngine};
 use pdf_ocr::geometry::PageFrame;
 use pdf_ocr::hocr::{parse, HocrPage};
@@ -71,6 +71,9 @@ pub struct ImportAnalysis {
     pub hocr_pages: Vec<HocrPageInfo>,
     /// hOCR 페이지 순서를 `ppageno`로 정했는지(아니면 파일·등장 순서).
     pub ordered_by_ppageno: bool,
+    /// 두 번 이상 나온 `ppageno`(1부터로 바꾼 값). **같은 페이지의 hOCR을 여러 개 고른 신호다**
+    /// — 그대로 두면 중복이 페이지 하나씩 차지해 뒤의 대응이 통째로 밀린다(2026-09-27 요청).
+    pub duplicate_page_numbers: Vec<usize>,
     pub dropped_items: usize,
     pub empty_words: usize,
     pub signed: bool,
@@ -131,7 +134,7 @@ pub struct ImportReport {
 }
 
 /// hOCR 파일들을 읽어 대응 순서의 페이지 목록으로. (페이지들, ppageno로 정렬했는지, 버린 항목, 빈 단어)
-fn load_hocr(files: &[PathBuf]) -> anyhow::Result<(Vec<HocrPage>, bool, usize, usize)> {
+fn load_hocr(files: &[PathBuf]) -> anyhow::Result<(Vec<HocrPage>, bool, usize, usize, Vec<usize>)> {
     let mut pages = Vec::new();
     let (mut dropped, mut empty) = (0, 0);
     for file in files {
@@ -145,11 +148,24 @@ fn load_hocr(files: &[PathBuf]) -> anyhow::Result<(Vec<HocrPage>, bool, usize, u
     // 모든 페이지에 서로 다른 ppageno가 있으면 그 순서를, 아니면 파일·등장 순서를 쓴다
     // (Tesseract의 페이지별 파일은 모두 ppageno 0이라 순서 정보가 없다).
     let numbers: Option<Vec<usize>> = pages.iter().map(|p| p.ppageno).collect();
-    let by_ppageno = numbers.is_some_and(|n| n.iter().collect::<BTreeSet<_>>().len() == n.len() && pages.len() > 1);
+    let by_ppageno =
+        numbers.as_ref().is_some_and(|n| n.iter().collect::<BTreeSet<_>>().len() == n.len() && pages.len() > 1);
     if by_ppageno {
         pages.sort_by_key(|p| p.ppageno);
     }
-    Ok((pages, by_ppageno, dropped, empty))
+    // 겹치는 ppageno 찾기 — 같은 페이지의 hOCR을 여러 개 고른 경우를 잡는다. Tesseract가
+    // 페이지별로 뽑은 파일은 모두 ppageno 0이라(위 주석) 파일이 여러 개일 때만 신호로 쓴다.
+    let mut duplicates = Vec::new();
+    if let Some(numbers) = numbers.filter(|_| files.len() > 1) {
+        let mut seen = BTreeSet::new();
+        for number in numbers {
+            if !seen.insert(number) {
+                duplicates.push(number + 1); // 1부터로
+            }
+        }
+        duplicates.dedup();
+    }
+    Ok((pages, by_ppageno, dropped, empty, duplicates))
 }
 
 /// 넣은 레이어가 그대로 추출되는지 페이지마다 확인한다(`skip` 페이지 제외). 빠진 글자와 그 자리를
@@ -258,13 +274,13 @@ pub fn analyze(
     emit: &mut dyn FnMut(Event),
 ) -> anyhow::Result<ImportAnalysis> {
     emit(Event::Stage("hOCR 읽는 중".to_string()));
-    let (hocr, ordered_by_ppageno, dropped_items, empty_words) = load_hocr(hocr_files)?;
+    let (hocr, ordered_by_ppageno, dropped_items, empty_words, duplicate_page_numbers) = load_hocr(hocr_files)?;
     emit(Event::Stage("페이지 분석 중".to_string()));
-    let (mut doc, preflight, _) = open_for_edit(engine, pdf)?;
+    let (mut doc, preflight, _) = open_for_edit(engine, pdf, Action::Import)?;
     let own: BTreeSet<usize> = pdf_ocr::insert::pages_with_own_layer(&doc).into_iter().collect();
     pdf_ocr::insert::strip_own_layers(&mut doc, None, &mut Applied::default())?;
     let removal = pdf_ocr::remove::plan(&doc);
-    let document = engine.open_document(pdf).map_err(open_error_message)?;
+    let document = engine.open_document(pdf).map_err(|e| open_error_message(e, Action::Import))?;
     let page_ids: Vec<ObjectId> = doc.get_pages().into_values().collect();
 
     let mut pdf_pages = Vec::with_capacity(page_ids.len());
@@ -304,6 +320,7 @@ pub fn analyze(
             })
             .collect(),
         ordered_by_ppageno,
+        duplicate_page_numbers,
         dropped_items,
         empty_words,
         signed: preflight.signed,
@@ -318,7 +335,7 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
     use anyhow::bail;
     emit(Event::Stage("hOCR 읽는 중".to_string()));
     let (hocr, ..) = load_hocr(&job.hocr_files)?;
-    let (mut doc, _, compact) = open_for_edit(engine, &job.pdf)?;
+    let (mut doc, _, compact) = open_for_edit(engine, &job.pdf, Action::Import)?;
     let size_before = std::fs::metadata(&job.pdf).map(|m| m.len()).unwrap_or(0);
     let mut report = ImportReport { size_before, ..Default::default() };
     let page_ids: Vec<ObjectId> = doc.get_pages().into_values().collect();
@@ -327,7 +344,7 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
 
     // 1. 넣을 줄 준비(원본 문서 기준 — 중복 제거는 지우기 전의 디지털 텍스트와 비교한다).
     emit(Event::Stage("단어 배치·중복 제거 중".to_string()));
-    let document = engine.open_document(&job.pdf).map_err(open_error_message)?;
+    let document = engine.open_document(&job.pdf).map_err(|e| open_error_message(e, Action::Import))?;
     let mut targets = Vec::new();
     for (k, page) in hocr.iter().enumerate() {
         let Some(index) = (job.start_page + k).checked_sub(1).filter(|i| *i < page_ids.len()) else { continue };

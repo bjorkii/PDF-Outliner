@@ -165,7 +165,11 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 }
             }
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            // auto_shrink를 꺼야 스크롤 영역이 사이드바 폭을 다 쓴다. egui의 기본값은
+            // 가로·세로 모두 "내용에 맞춰 줄이기"라, 북마크 제목이 짧은 문서(예: 전부
+            // "0017" 같은 쪽번호)에서는 영역이 글자 폭까지 쪼그라들어 스크롤바가 글자
+            // 바로 옆에 붙고 오른쪽이 텅 비어 보였다(사용자 리포트, 2026-09-27).
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 // 북마크 트리 글자를 기본(본문 12.5pt)보다 두 단계(2pt) 키운다(2026-09-15 요청).
                 // 이 스크롤 영역 안에만 적용 — 위쪽 +/-/Undo/Redo 버튼은 그대로. 접기 아이콘
                 // (Small)도 같은 비율로 키워 글자와 어울리게 한다. 행 높이는 interact_size.y(18pt)

@@ -36,13 +36,16 @@ pub enum Job {
     /// OCR 전체 삭제 전 분석(사전 점검 + 삭제 계획). 파일을 쓰지 않는다.
     AnalyzeRemoval { pdf: PathBuf },
     /// OCR 전체 삭제 — 결과를 `temp_output`에 쓰고 검증까지 한다. 원본 교체는 UI가 한다.
-    Remove { pdf: PathBuf, temp_output: PathBuf, aggressive: bool },
+    Remove { pdf: PathBuf, temp_output: PathBuf },
     /// 폴더 안 모든 PDF에서 OCR 삭제 — 파일마다 백업하고 바꾼다(설계 문서 7장 폴더 일괄 처리).
-    RemoveFolder { folder: PathBuf, aggressive: bool, skip: Vec<PathBuf> },
+    RemoveFolder { folder: PathBuf, skip: Vec<PathBuf> },
     /// hOCR 가져오기 전 분석(hOCR 파싱 + 페이지 분류). 파일을 쓰지 않는다.
     AnalyzeImport { pdf: PathBuf, hocr_files: Vec<PathBuf> },
     /// hOCR 가져오기 — 결과를 `temp_output`에 쓰고 검증까지 한다.
     Import(crate::ocr_import::ImportJob),
+    /// 이 문서에 보이는 텍스트와 보이지 않는 텍스트가 각각 있는지만 확인한다. 파일을 쓰지 않고,
+    /// 진행률도 내보내지 않는다 — 내보내기 옵션 창이 떠 있는 동안 조용히 돈다(→ `Event::TextKinds`).
+    ProbeTextKinds { pdf: PathBuf },
 }
 
 /// 형태별 개수 — (형태 이름, 개수).
@@ -99,7 +102,6 @@ pub struct RemovalReport {
     pub size_before: u64,
     pub size_after: u64,
     /// 적극 모드로 돌렸는지.
-    pub aggressive: bool,
     /// 쓰이지 않게 되어 목록에서 뺀 레이어 수.
     pub pruned_layers: usize,
     /// 결과 파일을 만들지 않음(지울 것이 없음).
@@ -140,6 +142,8 @@ pub struct ExportReport {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BatchReport {
     pub total: usize,
+    /// CSV 로그용 파일별 기록(요약은 아래 네 목록에서 만든다).
+    pub entries: Vec<BatchEntry>,
     /// 바꾼 파일과 (바뀐 페이지 수, 지운 건수).
     pub changed: Vec<(String, usize, usize)>,
     /// 지울 것이 없던 파일.
@@ -150,6 +154,42 @@ pub struct BatchReport {
     pub failed: Vec<(String, String)>,
     /// 남긴 로그(CSV) 경로.
     pub log: Option<String>,
+}
+
+/// 폴더 일괄 삭제에서 파일 하나의 결과 — CSV 열 구성이 그대로 이 구조다(2026-09-27 요청).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BatchEntry {
+    /// 고른 폴더 기준 상위 폴더(바로 아래 파일이면 빈 문자열).
+    pub folder: String,
+    pub name: String,
+    /// 지울 보이지 않는 텍스트가 있었는지. 열어 보지 못한 파일(건너뜀·실패)은 None.
+    pub had_ocr: Option<bool>,
+    /// 성공 / 변경 없음 / 건너뜀 / 실패.
+    pub outcome: String,
+    /// 이 파일 처리를 마친 시각 `yyyy/mm/dd-hh:mm:ss`.
+    pub finished_at: String,
+    pub note: String,
+}
+
+impl BatchEntry {
+    fn new(folder: &Path, file: &Path) -> Self {
+        let relative = file.strip_prefix(folder).unwrap_or(file);
+        Self {
+            folder: relative.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+            name: crate::app::display_filename(file),
+            finished_at: chrono::Local::now().format("%Y/%m/%d-%H:%M:%S").to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn finish(mut self, outcome: &str, had_ocr: Option<bool>, note: String) -> Self {
+        self.outcome = outcome.to_string();
+        self.had_ocr = had_ocr;
+        self.note = note;
+        // 시각은 "처리 완료" 시점이므로 여기서 다시 찍는다(파일 하나가 오래 걸릴 수 있다).
+        self.finished_at = chrono::Local::now().format("%Y/%m/%d-%H:%M:%S").to_string();
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +203,8 @@ pub enum Event {
     BatchDone(BatchReport),
     ImportAnalysis(crate::ocr_import::ImportAnalysis),
     ImportDone(crate::ocr_import::ImportReport),
+    /// 이 문서에 어떤 종류의 텍스트가 있는지(→ `Job::ProbeTextKinds`).
+    TextKinds { visible: bool, invisible: bool },
     Failed(String),
 }
 
@@ -269,18 +311,21 @@ pub fn run_worker_process() -> i32 {
     let result = match &job {
         Job::Export(export) => run_export(engine, export, &mut emit).map(Event::ExportDone),
         Job::AnalyzeRemoval { pdf } => {
-            analyze_removal(engine, pdf, pdf_ocr::remove::Mode::Standard).map(|prepared| Event::RemovalAnalysis(prepared.analysis))
+            analyze_removal(engine, pdf, pdf_ocr::remove::Mode::Standard, Action::Remove)
+                .map(|prepared| Event::RemovalAnalysis(prepared.analysis))
         }
-        Job::Remove { pdf, temp_output, aggressive } => {
-            run_removal(engine, pdf, temp_output, *aggressive, &mut emit).map(Event::RemovalDone)
+        Job::Remove { pdf, temp_output } => {
+            run_removal(engine, pdf, temp_output, Action::Remove, &mut emit).map(Event::RemovalDone)
         }
-        Job::RemoveFolder { folder, aggressive, skip } => {
-            run_folder_removal(engine, folder, *aggressive, skip, &mut emit).map(Event::BatchDone)
+        Job::RemoveFolder { folder, skip } => {
+            run_folder_removal(engine, folder, skip, &mut emit).map(Event::BatchDone)
         }
         Job::AnalyzeImport { pdf, hocr_files } => {
             crate::ocr_import::analyze(engine, pdf, hocr_files, &mut emit).map(Event::ImportAnalysis)
         }
         Job::Import(job) => crate::ocr_import::run(engine, job, &mut emit).map(Event::ImportDone),
+        Job::ProbeTextKinds { pdf } => probe_text_kinds(engine, pdf)
+            .map(|(visible, invisible)| Event::TextKinds { visible, invisible }),
     };
     match result {
         Ok(event) => {
@@ -292,8 +337,11 @@ pub fn run_worker_process() -> i32 {
                 Job::Export(export) => drop(std::fs::remove_file(&export.temp_output)),
                 Job::Remove { temp_output, .. } => drop(std::fs::remove_file(temp_output)),
                 Job::Import(job) => drop(std::fs::remove_file(&job.temp_output)),
-                // 폴더 일괄은 파일마다 임시 파일을 스스로 정리한다.
-                Job::AnalyzeRemoval { .. } | Job::AnalyzeImport { .. } | Job::RemoveFolder { .. } => {}
+                // 폴더 일괄은 파일마다 임시 파일을 스스로 정리한다. 나머지는 파일을 쓰지 않는다.
+                Job::AnalyzeRemoval { .. }
+                | Job::AnalyzeImport { .. }
+                | Job::RemoveFolder { .. }
+                | Job::ProbeTextKinds { .. } => {}
             }
             emit(Event::Failed(format!("{err:#}")));
             1
@@ -306,9 +354,38 @@ enum Output<W: Write> {
     Txt(TxtWriter<W>),
 }
 
+/// 이 문서에 (보이는 텍스트가 있는지, 보이지 않는 텍스트가 있는지).
+///
+/// 내보내기의 두 선택("보이지 않는 텍스트만" / "페이지의 모든 텍스트")이 각각 **무언가를 내놓는지**를
+/// 그대로 답하는 질문이다 — `layout.rs`의 `TextSource`가 `InvisibleOnly`일 때 `c.invisible`로 거르기
+/// 때문이다. 보이는 글자가 없으면 두 선택의 결과가 같고, 보이지 않는 글자가 없으면 "보이지 않는
+/// 텍스트만"은 빈 파일을 만든다.
+///
+/// **내보내기와 같은 경로**(`text_layer::page_chars`의 invisible 플래그)를 일부러 쓴다. 다른 방법으로
+/// 재면 회색 처리와 실제 내보내기 결과가 어긋날 수 있다. 둘 다 찾으면 바로 끝낸다 — 섞여 있는
+/// 문서는 첫 쪽에서 끝나고, 한쪽만 있는 문서만 끝까지 훑는다(그래서 창을 먼저 띄운다).
+fn probe_text_kinds(engine: PdfEngine, pdf: &Path) -> anyhow::Result<(bool, bool)> {
+    let document = engine.open_document(pdf).map_err(|e| open_error_message(e, Action::Export))?;
+    let (mut visible, mut invisible) = (false, false);
+    for page in document.pages().iter() {
+        let Ok(chars) = pdf_engine::text_layer::page_chars(&page) else { continue };
+        for c in chars.iter().filter(|c| !c.generated && !c.ch.is_whitespace()) {
+            if c.invisible {
+                invisible = true;
+            } else {
+                visible = true;
+            }
+        }
+        if visible && invisible {
+            break;
+        }
+    }
+    Ok((visible, invisible))
+}
+
 fn run_export(engine: PdfEngine, job: &ExportJob, emit: &mut dyn FnMut(Event)) -> anyhow::Result<ExportReport> {
     use anyhow::Context;
-    let document = engine.open_document(&job.pdf).map_err(open_error_message)?;
+    let document = engine.open_document(&job.pdf).map_err(|e| open_error_message(e, Action::Export))?;
     let pages = document.pages();
     let total = pages.len() as usize;
 
@@ -380,6 +457,7 @@ fn extract_page(page: &pdfium_render::prelude::PdfPage, options: &LayoutOptions)
     let frame = PageFrame { crop: Rect { llx, lly, urx, ury }, rotate: page_box.rotate, user_unit: 1.0 };
     // /Rotate로 돌린 스캔은 회전 전 프레임에서 글자가 바로 서 있다 — 줄은 거기서 구성한다.
     let upright = frame.upright();
+    let scans = image_boxes(page);
     let chars: Vec<InputChar> = text_layer::page_chars(page)?
         .into_iter()
         .map(|c| InputChar {
@@ -387,11 +465,39 @@ fn extract_page(page: &pdfium_render::prelude::PdfPage, options: &LayoutOptions)
             rect: upright.user_rect_to_display(c.bounds),
             baseline: c.origin.map(|(x, y)| upright.user_to_display(x, y).1),
             generated: c.generated,
-            invisible: c.invisible,
+            // **OCR 텍스트 = 이미지 영역 안이거나 걸친 `3 Tr`**(2026-09-28 확정). 삭제 쪽과 같은
+            // 기준을 쓴다 — 여기서 정하는 값이 "보이지 않는 텍스트만" 내보내기의 대상이다.
+            // 상자를 못 구했으면 페이지에 이미지가 있는지로 대신 본다(삭제 쪽과 같은 대비책).
+            invisible: c.invisible_mode && on_scan(&c.bounds, &scans),
         })
         .collect();
     let (lines, stats) = build_lines(&chars, options);
     Ok((frame, frame.orient_lines(lines), stats.clamped_chars))
+}
+
+/// 페이지에 그려진 이미지들의 상자(사용자 공간 `[left, bottom, right, top]`).
+fn image_boxes(page: &pdfium_render::prelude::PdfPage) -> Vec<[f64; 4]> {
+    use pdfium_render::prelude::{PdfPageObjectCommon, PdfPageObjectsCommon};
+    page.objects()
+        .iter()
+        .filter(|object| object.as_image_object().is_some())
+        .filter_map(|object| object.bounds().ok())
+        .map(|b| {
+            [b.left().value as f64, b.bottom().value as f64, b.right().value as f64, b.top().value as f64]
+        })
+        .collect()
+}
+
+/// 글자 상자가 이미지 영역 안에 있거나 걸쳐 있는지. 경계가 닿는 것도 걸친 것으로 본다
+/// (상자가 퇴화한 글자를 놓치지 않게 — `pdf_ocr::classify::overlaps_image`와 같은 기준).
+fn on_scan(bounds: &[f64; 4], scans: &[[f64; 4]]) -> bool {
+    if scans.is_empty() {
+        return false;
+    }
+    let degenerate = bounds[0] >= bounds[2] || bounds[1] >= bounds[3];
+    scans.iter().any(|s| {
+        degenerate || (s[0] <= bounds[2] && bounds[0] <= s[2] && s[1] <= bounds[3] && bounds[1] <= s[3])
+    })
 }
 
 // ---------------------------------------------------------------- OCR 전체 삭제
@@ -409,7 +515,11 @@ struct PreparedRemoval {
 }
 
 /// 파일을 열어 사전 점검한다. 암호화·손상·페이지 수 불일치면 오류. (문서, 사전 점검, 압축 저장 여부)
-pub(crate) fn open_for_edit(engine: PdfEngine, pdf: &Path) -> anyhow::Result<(Document, pdf_ocr::preflight::Preflight, bool)> {
+pub(crate) fn open_for_edit(
+    engine: PdfEngine,
+    pdf: &Path,
+    action: Action,
+) -> anyhow::Result<(Document, pdf_ocr::preflight::Preflight, bool)> {
     use anyhow::{bail, Context};
     let raw = std::fs::read(pdf).with_context(|| format!("파일을 읽을 수 없음: {}", pdf.display()))?;
     let doc = Document::load_mem(&raw).map_err(|e| anyhow::anyhow!("PDF 구조를 읽지 못했습니다(손상 가능): {e}"))?;
@@ -418,7 +528,7 @@ pub(crate) fn open_for_edit(engine: PdfEngine, pdf: &Path) -> anyhow::Result<(Do
     if preflight.encrypted {
         bail!("암호화된 PDF는 아직 지원하지 않습니다. 다시 저장하면 암호화가 풀리거나 바뀔 수 있어서입니다.");
     }
-    let pdfium_pages = engine.open_document(pdf).map_err(open_error_message)?.pages().len() as usize;
+    let pdfium_pages = engine.open_document(pdf).map_err(|e| open_error_message(e, action))?.pages().len() as usize;
     if pdfium_pages != preflight.page_count {
         bail!(
             "PDF 구조가 손상된 것으로 보입니다(페이지 수 불일치: 화면 {pdfium_pages}쪽, 구조 {}쪽). 원본을 건드리지 않았습니다.",
@@ -430,8 +540,13 @@ pub(crate) fn open_for_edit(engine: PdfEngine, pdf: &Path) -> anyhow::Result<(Do
 }
 
 /// 사전 점검 + 앱 레이어 떼어 내기(메모리에서) + 삭제 계획.
-fn analyze_removal(engine: PdfEngine, pdf: &Path, mode: pdf_ocr::remove::Mode) -> anyhow::Result<PreparedRemoval> {
-    let (mut doc, preflight, compact) = open_for_edit(engine, pdf)?;
+fn analyze_removal(
+    engine: PdfEngine,
+    pdf: &Path,
+    mode: pdf_ocr::remove::Mode,
+    action: Action,
+) -> anyhow::Result<PreparedRemoval> {
+    let (mut doc, preflight, compact) = open_for_edit(engine, pdf, action)?;
     let mut applied = pdf_ocr::remove::Applied::default();
     let stripped = pdf_ocr::insert::strip_own_layers(&mut doc, None, &mut applied)?;
     let plan = pdf_ocr::remove::plan_for(&doc, None, mode);
@@ -464,16 +579,16 @@ fn run_removal(
     engine: PdfEngine,
     pdf: &Path,
     temp_output: &Path,
-    aggressive: bool,
+    action: Action,
     emit: &mut dyn FnMut(Event),
 ) -> anyhow::Result<RemovalReport> {
     use anyhow::{bail, Context};
     use std::collections::BTreeSet;
     emit(Event::Stage("분석 중".to_string()));
-    let mode = if aggressive { pdf_ocr::remove::Mode::Aggressive } else { pdf_ocr::remove::Mode::Standard };
-    let PreparedRemoval { analysis, mut doc, plan, mut applied, compact } = analyze_removal(engine, pdf, mode)?;
+    let mode = pdf_ocr::remove::Mode::Standard;
+    let PreparedRemoval { analysis, mut doc, plan, mut applied, compact } = analyze_removal(engine, pdf, mode, action)?;
     let size_before = std::fs::metadata(pdf).map(|m| m.len()).unwrap_or(0);
-    let mut report = RemovalReport { analysis, size_before, aggressive, ..Default::default() };
+    let mut report = RemovalReport { analysis, size_before, ..Default::default() };
     if !plan.has_changes() && report.analysis.own_layer_pages == 0 {
         report.nothing_to_do = true;
         return Ok(report);
@@ -491,7 +606,7 @@ fn run_removal(
     emit(Event::Stage("검증 중(원본과 화면·텍스트 비교)".to_string()));
     let no_layer = std::collections::HashMap::new();
     // 적극 모드는 화면만 비교한다 — 흰 글씨처럼 "화면엔 없지만 추출되는" 글자를 지우기 때문.
-    let failures = verify_pages(engine, pdf, temp_output, &planned, &no_layer, !aggressive, emit)?;
+    let failures = verify_pages(engine, pdf, temp_output, &planned, &no_layer, true, emit)?;
 
     let mut reverted: BTreeSet<usize> = BTreeSet::new();
     if !failures.is_empty() {
@@ -511,7 +626,7 @@ fn run_removal(
         emit(Event::Stage("되돌린 페이지 반영해 다시 저장 중".to_string()));
         pdf_ocr::save::save_rewritten(&mut doc, temp_output, now, compact)?;
         let again: Vec<usize> = reverted.iter().copied().collect();
-        let still = verify_pages(engine, pdf, temp_output, &again, &no_layer, !aggressive, emit)?;
+        let still = verify_pages(engine, pdf, temp_output, &again, &no_layer, true, emit)?;
         if !still.is_empty() {
             eprintln!(
                 "ocr-worker: 되돌린 뒤에도 다른 페이지 {:?}",
@@ -546,7 +661,6 @@ fn run_removal(
 fn run_folder_removal(
     engine: PdfEngine,
     folder: &Path,
-    aggressive: bool,
     skip: &[PathBuf],
     emit: &mut dyn FnMut(Event),
 ) -> anyhow::Result<BatchReport> {
@@ -563,18 +677,23 @@ fn run_folder_removal(
     let mut report = BatchReport { total: files.len(), ..Default::default() };
     for (index, file) in files.iter().enumerate() {
         let name = file.strip_prefix(folder).unwrap_or(file).to_string_lossy().to_string();
+        let entry = BatchEntry::new(folder, file);
         let file_pages = page_counts[index];
         emit(Event::Stage(format!("{name} ({}/{})", index + 1, files.len())));
         emit(Event::Progress { done: done_pages, total: total_pages });
 
         if skip.iter().any(|s| s == file) {
-            report.skipped.push((name, "앱에 열려 있는 파일".to_string()));
+            let reason = "열려 있는 파일".to_string();
+            report.entries.push(entry.finish("건너뜀", None, reason.clone()));
+            report.skipped.push((name, reason));
             done_pages += file_pages;
             continue;
         }
         let backup = batch_backup_path(file);
         if backup.exists() {
-            report.skipped.push((name, ".backup이 이미 있음(이전 실행 흔적)".to_string()));
+            let reason = "백업이 이미 있는 파일".to_string();
+            report.entries.push(entry.finish("건너뜀", None, reason.clone()));
+            report.skipped.push((name, reason));
             done_pages += file_pages;
             continue;
         }
@@ -590,27 +709,39 @@ fn run_folder_removal(
         let outcome = {
             // forward가 emit을 빌리고 있으므로 이 블록 안에서만 살려 둔다.
             let mut forward = forward;
-            run_removal(engine, file, &temp, aggressive, &mut forward)
+            run_removal(engine, file, &temp, Action::BatchCell, &mut forward)
         };
         done_pages += file_pages;
         match outcome {
             Err(err) => {
                 let _ = std::fs::remove_file(&temp);
-                report.failed.push((name, format!("{err:#}")));
+                let reason = format!("{err:#}");
+                report.entries.push(entry.finish("실패", None, reason.clone()));
+                report.failed.push((name, reason));
             }
-            Ok(result) if result.nothing_to_do => report.unchanged.push(name),
+            Ok(result) if result.nothing_to_do => {
+                // 지울 것이 없었다 = 보이지 않는 텍스트가 없었다(파일은 열어 봤으므로 단정할 수 있다).
+                report.entries.push(entry.finish("변경 없음", Some(false), String::new()));
+                report.unchanged.push(name);
+            }
             Ok(result) => {
                 if let Err(err) = std::fs::copy(file, &backup) {
                     let _ = std::fs::remove_file(&temp);
-                    report.failed.push((name, format!("백업 실패({err}) — 원본 그대로")));
+                    let reason = format!("백업 실패({err}) — 원본 그대로");
+                    report.entries.push(entry.finish("실패", Some(true), reason.clone()));
+                    report.failed.push((name, reason));
                     continue;
                 }
                 if let Err(err) = std::fs::rename(&temp, file) {
                     let _ = std::fs::remove_file(&temp);
-                    report.failed.push((name, format!("교체 실패({err}) — 원본 그대로")));
+                    let reason = format!("교체 실패({err}) — 원본 그대로");
+                    report.entries.push(entry.finish("실패", Some(true), reason.clone()));
+                    report.failed.push((name, reason));
                     continue;
                 }
-                report.changed.push((name, result.pages_changed, result.analysis.counts.removed()));
+                let removed = result.analysis.counts.removed();
+                report.entries.push(entry.finish("성공", Some(true), String::new()));
+                report.changed.push((name, result.pages_changed, removed));
             }
         }
     }
@@ -643,22 +774,35 @@ fn batch_backup_path(pdf: &Path) -> PathBuf {
 }
 
 /// 파일별 결과를 CSV로 남긴다(UTF-8 BOM — Excel이 한글을 제대로 읽게).
+///
+/// 열 구성은 사용자 지정(2026-09-27): 경로 · 파일명 · OCR 유무 · 실행결과 · 처리완료시간 · 비고.
+/// 모든 열이 그 행의 **파일 하나**에 대한 값이고, 누계나 전체 집계는 넣지 않는다.
+///
+/// 예전 로그에 있던 `바뀐 페이지`·`지운 건수`는 뺐다 — 디버깅에나 쓸 값이고 사용자에게는
+/// 필요하지 않다는 판단(2026-09-27). 규모는 결과 창 요약에 그대로 남아 있다.
+///
+/// 순서는 **처리한 순서**(폴더 탐색 순서)다. 결과별로 묶어 적던 예전 방식과 달리, 중간에 멈춘
+/// 작업도 어디까지 됐는지 그대로 읽힌다.
 fn write_batch_log(folder: &Path, report: &BatchReport) -> Option<PathBuf> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let path = folder.join(format!("ocr-remove-{stamp}.csv"));
-    let mut text = String::from("\u{feff}파일,결과,바뀐 페이지,지운 건수,비고\n");
+    let mut text =
+        String::from("\u{feff}경로,파일명,OCR 유무,실행결과,처리완료시간,비고\n");
     let escape = |value: &str| format!("\"{}\"", value.replace('"', "\"\""));
-    for (name, pages, removed) in &report.changed {
-        text.push_str(&format!("{},성공,{pages},{removed},\n", escape(name)));
-    }
-    for name in &report.unchanged {
-        text.push_str(&format!("{},변경 없음,0,0,\n", escape(name)));
-    }
-    for (name, reason) in &report.skipped {
-        text.push_str(&format!("{},건너뜀,0,0,{}\n", escape(name), escape(reason)));
-    }
-    for (name, reason) in &report.failed {
-        text.push_str(&format!("{},실패,0,0,{}\n", escape(name), escape(reason)));
+    for e in &report.entries {
+        let had_ocr = match e.had_ocr {
+            Some(true) => "있음",
+            Some(false) => "없음",
+            None => "알 수 없음",
+        };
+        text.push_str(&format!(
+            "{},{},{had_ocr},{},{},{}\n",
+            escape(&e.folder),
+            escape(&e.name),
+            e.outcome,
+            e.finished_at,
+            escape(&e.note),
+        ));
     }
     std::fs::write(&path, text).ok().map(|_| path)
 }
@@ -676,7 +820,7 @@ pub(crate) fn verify_pages(
 ) -> anyhow::Result<Vec<(usize, String)>> {
     use anyhow::Context;
     use pdf_engine::verify::{compare_with, snapshot};
-    let before = engine.open_document(original).map_err(open_error_message)?;
+    let before = engine.open_document(original).map_err(|e| open_error_message(e, Action::Remove))?;
     let after = engine.open_document(result).context("결과 파일을 pdfium으로 열지 못함")?;
     let mut failures = Vec::new();
     for (done, &index) in pages.iter().enumerate() {
@@ -709,22 +853,52 @@ pub(crate) fn verify_pages(
     Ok(failures)
 }
 
+/// 실패 문장을 **자리에 맞게** 쓰기 위한 작업 이름(2026-09-27 요청).
+///
+/// 같은 실패가 두 자리에 나오는데 필요한 길이가 다르다. 폴더 일괄은 CSV `비고` **칸**에
+/// 들어가므로 짧은 이름꼴이 좋고, 한 파일 작업은 결과 창 **본문**이라 그 한 줄이 설명의
+/// 전부이므로 무엇을 못 했는지까지 말해야 한다.
+#[derive(Clone, Copy)]
+pub(crate) enum Action {
+    /// 폴더 일괄 — 표 칸용 짧은 이름꼴.
+    BatchCell,
+    Remove,
+    Import,
+    Export,
+}
+
+impl Action {
+    /// `None`이면 짧은 이름꼴을 쓴다.
+    fn phrase(self) -> Option<&'static str> {
+        match self {
+            Action::BatchCell => None,
+            Action::Remove => Some("OCR을 삭제할 수 없습니다"),
+            Action::Import => Some("OCR을 가져올 수 없습니다"),
+            Action::Export => Some("OCR 텍스트를 내보낼 수 없습니다"),
+        }
+    }
+}
+
 /// pdfium의 열기 오류를 사용자에게 보일 문장으로 바꾼다.
-pub(crate) fn open_error_message(err: anyhow::Error) -> anyhow::Error {
+pub(crate) fn open_error_message(err: anyhow::Error, action: Action) -> anyhow::Error {
     use pdfium_render::prelude::{PdfiumError, PdfiumInternalError};
-    let message = match err.downcast_ref::<PdfiumError>() {
+    // (짧은 이름꼴, 긴 문장의 "…해서" 부분)
+    let (short, because) = match err.downcast_ref::<PdfiumError>() {
         Some(PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError)) => {
-            "암호로 보호된 PDF라 열 수 없습니다."
+            ("암호로 보호된 파일", "파일이 암호로 보호돼 있어서")
         }
         Some(PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::FormatError)) => {
-            "PDF 형식이 손상되어 열 수 없습니다."
+            ("형식이 손상된 파일", "파일 형식이 손상돼 있어서")
         }
         Some(PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::FileError)) => {
-            "PDF 파일을 찾거나 읽을 수 없습니다."
+            ("읽을 수 없는 파일", "파일을 찾거나 읽을 수 없어서")
         }
         _ => return err,
     };
-    anyhow::anyhow!(message)
+    match action.phrase() {
+        None => anyhow::anyhow!(short),
+        Some(phrase) => anyhow::anyhow!("{because} {phrase}."),
+    }
 }
 
 fn file_display_name(path: &Path) -> String {

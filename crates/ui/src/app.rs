@@ -7,11 +7,39 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+/// 배율을 페이지 크기에 자동으로 맞출지, 사용자가 정한 값을 지킬지.
+///
+/// **기본값은 `Page`**(2026-09-27). 세로로 긴 페이지는 높이에, 가로로 넓은 페이지는 폭에
+/// 맞춰 언제나 페이지 전체가 들어온다 — SumatraPDF의 `kZoomFitPage`와 같은 규칙이다.
+/// 셋 다 **페이지를 넘길 때마다** 그 페이지에 맞춰 다시 계산하므로, 한 문서에 판형이
+/// 섞여 있어도 매번 맞는 배율이 된다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FitMode {
+    /// 페이지 전체가 뷰어에 들어오게(두 축 중 작은 배율).
+    Page,
+    /// 페이지 폭을 뷰어 폭에 맞춘다. 세로로 긴 페이지는 아래로 넘친다 — 다만 지나치게
+    /// 길면(`MAX_WIDTH_FIT_SCREENS`) 그 페이지만 쪽 맞춤으로 물러선다.
+    Width,
+    /// 사용자가 확대/축소한 값을 그대로 지킨다.
+    Manual,
+}
+
 /// 뷰포트(스크롤+줌) 상태. 확대 시 drag 탐색을 위해 오프셋을 별도로 관리한다.
+///
+/// **`zoom`은 페이지 실제 크기 대비 배율이다**(2026-09-27 변경). 100%면 PDF 1pt가 화면
+/// 1pt로 그려진다. 그전에는 "패널 폭 대비 배율"이라 100%가 곧 폭 맞춤이었는데, 그러면
+/// 판형이 다른 페이지도 전부 같은 폭으로 늘어나 물리적으로 틀린 화면이 됐다(400pt짜리
+/// 책등 스캔이 2604pt 본문과 같은 폭). SumatraPDF가 이 정규화를 `uniformPageWidth`라는
+/// **꺼져 있는 옵션**으로 두고 있는 것을 확인하고 같은 기준으로 바꿨다.
+///
+/// 이 변경으로 없어진 것들: 맞춤 전용 최소 배율(패널 기준일 때 책등 맞춤이 4.7%까지
+/// 내려가 별도 하한이 필요했다 — 실제 크기 기준에서는 21.7%로 본문과 거의 같다),
+/// 창 폭에 따라 달라지던 줌 상한(이제 텍스처 한도가 페이지 크기만으로 정해진다).
 #[derive(Debug, Clone, Copy)]
 pub struct ViewportState {
     pub zoom: f32,
     pub pan_offset: egui::Vec2,
+    pub fit: FitMode,
 }
 
 impl Default for ViewportState {
@@ -19,6 +47,7 @@ impl Default for ViewportState {
         Self {
             zoom: 1.0,
             pan_offset: egui::Vec2::ZERO,
+            fit: FitMode::Page,
         }
     }
 }
@@ -40,24 +69,61 @@ pub enum FocusArea {
 }
 
 impl ViewportState {
-    pub const MIN_ZOOM: f32 = 0.25;
+    /// 배율 하한 하나 — SumatraPDF `kZoomMin`과 같은 값(1/12). 배율이 페이지 실제 크기
+    /// 기준이 된 뒤로는 맞춤 배율도 보통 20~100% 사이에 들어오므로, 맞춤용 하한을 따로
+    /// 둘 필요가 없어졌다.
+    pub const MIN_ZOOM: f32 = 0.0833;
     pub const MAX_ZOOM: f32 = 8.0;
+
+    /// 폭 맞춤이 허용하는 최대 세로 길이 — 뷰어 높이의 몇 배까지인지.
+    ///
+    /// 폭에 맞췄더니 한 페이지가 화면 세 개를 넘어가면 "폭에 맞춰 읽는다"는 목적 자체가
+    /// 성립하지 않는다(한 장 보려고 네 번 넘게 스크롤). 책등만 따로 스캔한 400 × 3679pt
+    /// 페이지가 그런 경우로, 폭에 맞추면 250%로 확대되어 높이의 11%만 보인다(2026-09-27
+    /// 요청). 그런 페이지는 폭 맞춤 모드에서도 쪽 맞춤으로 본다. 흔한 세로형(A4는 1.8배)은
+    /// 영향을 받지 않는다.
+    const MAX_WIDTH_FIT_SCREENS: f32 = 3.0;
 
     /// 확대/축소 버튼용 고정 배율 단계표 — SumatraPDF `DisplayModel.cpp`의
     /// `defaultZoomLevels[]` 중 MIN_ZOOM~MAX_ZOOM 구간과 같은 값. 비율 곱셈(×1.25)은 배율이
     /// 커질수록 한 걸음의 절대 변화량이 급격히 커져 "훅 튀고", 100%·200% 같은 값에 정확히
     /// 멈추지도 않는다. 핀치/Ctrl+휠은 연속 동작이라 이 표를 쓰지 않고 `zoom_by`로 직접
     /// 곱한다(표를 쓰면 한 제스처에 여러 칸씩 건너뛴다).
-    pub const ZOOM_STEPS: [f32; 13] = [
-        0.25, 0.3333, 0.5, 0.6667, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0,
+    ///
+    /// 아래쪽 단계(8.33~18%)는 배율이 실제 크기 기준이 되면서 필요해졌다 — 큰 판형 문서는
+    /// 맞춤 배율 자체가 20%대라 예전 하한(25%)에서는 축소 버튼이 한 번에 하한까지 떨어졌다.
+    pub const ZOOM_STEPS: [f32; 16] = [
+        0.0833, 0.125, 0.18, 0.25, 0.3333, 0.5, 0.6667, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0,
+        8.0,
     ];
 
     pub fn zoom_by(&mut self, factor: f32) {
         self.zoom = (self.zoom * factor).clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+        self.fit = FitMode::Manual;
     }
 
-    /// 단계표에서 현재 배율보다 큰 첫 값으로. 표에 없는 배율(핀치 후 등)이면 바로 위 단계에 멈춘다.
+    /// 이번 프레임의 뷰어 크기에 맞춰 자동 맞춤 배율을 적용한다. `Manual`이면 아무것도 안 한다.
+    /// `page`는 페이지 실제 크기(pt), `view`는 뷰어 크기(화면 pt).
+    pub fn apply_fit(&mut self, page: egui::Vec2, view: egui::Vec2) {
+        let (width, height) = (page.x.max(1.0), page.y.max(1.0));
+        let zoom = match self.fit {
+            FitMode::Manual => return,
+            FitMode::Width => {
+                let by_width = view.x / width;
+                if height * by_width > view.y * Self::MAX_WIDTH_FIT_SCREENS {
+                    by_width.min(view.y / height) // 너무 긴 페이지는 쪽 맞춤으로
+                } else {
+                    by_width
+                }
+            }
+            FitMode::Page => (view.x / width).min(view.y / height),
+        };
+        self.zoom = zoom.clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+    }
+
+    /// 단계표에서 현재 배율보다 큰 첫 값으로. 표에 없는 배율(맞춤·핀치 후 등)이면 바로 위 단계에 멈춘다.
     pub fn zoom_in(&mut self) {
+        self.fit = FitMode::Manual;
         self.zoom = Self::ZOOM_STEPS
             .iter()
             .copied()
@@ -67,6 +133,7 @@ impl ViewportState {
 
     /// 단계표에서 현재 배율보다 작은 첫 값으로.
     pub fn zoom_out(&mut self) {
+        self.fit = FitMode::Manual;
         self.zoom = Self::ZOOM_STEPS
             .iter()
             .rev()
@@ -188,9 +255,6 @@ pub struct PdfViewerApp {
     /// 고배율 줌에서 이 한도를 넘는 텍스처를 만들면 wgpu validation 패닉으로 앱이 죽는다
     /// (Apple Silicon Retina에서 실측 — §7 "고배율 줌 크래시" 참고).
     pub max_texture_side: Option<u32>,
-    /// 현재 페이지의 높이/폭 비율(PDF 포인트 기준, 렌더링 시 갱신). viewer_panel이
-    /// GPU 텍스처 한도에 맞춰 줌 상한을 역산할 때 사용.
-    pub page_aspect: Option<f32>,
     /// 이번 프레임에 페이지 이미지가 그려진 화면 좌표(rect). 클릭 좌표 변환에 사용.
     pub image_rect: Option<egui::Rect>,
 
@@ -198,10 +262,11 @@ pub struct PdfViewerApp {
     /// 연속 스크롤 모드는 현재 검색 하이라이트/텍스트 선택/링크 클릭을 지원하지 않는다
     /// (범위 밖 — 필요하면 'C'로 쪽 단위 모드로 돌아가서 사용).
     pub continuous_scroll: bool,
-    /// 문서를 열 때 한 번 계산해두는 페이지별 높이/폭 비율(`compute_page_aspects`) —
-    /// 연속 스크롤 모드가 전체 페이지를 렌더링하지 않고도 각 페이지가 차지할 세로 공간을
-    /// 미리 알아야 스크롤 총 높이/가상화 범위를 계산할 수 있어서 필요하다.
-    pub page_aspects: Vec<f32>,
+    /// 문서를 열 때 한 번 재 두는 페이지별 실제 크기(PDF 포인트, `compute_page_sizes`).
+    /// 배율이 실제 크기 기준이라(`ViewportState` 문서) 렌더 폭·화면 배치·텍스처 한도 역산이
+    /// 모두 이 값에서 나온다. 연속 스크롤도 전체를 렌더링하지 않고 스크롤 총 높이와 가상화
+    /// 범위를 계산하려면 이게 필요하다.
+    pub page_sizes: Vec<egui::Vec2>,
     /// 렌더링된 페이지 텍스처 캐시 — 두 보기 모드가 함께 쓴다. 연속 스크롤은 보이는 범위
     /// (+여유분), 쪽 단위는 현재 페이지와 앞뒤 한 쪽만 남기도록 매 프레임 정리한다. 빠진
     /// 텍스처는 다음 프레임에 해제된다(`texture_cache` 모듈 문서 — wgpu 크래시 방지).
@@ -211,16 +276,12 @@ pub struct PdfViewerApp {
     /// 위치로 현재 페이지를 그냥 추적만 하는 경우(`note_visible_page_during_scroll`)엔
     /// 세우지 않는다. 안 그러면 사용자가 스크롤하는 동안 계속 원래 자리로 끌려간다.
     pub scroll_to_page_once: Option<u32>,
-    /// 툴바 "쪽 맞춤" 버튼이 세우는 1회성 요청 — 실제 계산은 그 프레임의 패널 높이를 아는
-    /// viewer_panel.rs에서 처리한다(page_aspect처럼 렌더링 시점에만 정확한 값이라 toolbar.rs
-    /// 자체에서는 계산할 수 없음).
-    pub request_fit_page: bool,
     /// 연속 스크롤 모드가 직전 프레임에 레이아웃한 페이지 폭(pt). 0.0 = 아직 없음.
     /// 줌/창 크기 변화로 폭이 바뀐 프레임을 감지하는 데 쓴다 — (1) 전체 레이아웃 높이가
     /// 변하므로 스크롤 오프셋을 재조정해야 보던 위치가 유지된다(안 하면 확대=앞쪽, 축소=뒤쪽
     /// 페이지로 점프 — 2026-07-18 리포트). 보정은 비율 곱셈이 아니라 앵커 재계산으로 한다
     /// (viewer_panel::anchor_at 참고). 재렌더링 디바운스는 `zoom_changed_at`이 담당한다.
-    pub continuous_last_page_width: f32,
+    pub continuous_last_zoom: f32,
     /// 연속 스크롤 보기의 가로 이동(pt, +면 페이지가 오른쪽으로). 확대로 페이지가 패널보다
     /// 넓을 때만 의미가 있고 매 프레임 그 범위로 제한된다 — 트랙패드 좌우 스와이프와 검색
     /// 결과 중앙 맞춤이 움직인다.
@@ -328,6 +389,9 @@ pub struct PdfViewerApp {
 
     /// OCR 내보내기 옵션 대화상자(열려 있을 때만 Some, `ocr_dialogs`).
     pub ocr_export_dialog: Option<crate::ocr_dialogs::ExportDialog>,
+    /// 내보내기 옵션 창이 떠 있는 동안 조용히 도는 확인 작업 — 보이는 텍스트가 있는지만 본다.
+    /// 진행률 창을 띄우지 않으므로 `ocr_job`과 별개로 둔다(`ocr_dialogs::poll_export_probe`).
+    pub ocr_export_probe: Option<crate::ocr_worker::WorkerHandle>,
     /// 실행 중이거나 결과를 보여 주는 OCR 작업(`ocr_dialogs`, `ocr_worker`).
     pub ocr_job: Option<crate::ocr_dialogs::OcrJob>,
     /// OCR 전체 삭제 확인 창(분석 결과, `ocr_dialogs`).
@@ -341,6 +405,13 @@ pub struct PdfViewerApp {
 
     /// 쪽 단위 보기에서 페이지 경계를 넘겨 밀 때의 상태(탄성·페이지 넘김, `viewer_panel::edge_step`).
     pub edge: crate::viewer_panel::EdgeState,
+
+    /// 파일명 변경 창(열려 있으면 입력 중인 이름과 오류 메시지).
+    pub rename_input: Option<(String, Option<String>)>,
+    /// 북마크 전체 삭제 확인 창.
+    pub clear_bookmarks_pending: bool,
+    /// 상태표시줄에 보여 줄 현재 페이지 정보(status_bar::refresh가 채운다).
+    pub page_info: Option<crate::status_bar::PageInfo>,
 
     pub status_message: Option<String>,
 }
@@ -429,14 +500,12 @@ impl PdfViewerApp {
             single_view_page: None,
             single_view_switched_at: 0.0,
             max_texture_side: None,
-            page_aspect: None,
             image_rect: None,
             continuous_scroll: false,
-            page_aspects: Vec::new(),
+            page_sizes: Vec::new(),
             page_textures: Default::default(),
             scroll_to_page_once: None,
-            request_fit_page: false,
-            continuous_last_page_width: 0.0,
+            continuous_last_zoom: 0.0,
             continuous_pan_x: 0.0,
             continuous_drag_scroll: 0.0,
             last_target_width: 0,
@@ -465,12 +534,16 @@ impl PdfViewerApp {
             save_as_requested: false,
             batch_import: None,
             ocr_export_dialog: None,
+            ocr_export_probe: None,
             ocr_job: None,
             ocr_removal_confirm: None,
             ocr_needs_save: None,
             ocr_import_dialog: None,
             ocr_mark: None,
             edge: Default::default(),
+            rename_input: None,
+            clear_bookmarks_pending: false,
+            page_info: None,
             last_window_title: None,
             prev_focused_widget: None,
             status_message,
@@ -637,7 +710,7 @@ impl PdfViewerApp {
         }
         self.document = Some(document);
         self.total_pages = new_total;
-        self.compute_page_aspects();
+        self.compute_page_sizes();
         // 새 렌더가 올 때까지 기존 이미지를 계속 보여준다(하얗게 깜빡이지 않게).
         self.page_textures.invalidate_all();
         self.notify_render_worker_document(&path);
@@ -653,10 +726,6 @@ impl PdfViewerApp {
             self.set_current_page(1);
         } else {
             self.page_number_input = self.current_page.to_string();
-            self.page_aspect = self
-                .page_aspects
-                .get((self.current_page as usize).saturating_sub(1))
-                .copied();
             if !keep_bookmark_edits {
                 self.selected_bookmark =
                     bookmark::active_bookmark_for_page(&self.bookmarks, self.current_page);
@@ -754,11 +823,11 @@ impl PdfViewerApp {
                 self.page_back_history.clear();
                 self.page_forward_history.clear();
                 self.document = Some(document);
-                self.compute_page_aspects();
+                self.compute_page_sizes();
                 self.page_textures.clear();
                 self.notify_render_worker_document(&path);
                 self.scroll_to_page_once = None;
-                self.continuous_last_page_width = 0.0;
+                self.continuous_last_zoom = 0.0;
                 self.continuous_pan_x = 0.0;
                 self.search_center_request = None;
                 self.remember_recent_file(&path);
@@ -1054,10 +1123,78 @@ impl PdfViewerApp {
         });
     }
 
+    /// 페이지 크기를 아직 모를 때 쓰는 기본값(A4).
+    const DEFAULT_PAGE_SIZE: egui::Vec2 = egui::vec2(595.28, 841.89);
+
     const BOOKMARK_UNDO_LIMIT: usize = 20;
 
     /// 북마크를 바꾸는 조작(추가/이름수정/삭제/드래그이동) 직전에 반드시 호출해서
     /// 현재 상태를 실행취소 스택에 남긴다.
+    /// 파일명 변경 창을 연다(현재 파일명을 확장자 빼고 채운 채로).
+    pub fn begin_rename(&mut self) {
+        let Some(path) = self.current_file.as_deref() else {
+            self.status_message = Some("이름을 바꿀 문서가 열려있지 않습니다.".to_string());
+            return;
+        };
+        let stem = path.file_stem().map(|s| display_filename(Path::new(s))).unwrap_or_default();
+        self.rename_input = Some((stem, None));
+    }
+
+    /// 열려 있는 파일의 이름을 바꾼다(같은 폴더 안에서). 실패하면 이유를 돌려준다.
+    ///
+    /// 문서는 다시 열지 않는다 — 내용이 그대로고, 이미 연 pdfium 핸들은 이름이 바뀌어도 살아 있다.
+    /// 다만 파일 감시 기준값과 렌더링 보조 프로세스의 경로는 새 이름으로 맞춘다.
+    pub fn rename_current_file(&mut self, new_name: &str) -> Result<(), String> {
+        let Some(path) = self.current_file.clone() else {
+            return Err("이름을 바꿀 문서가 열려있지 않습니다.".to_string());
+        };
+        let name = new_name.trim();
+        if name.is_empty() {
+            return Err("이름을 입력해주세요.".to_string());
+        }
+        if name.contains('/') || name.contains('\\') {
+            return Err("파일명에 폴더 구분 문자(/, \\)는 쓸 수 없습니다.".to_string());
+        }
+        let file_name = if std::path::Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
+            name.to_string()
+        } else {
+            format!("{name}.pdf")
+        };
+        let new_path = path.with_file_name(&file_name);
+        if new_path == path {
+            self.rename_input = None;
+            return Ok(());
+        }
+        if new_path.exists() {
+            return Err(format!("같은 이름의 파일이 이미 있습니다: {file_name}"));
+        }
+        std::fs::rename(&path, &new_path).map_err(|err| format!("이름을 바꾸지 못했습니다: {err}"))?;
+
+        self.current_file = Some(new_path.clone());
+        self.remember_recent_file(&new_path);
+        self.start_watching_current_file();
+        self.notify_render_worker_document(&new_path);
+        self.rename_input = None;
+        self.status_message = Some(format!("파일명을 바꿨습니다: {}", display_filename(&new_path)));
+        Ok(())
+    }
+
+    /// 북마크를 모두 지운다(되돌리기 가능, 저장해야 PDF에 반영된다).
+    pub fn clear_bookmarks(&mut self) {
+        if self.bookmarks.is_empty() {
+            self.status_message = Some("지울 북마크가 없습니다.".to_string());
+            return;
+        }
+        self.push_bookmark_undo_snapshot();
+        let count = bookmark::flatten_tree(&self.bookmarks, "").len();
+        self.bookmarks.clear();
+        self.selected_bookmark = None;
+        self.selection_is_explicit = false;
+        self.bookmarks_dirty = true;
+        self.status_message =
+            Some(format!("북마크 {count}개를 지웠습니다 — 되돌리려면 Undo, PDF에 반영하려면 저장하세요."));
+    }
+
     pub fn push_bookmark_undo_snapshot(&mut self) {
         if self.bookmark_undo_stack.len() >= Self::BOOKMARK_UNDO_LIMIT {
             self.bookmark_undo_stack.pop_front();
@@ -1153,11 +1290,7 @@ impl PdfViewerApp {
             if self.render_inflight.contains(&(page, target_width)) {
                 return;
             }
-            let aspect = self
-                .page_aspects
-                .get((page as usize).saturating_sub(1))
-                .copied()
-                .unwrap_or(1.414);
+            let size = self.page_size_pt(page);
             let request = RenderRequest {
                 generation: self.render_generation,
                 epoch: self.render_epoch,
@@ -1165,8 +1298,8 @@ impl PdfViewerApp {
                 target_width,
                 render_width: clamped_render_width(
                     target_width,
-                    1.0,
-                    aspect,
+                    size.x,
+                    size.y,
                     self.max_texture_side.unwrap_or(8192),
                 ),
             };
@@ -1601,11 +1734,6 @@ impl PdfViewerApp {
         // 페이지에 북마크가 여러 개여도 명시적 선택이 항상 이긴다.
         self.selected_bookmark = bookmark::active_bookmark_for_page(&self.bookmarks, clamped);
         self.selection_is_explicit = false;
-        // page_aspect는 원래 render_current_page(쪽 단위 모드)가 렌더링 시점에 채웠는데,
-        // 연속 스크롤 모드는 그 함수를 안 타므로 여기서도 미리 계산해둔 page_aspects에서
-        // 동기화한다 — GPU 텍스처 한도 줌 상한/쪽 맞춤 계산이 모드와 무관하게 항상 정확한
-        // 값을 보게 하기 위함.
-        self.page_aspect = self.page_aspects.get((clamped as usize).saturating_sub(1)).copied();
         // 연속 스크롤 모드에서는 "페이지 이동"이 뷰어 스크롤 위치를 직접 바꾸는 게 아니라
         // 이 1회성 요청을 세우는 것뿐 — 실제 스크롤은 viewer_panel.rs가 그 페이지의 rect로
         // scroll_to_rect를 부르면서 소비한다.
@@ -1639,7 +1767,6 @@ impl PdfViewerApp {
         self.page_number_input = clamped.to_string();
         self.selected_bookmark = bookmark::active_bookmark_for_page(&self.bookmarks, clamped);
         self.selection_is_explicit = false;
-        self.page_aspect = self.page_aspects.get((clamped as usize).saturating_sub(1)).copied();
         // 연속 스크롤로 페이지 경계를 넘을 때도 사이드바가 밀려나 있으면 활성 북마크를
         // 다시 보이게 한다(뷰어를 스크롤하는 중엔 사이드바를 동시에 스크롤할 수 없으므로
         // 사용자 조작과 싸울 일 없음).
@@ -1650,17 +1777,32 @@ impl PdfViewerApp {
     /// 크기 메타데이터만 조회 — 수백 페이지 문서에서도 비용이 작다). 연속 스크롤 모드가
     /// 아직 렌더링하지 않은 페이지의 세로 공간을 미리 알아야 스크롤 총 높이/가상화 범위를
     /// 계산할 수 있어서 필요하다.
-    fn compute_page_aspects(&mut self) {
-        self.page_aspects.clear();
+    fn compute_page_sizes(&mut self) {
+        self.page_sizes.clear();
         let Some(document) = &self.document else { return };
         for i in 0..self.total_pages {
-            let aspect = document
+            let size = document
                 .pages()
                 .get(i as PdfPageIndex)
-                .map(|page| page.height().value / page.width().value.max(1.0))
-                .unwrap_or(1.0);
-            self.page_aspects.push(aspect);
+                .map(|page| egui::vec2(page.width().value, page.height().value))
+                .unwrap_or(Self::DEFAULT_PAGE_SIZE);
+            self.page_sizes.push(size);
         }
+    }
+
+    /// 페이지 실제 크기(pt). 아직 재지 않았으면 A4로 친다 — 크기를 모른다고 그리기를
+    /// 멈출 수는 없고, 첫 렌더 결과가 오면 곧 제자리를 찾는다.
+    pub(crate) fn page_size_pt(&self, page: u32) -> egui::Vec2 {
+        self.page_sizes
+            .get((page as usize).saturating_sub(1))
+            .copied()
+            .unwrap_or(Self::DEFAULT_PAGE_SIZE)
+    }
+
+    /// 페이지를 현재 배율로 그릴 때의 렌더 폭(물리 픽셀). 화면상 크기·좌표 변환이 모두 이
+    /// 값에서 나오므로, 쪽 단위·연속 두 모드가 같은 식을 쓰게 여기 하나로 모아 둔다.
+    pub(crate) fn render_width(&self, page: u32, zoom: f32, pixels_per_point: f32) -> i32 {
+        ((self.page_size_pt(page).x * zoom * pixels_per_point).round() as i32).max(50)
     }
 
     /// 임의 페이지를 지정한 target_width로 UI 스레드에서 동기로 렌더링해 텍스처로 반환한다 —
@@ -1810,6 +1952,16 @@ impl PdfViewerApp {
         // 다른 텍스트 필드에 포커스가 있어도(Cmd+C/Cmd+F와 같은 이유로) 항상 동작해야
         // 하므로 게이트 밖에 둔다. 저장할 변경사항이 없으면(bookmarks_dirty == false)
         // 아무 일도 안 한다 — 툴바 "저장" 버튼의 활성/비활성 조건과 동일하게.
+        // F2 — 사이드바에 포커스가 있으면 sidebar.rs가 북마크 제목 수정으로 쓰고, 그 밖에는
+        // 파일명 변경 창을 연다(같은 키를 포커스 영역으로 나눠 쓴다).
+        if !ctx.wants_keyboard_input()
+            && self.focus_area != FocusArea::Sidebar
+            && self.rename_input.is_none()
+            && ctx.input(|i| i.key_pressed(Key::F2))
+        {
+            self.begin_rename();
+        }
+
         if self.bookmarks_dirty && ctx.input(|i| i.modifiers.command && i.key_pressed(Key::S)) {
             self.save_bookmarks_to_pdf();
         }
@@ -1973,10 +2125,24 @@ pub(crate) fn create_engine() -> Option<PdfEngine> {
     None
 }
 
+/// 팝업창을 Esc로 닫는다 — 눌렸으면 **소비**해서 다음 창이 같은 Esc로 함께 닫히지 않게 한다
+/// (창은 위에서 아래로 검사하므로 먼저 검사한 창이 받는다). 사용자 요청 2026-09-27.
+///
+/// Esc를 달지 않는 창이 둘 있다. **이전 세션 복구**는 Esc로 닫으면 자동저장해 둔 편집이 조용히
+/// 버려진다 — 복구/무시를 반드시 고르게 둔다. **OCR 작업 창은 도는 중에는** 받지 않는다(Esc가
+/// 작업 취소가 되어 버린다). 끝난 뒤 결과 창에서는 받는다.
+pub(crate) fn escape_to_close(ctx: &egui::Context) -> bool {
+    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape))
+}
+
 /// "저장하시겠습니까?" 확인창. 다른 문서를 열려고 하는데 현재 북마크에 저장 안 된
 /// 변경사항이 있을 때만 뜬다(pending_open_path가 Some일 때).
 fn show_unsaved_changes_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
     if app.pending_open_path.is_none() {
+        return;
+    }
+    if escape_to_close(ctx) {
+        app.pending_open_path = None; // Esc = 취소(열지 않음)
         return;
     }
 
@@ -2044,6 +2210,10 @@ fn show_quit_confirmation_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
     if !app.quit_confirmation_pending {
         return;
     }
+    if escape_to_close(ctx) {
+        app.quit_confirmation_pending = false; // Esc = 취소(종료하지 않음)
+        return;
+    }
 
     egui::Window::new("변경사항 저장")
         .collapsible(false)
@@ -2073,6 +2243,10 @@ fn show_search_no_results_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
     if !app.search_no_results {
         return;
     }
+    if escape_to_close(ctx) {
+        app.dismiss_search_no_results(); // "확인" 버튼과 같은 뒤처리(검색창 포커스 복귀)
+        return;
+    }
 
     egui::Window::new("검색")
         .collapsible(false)
@@ -2084,6 +2258,101 @@ fn show_search_no_results_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
             if ui.button("확인").clicked() {
                 app.dismiss_search_no_results();
             }
+        });
+}
+
+/// "파일명 변경" 창(파일 메뉴 또는 F2). 확장자(.pdf)는 빼고 보여 주고, 입력에 없으면
+/// 저장할 때 다시 붙인다 — 확장자를 실수로 지우는 일을 막기 위해서다.
+///
+/// 창은 끌어서 옮길 수 있다(2026-09-27 요청) — `anchor`를 주면 egui가 매 프레임 위치를
+/// 고정해 드래그가 먹지 않으므로, 대신 `pivot` + `default_pos`로 **처음 뜰 때만** 화면
+/// 가운데에 놓는다. 그 뒤 위치는 egui가 창 id로 기억한다.
+fn show_rename_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
+    let Some((mut name, error)) = app.rename_input.take() else {
+        return;
+    };
+    let mut error = error;
+    let (mut confirm, mut cancel) = (false, false);
+    // 이 창이 떠 있는 동안 Enter/Esc는 이 창의 것이다 — 입력칸이 포커스를 쥐고 있으므로
+    // 다른 위젯이 같은 키를 받을 일이 없다. Esc는 소비해서 뒤의 창에 넘기지 않는다.
+    let enter = ctx.input(|i| i.key_pressed(Key::Enter));
+    let escape = escape_to_close(ctx);
+    let field_id = egui::Id::new("rename_field");
+
+    egui::Window::new("파일명 변경")
+        .collapsible(false)
+        .resizable(false)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.screen_rect().center())
+        .show(ctx, |ui| {
+            ui.set_min_width(360.0);
+            if let Some(path) = app.current_file.as_deref().and_then(|p| p.parent()) {
+                ui.weak(format!("폴더: {}", display_filename(path)));
+            }
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut name).id(field_id).desired_width(f32::INFINITY),
+            );
+            // 창이 떠 있는 동안 입력칸이 포커스를 쥔다. "포커스가 빈 경우에만 요청"으로
+            // 했더니 툴바 검색창 같은 다른 위젯이 포커스를 들고 있을 때 타이핑도 Enter도
+            // 이 창에 오지 않았다(2026-09-27 리포트). Enter로 포커스를 놓는 순간에도
+            // 곧바로 되찾아야 하므로 매 프레임 확인한다.
+            if ui.memory(|m| m.focused()) != Some(field_id) {
+                response.request_focus();
+            }
+            if response.changed() {
+                error = None;
+            }
+            if let Some(message) = &error {
+                ui.colored_label(ui.visuals().error_fg_color, message);
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                confirm = ui.button("변경").clicked() || enter;
+                cancel = ui.button("취소").clicked() || escape;
+            });
+        });
+
+    if cancel {
+        return; // take()로 이미 비웠으니 창이 닫힌다
+    }
+    if confirm {
+        match app.rename_current_file(&name) {
+            Ok(()) => return,
+            Err(message) => error = Some(message),
+        }
+    }
+    app.rename_input = Some((name, error));
+}
+
+/// "북마크 전체 삭제" 확인창. 실제 삭제는 메모리에서만 일어나고(되돌리기 가능),
+/// PDF에 반영하려면 저장해야 한다 — 문구로도 그렇게 안내한다.
+fn show_clear_bookmarks_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
+    if !app.clear_bookmarks_pending {
+        return;
+    }
+    if escape_to_close(ctx) {
+        app.clear_bookmarks_pending = false;
+        return;
+    }
+    let count = bookmark::flatten_tree(&app.bookmarks, "").len();
+
+    egui::Window::new("북마크 전체 삭제")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label(format!("이 문서의 북마크 {count}개를 모두 지웁니다."));
+            ui.weak("되돌리기(Undo)로 복구할 수 있고, PDF에 반영하려면 저장해야 합니다.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("전체 삭제").clicked() {
+                    app.clear_bookmarks();
+                    app.clear_bookmarks_pending = false;
+                }
+                if ui.button("취소").clicked() {
+                    app.clear_bookmarks_pending = false;
+                }
+            });
         });
 }
 
@@ -2166,6 +2435,9 @@ impl eframe::App for PdfViewerApp {
         self.poll_macos_open_file_events(ctx);
 
         crate::toolbar::show(ctx, self);
+        // 상태표시줄은 사이드바·뷰어보다 먼저 아래쪽 자리를 차지해야 그 위로 패널이 눕는다.
+        crate::status_bar::refresh(ctx, self);
+        crate::status_bar::show(ctx, self);
         crate::sidebar::show(ctx, self);
         // 오른쪽 검색 결과 패널 — 뷰어(CentralPanel)보다 먼저 공간을 차지해야 한다.
         crate::search_panel::show_docked(ctx, self);
@@ -2182,6 +2454,8 @@ impl eframe::App for PdfViewerApp {
         show_crash_recovery_dialog(ctx, self);
         show_quit_confirmation_dialog(ctx, self);
         show_search_no_results_dialog(ctx, self);
+        show_rename_dialog(ctx, self);
+        show_clear_bookmarks_dialog(ctx, self);
         crate::ocr_dialogs::show(ctx, self);
         crate::viewer_panel::show(ctx, self);
         // 분리된 검색 결과 창(항상 위) — 별도 OS 창이라 메인 창 레이아웃과 무관.
@@ -2264,6 +2538,83 @@ mod render_width_tests {
     fn degenerate_page_size_is_safe() {
         let w = clamped_render_width(2000, 0.0, 792.0, 16384);
         assert!(w >= 50);
+    }
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::{FitMode, ViewportState};
+
+    const VIEW: egui::Vec2 = egui::vec2(1000.0, 800.0);
+    /// 실제 코퍼스(`ZZ0001964_01-apple.pdf`)의 판형들.
+    const BODY: egui::Vec2 = egui::vec2(2604.0, 3671.0);
+    const SPINE: egui::Vec2 = egui::vec2(400.0, 3679.0);
+    const A4: egui::Vec2 = egui::vec2(595.28, 841.89);
+
+    fn fit(mode: FitMode, page: egui::Vec2) -> f32 {
+        let mut viewport = ViewportState { fit: mode, ..Default::default() };
+        viewport.apply_fit(page, VIEW);
+        viewport.zoom
+    }
+
+    /// 배율이 실제 크기 기준이 된 뒤로, 높이가 같은 두 페이지는 거의 같은 배율로 맞춰진다 —
+    /// 화면에서도 같은 높이로 보인다는 뜻이다. 패널 폭 기준이던 시절에는 본문 100%,
+    /// 책등 4.7%로 전혀 다른 값이 나왔다(2026-09-27).
+    #[test]
+    fn pages_of_equal_height_get_equal_zoom() {
+        let (body, spine) = (fit(FitMode::Page, BODY), fit(FitMode::Page, SPINE));
+        assert!((body - spine).abs() < 0.005, "본문 {body} vs 책등 {spine}");
+        assert!((0.2..0.23).contains(&body), "{body}");
+    }
+
+    /// 쪽 맞춤은 세로로 긴 페이지는 높이에, 가로로 넓은 페이지는 폭에 맞춘다.
+    #[test]
+    fn fit_page_picks_the_binding_axis() {
+        let tall = fit(FitMode::Page, egui::vec2(500.0, 4000.0));
+        assert!((tall - 800.0 / 4000.0).abs() < 1e-6, "{tall}");
+        let wide = fit(FitMode::Page, egui::vec2(4000.0, 500.0));
+        assert!((wide - 1000.0 / 4000.0).abs() < 1e-6, "{wide}");
+    }
+
+    #[test]
+    fn width_mode_fills_the_panel_width() {
+        assert!((fit(FitMode::Width, A4) - 1000.0 / 595.28).abs() < 1e-4);
+        // 흔한 세로형은 폭에 맞춰도 화면 두 개 안쪽이라 그대로 폭 맞춤이다.
+        assert!((fit(FitMode::Width, BODY) - 1000.0 / 2604.0).abs() < 1e-4);
+    }
+
+    /// 극단적으로 좁고 긴 페이지는 폭 맞춤 모드에서도 폭에 맞추지 않는다 — 맞추면 250%로
+    /// 확대되어 높이의 11%만 보인다(2026-09-27 요청).
+    #[test]
+    fn width_mode_backs_off_for_extremely_tall_pages() {
+        let spine = fit(FitMode::Width, SPINE);
+        assert!((spine - fit(FitMode::Page, SPINE)).abs() < 1e-6, "쪽 맞춤과 같아야: {spine}");
+        assert!(spine < 1000.0 / SPINE.x, "폭 맞춤보다 작다");
+    }
+
+    /// 맞춤 배율은 하나뿐인 하한 안에 들어온다 — 맞춤 전용 하한은 필요 없어졌다.
+    #[test]
+    fn fit_zoom_stays_within_the_single_floor() {
+        for page in [BODY, SPINE, A4, egui::vec2(216.0, 3663.0)] {
+            let zoom = fit(FitMode::Page, page);
+            assert!(zoom >= ViewportState::MIN_ZOOM, "{page:?} -> {zoom}");
+        }
+    }
+
+    #[test]
+    fn manual_mode_keeps_the_user_value() {
+        let mut viewport = ViewportState { zoom: 1.5, fit: FitMode::Manual, ..Default::default() };
+        viewport.apply_fit(BODY, VIEW);
+        assert_eq!(viewport.zoom, 1.5);
+    }
+
+    /// 확대/축소는 맞춤을 풀고 사용자 값으로 넘어간다.
+    #[test]
+    fn zooming_leaves_fit_mode() {
+        let mut viewport = ViewportState::default();
+        assert_eq!(viewport.fit, FitMode::Page);
+        viewport.zoom_in();
+        assert_eq!(viewport.fit, FitMode::Manual);
     }
 }
 

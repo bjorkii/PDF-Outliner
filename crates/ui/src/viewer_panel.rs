@@ -36,7 +36,7 @@ fn prefetch_width(target_width: i32, aspect: f32) -> i32 {
 fn search_match_center(
     app: &PdfViewerApp,
     index: usize,
-    target_width: i32,
+    zoom: f32,
     pixels_per_point: f32,
 ) -> Option<(u32, egui::Vec2)> {
     let search_match = app.search_matches.get(index)?;
@@ -59,7 +59,9 @@ fn search_match_center(
         .pages()
         .get((search_match.page - 1) as PdfPageIndex)
         .ok()?;
-    let config = PdfRenderConfig::new().set_target_width(target_width);
+    // 그 페이지가 지금 배율로 그려지는 폭 — 페이지마다 다르다(연속 스크롤).
+    let config = PdfRenderConfig::new()
+        .set_target_width(app.render_width(search_match.page, zoom, pixels_per_point));
     let (px, py) = page
         .points_to_pixels(
             PdfPoints::new((left + right) / 2.0),
@@ -91,11 +93,9 @@ fn pan_x_to_center(page_width: f32, point_x: f32, view_width: f32) -> f32 {
     (page_width / 2.0 - point_x).clamp(-max_pan, max_pan)
 }
 
-fn page_aspect_of(page_aspects: &[f32], page: u32) -> f32 {
-    page_aspects
-        .get((page as usize).saturating_sub(1))
-        .copied()
-        .unwrap_or(1.414)
+fn page_aspect_of(app: &PdfViewerApp, page: u32) -> f32 {
+    let size = app.page_size_pt(page);
+    size.y / size.x.max(1.0)
 }
 
 pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
@@ -142,38 +142,38 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
         // 렌더링하고, 화면에 그릴 때는 다시 포인트로 나눠 배치한다.
         let pixels_per_point = ctx.pixels_per_point();
 
+        // 이번 프레임에 배율을 정하는 기준 페이지. 쪽 단위 보기는 보고 있는 페이지, 연속
+        // 스크롤은 첫 페이지다 — 연속은 모든 페이지가 한 배율을 공유하는데 페이지마다 다시
+        // 맞추면 스크롤 도중 레이아웃이 통째로 바뀌어 보던 자리가 튄다.
+        let fit_page = if app.continuous_scroll { 1 } else { app.current_page };
+        let fit_size = app.page_size_pt(fit_page);
+
         // GPU 텍스처 한도를 넘는 배율은 그 해상도로 렌더링 자체가 불가능하므로(§7 "고배율
         // 줌 크래시") 줌 값을 여기서 상한에 멈춘다 — 툴바 % 표시도 viewport.zoom을 그대로
         // 보여주므로 함께 멈춘다. 한도 초과분을 흐릿하게 스케일업해서 보여주는 방안은
-        // 사용자가 기각(2026-07-14). 세로형 페이지는 높이가 먼저 한도에 걸리므로 페이지
-        // 종횡비(page_aspect)를 반영해 허용 가능한 최대 렌더 폭을 역산한다.
-        // 주의: 이 상한은 고정 %가 아니다 — %는 "패널 폭 대비 배율"이라 창이 좁거나
-        // 사이드바가 넓으면 같은 800%라도 텍스처가 작아져 상한에 안 걸릴 수 있다
-        // (실측: 기본 창에서는 세로형 A4급이 ~647%에서 멈추지만, 패널이 ~734pt 이하면
-        // 800% 전체가 합법). 지켜지는 불변식은 "텍스처 ≤ GPU 한도" 하나다.
-        if let (Some(aspect), Some(max_side)) = (app.page_aspect, app.max_texture_side) {
+        // 사용자가 기각(2026-07-14). 가로·세로 중 긴 변이 먼저 한도에 걸린다.
+        //
+        // 배율이 페이지 실제 크기 기준이 된 뒤로(2026-09-27) 이 상한은 **창 크기와 무관**
+        // 하다. 예전에는 %가 패널 폭 대비라 같은 800%라도 창이 좁으면 상한에 안 걸렸고,
+        // 사용자가 "릴리스 앱에서는 800%가 되던데요?"라고 의문을 제기한 적이 있다.
+        if let Some(max_side) = app.max_texture_side {
             let max_side = max_side.min(16384) as f32;
-            let max_width_px = if aspect > 1.0 { max_side / aspect } else { max_side };
-            let max_zoom = max_width_px / (available.x * pixels_per_point).max(1.0);
+            let longest = fit_size.x.max(fit_size.y).max(1.0);
+            let max_zoom = max_side / (longest * pixels_per_point).max(1.0);
             if app.viewport.zoom > max_zoom {
                 app.viewport.zoom = max_zoom.max(ViewportState::MIN_ZOOM);
             }
         }
 
-        // 툴바 "쪽 맞춤" 버튼 요청 처리 — 그 프레임의 패널 크기를 아는 여기서만 정확히
-        // 계산할 수 있다(app::request_fit_page 문서 참고). 폭 맞춤(zoom=1.0)이 이미
-        // "페이지 폭 == 패널 폭"이므로, 높이도 패널 안에 들어오도록 필요하면 그보다 더
-        // 축소한다(이미 다 들어오면 그대로 폭 맞춤 유지 — min(1.0, ...)).
-        if std::mem::take(&mut app.request_fit_page) {
-            if let Some(aspect) = app.page_aspect {
-                let fit_zoom = (available.y / (available.x * aspect).max(1.0))
-                    .clamp(ViewportState::MIN_ZOOM, ViewportState::MAX_ZOOM);
-                app.viewport.zoom = fit_zoom;
-            }
-        }
+        // 자동 맞춤(쪽/폭/높이) 적용 — 그 프레임의 패널 크기를 아는 여기서만 정확히 계산할
+        // 수 있다(app::FitMode 문서 참고). 쪽 단위 보기에서는 페이지마다 다시 계산하므로,
+        // 한 문서에 판형이 섞여 있어도 넘길 때마다 그 페이지에 맞는 배율이 된다.
+        app.viewport.apply_fit(fit_size, available);
 
-        let target_width =
-            ((available.x * app.viewport.zoom * pixels_per_point).round() as i32).max(50);
+        // 렌더 폭(물리 픽셀) = 페이지 실제 폭 × 배율. 화면상 크기와 좌표 변환이 모두 이
+        // 값에서 나온다(app::render_width). 연속 스크롤에서는 페이지마다 폭이 다르므로
+        // 여기 값은 "기준 페이지의 폭"이고, 각 페이지 것은 그 안에서 다시 구한다.
+        let target_width = app.render_width(fit_page, app.viewport.zoom, pixels_per_point);
 
         // 배율(또는 패널 폭)이 바뀐 시각 — 두 모드 모두 이 시각 기준으로 재렌더링을
         // 디바운스한다(app::zoom_changed_at 문서 참고). 첫 프레임은 변화로 치지 않는다.
@@ -249,7 +249,7 @@ fn show_single_page(
                             continue;
                         }
                         let wanted =
-                            prefetch_width(target_width, page_aspect_of(&app.page_aspects, neighbor));
+                            prefetch_width(app.render_width(neighbor, app.viewport.zoom, pixels_per_point), page_aspect_of(app, neighbor));
                         let have = app.page_textures.width(neighbor);
                         if have.map_or(true, |width| width < wanted) {
                             app.request_page_texture(ctx, neighbor, wanted);
@@ -266,14 +266,14 @@ fn show_single_page(
         let display_width = target_width as f32 / pixels_per_point;
         let page_size = egui::vec2(
             display_width,
-            display_width * page_aspect_of(&app.page_aspects, page_number),
+            display_width * page_aspect_of(app, page_number),
         );
         // 검색 결과를 골랐으면 그 검색어 위치가 화면 중앙에 오게 팬을 맞춘다(페이지 경계를
         // 넘지 않게 바로 아래 clamp_pan이 제한). 결과 선택이 go_to_page로 현재 페이지를 이미
         // 옮겨 두므로 같은 프레임에 소비된다.
         if let Some(index) = app.search_center_request.take() {
             if let Some((match_page, point)) =
-                search_match_center(app, index, target_width, pixels_per_point)
+                search_match_center(app, index, app.viewport.zoom, pixels_per_point)
             {
                 if match_page == page_number {
                     app.viewport.pan_offset = pan_to_center(page_size, point);
@@ -286,7 +286,8 @@ fn show_single_page(
         let overflow = before_clamp - app.viewport.pan_offset.y;
         // 사이드바·검색 패널에서 스크롤할 때는 넘기지 않는다(스크롤 입력은 창 전체에서 들어온다).
         let pointer_in_view = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| rect.contains(p));
-        flip_page_at_edge(ctx, app, if pointer_in_view { overflow } else { 0.0 });
+        let pushed = if pointer_in_view { overflow } else { 0.0 };
+        flip_page_at_edge(ctx, app, pushed, page_size, available);
 
         // 경계 탄성 — 밀린 만큼 페이지가 따라 움직였다가 돌아온다.
         let image_rect = egui::Rect::from_center_size(
@@ -450,19 +451,23 @@ fn show_continuous(
     target_width: i32,
 ) {
     let total_pages = app.total_pages.max(1) as usize;
-    // 줌을 반영해야 한다 — 예전엔 `available.x`를 그대로 써서 배율과 무관하게 항상 폭
-    // 맞춤으로 보이고, 확대/축소해도 텍스처(target_width, 줌 반영됨)만 해상도가 바뀌고
-    // 화면에 그리는 크기는 그대로라 확대 시 흐릿해 보이는 문제가 있었다(2026-07-18 리포트
-    // — "배율이 어떻든 되어야 함", "강제확대한 것처럼 sharpness가 떨어짐"). 쪽 단위 모드와
-    // 동일하게 "줌 1.0 == 페이지 폭이 패널 폭과 같다"는 의미를 유지한다.
-    let page_width_pts = available.x * app.viewport.zoom;
+    let zoom = app.viewport.zoom;
+    let pixels_per_point = ctx.pixels_per_point();
+    let layout = continuous_layout(&app.page_sizes, total_pages, zoom);
+    let (offsets, sizes, total_height, content_width) =
+        (&layout.offsets, &layout.sizes, layout.total_height, layout.content_width);
+    let heights: Vec<f32> = sizes.iter().map(|s| s.y).collect();
+    // 페이지별 렌더 폭(물리 픽셀). 좌표 변환(하이라이트·링크·선택)이 이 값을 쓰므로 미리
+    // 구해 둔다 — 그리기 도중에는 app을 가변으로 빌려 쓰는 곳이 많아 그때그때 못 구한다.
+    let page_widths: Vec<i32> = (1..=total_pages as u32)
+        .map(|page| app.render_width(page, zoom, pixels_per_point))
+        .collect();
+    // 각 페이지의 왼쪽 여백 — 폭이 제각각이므로 가장 넓은 페이지 기준으로 가운데 맞춘다.
+    let left_of = |i: usize| (content_width - sizes[i].x) / 2.0;
 
-    let (offsets, heights, total_height) =
-        continuous_layout(&app.page_aspects, total_pages, page_width_pts);
-
-    // 가로 이동 — 확대로 페이지가 패널보다 넓을 때만 가능. 트랙패드 좌우 스와이프(Ctrl+휠
+    // 가로 이동 — 확대로 내용이 패널보다 넓을 때만 가능. 트랙패드 좌우 스와이프(Ctrl+휠
     // 줌과 겹치지 않게 Ctrl 제외)로 움직이고, 세로 스크롤은 ScrollArea가 맡는다.
-    let max_pan_x = ((page_width_pts - available.x) / 2.0).max(0.0);
+    let max_pan_x = ((content_width - available.x) / 2.0).max(0.0);
     let horizontal_swipe = ctx.input(|i| {
         if i.modifiers.ctrl {
             0.0
@@ -478,20 +483,19 @@ fn show_continuous(
     let page_at = |screen_pos: egui::Pos2, origin: egui::Pos2| -> Option<(u32, egui::Rect)> {
         let content_x = screen_pos.x - origin.x;
         let content_y = screen_pos.y - origin.y;
-        if content_x < 0.0 || content_x > page_width_pts {
-            return None;
-        }
         for i in 0..total_pages {
             let top = offsets[i];
-            let bottom = top + heights[i];
-            if content_y >= top && content_y <= bottom {
-                let rect = egui::Rect::from_min_size(
-                    egui::pos2(0.0, top),
-                    egui::vec2(page_width_pts, heights[i]),
-                )
-                .translate(origin.to_vec2());
-                return Some(((i + 1) as u32, rect));
+            let bottom = top + sizes[i].y;
+            if content_y < top || content_y > bottom {
+                continue;
             }
+            let left = left_of(i);
+            if content_x < left || content_x > left + sizes[i].x {
+                return None;
+            }
+            let rect = egui::Rect::from_min_size(egui::pos2(left, top), sizes[i])
+                .translate(origin.to_vec2());
+            return Some(((i + 1) as u32, rect));
         }
         None
     };
@@ -499,9 +503,9 @@ fn show_continuous(
     // 페이지 폭이 직전 프레임과 달라졌는지(줌/창 크기 변화). 전체 레이아웃이 폭에 따라
     // 커지고 작아지므로 오프셋을 그대로 두면 같은 y가 다른 페이지를 가리켜 확대=앞쪽/
     // 축소=뒤쪽으로 점프한다(2026-07-18 리포트) — 아래에서 앵커로 보정한다.
-    let last_width = app.continuous_last_page_width;
-    let width_changed = last_width > 0.0 && (page_width_pts - last_width).abs() > 0.5;
-    app.continuous_last_page_width = page_width_pts;
+    let last_zoom = app.continuous_last_zoom;
+    let width_changed = last_zoom > 0.0 && (zoom - last_zoom).abs() > 1e-4;
+    app.continuous_last_zoom = zoom;
 
     // 재렌더링 디바운스: 핀치 줌 중 pdfium 재렌더링을 하면 심하게 버벅이므로, 배율이 바뀐
     // 뒤 일정 시간 동안은 기존 텍스처를 늘려 그리고, 멎은 뒤에야 원해상도로 업그레이드한다.
@@ -535,12 +539,12 @@ fn show_continuous(
             // 곱해져 `간격 × 위쪽 페이지 수 × (비율 − 1)`만큼 어긋난다(뒤쪽 페이지일수록
             // 크게). 대신 뷰포트 중앙이 가리키던 "페이지 i의 f% 지점"을 옛 레이아웃에서
             // 구하고 새 레이아웃에서 다시 계산한다 — 재계산이라 오차가 섞이지 않는다.
-            let (old_offsets, old_heights, _) =
-                continuous_layout(&app.page_aspects, total_pages, last_width);
+            let old = continuous_layout(&app.page_sizes, total_pages, last_zoom);
+            let old_heights: Vec<f32> = old.sizes.iter().map(|s| s.y).collect();
             let half_view = available.y / 2.0;
-            let anchor = anchor_at(&old_offsets, &old_heights, state.offset.y + half_view);
+            let anchor = anchor_at(&old.offsets, &old_heights, state.offset.y + half_view);
             override_offset =
-                Some((y_for_anchor(&offsets, &heights, anchor) - half_view).max(0.0));
+                Some((y_for_anchor(offsets, &heights, anchor) - half_view).max(0.0));
         }
     }
 
@@ -548,13 +552,14 @@ fn show_continuous(
     // 스크롤 오프셋, 가로는 continuous_pan_x(패널보다 넓게 확대된 경우만 움직임).
     if let Some(index) = app.search_center_request.take() {
         if let Some((match_page, point)) =
-            search_match_center(app, index, target_width, ctx.pixels_per_point())
+            search_match_center(app, index, app.viewport.zoom, ctx.pixels_per_point())
         {
             let idx = (match_page as usize).saturating_sub(1);
             if let Some(&page_top) = offsets.get(idx) {
                 override_offset = Some(scroll_offset_to_center(page_top, point.y, available.y));
+                // 가로는 내용 전체 폭 기준 — 그 페이지가 가운데 정렬로 밀린 만큼 더한다.
                 app.continuous_pan_x =
-                    pan_x_to_center(page_width_pts, point.x, available.x);
+                    pan_x_to_center(content_width, left_of(idx) + point.x, available.x);
             }
         }
     }
@@ -577,7 +582,7 @@ fn show_continuous(
     // 보조 프로세스가 없을 때의 대체 경로에서만 쓴다.
     let scrolling = scroll_state.as_ref().is_some_and(|s| s.velocity().y.abs() > 50.0)
         || ctx.input(|i| i.smooth_scroll_delta.y != 0.0);
-    let scroll_render_width = (target_width / 2).max(400).min(target_width);
+    // 반해상도 대체 렌더 폭은 페이지마다 다르므로 아래 렌더 루프에서 그때 구한다.
 
     // 쪽 단위 모드와 픽셀 단위로 같은 가로 중앙 위치를 쓰기 위해, ScrollArea에 들어가기
     // 전에 패널 기준 왼쪽 끝을 잡아둔다 — 안쪽 clip 폭 기반으로 계산했더니 쪽 단위 대비
@@ -594,7 +599,7 @@ fn show_continuous(
     }
     scroll_area
         .show_viewport(ui, |ui, viewport| {
-            ui.set_width(page_width_pts);
+            ui.set_width(content_width);
             ui.set_height(total_height);
 
             // 가로 중앙 정렬 — 쪽 단위 모드와 동일하게 "패널 전체 폭"(outer_left +
@@ -602,13 +607,14 @@ fn show_continuous(
             // 오른쪽으로 치우침 — 위 outer_left 주석 참고). 이 x를 origin에 접어 넣어
             // 히트테스트(page_at)/클릭 영역/그리기가 전부 같은 좌표를 쓰게 한다.
             let origin = egui::pos2(
-                outer_left + (available.x - page_width_pts) / 2.0 + app.continuous_pan_x,
+                outer_left + (available.x - content_width) / 2.0 + app.continuous_pan_x,
                 ui.max_rect().min.y,
             );
 
             // 전체 문서 영역 하나에 클릭+드래그를 건다 — 페이지별로 따로 Response를 만들지
             // 않고 이 하나로 클릭(포커스/링크)·드래그(텍스트 선택)를 전부 처리한다.
-            let full_rect = egui::Rect::from_min_size(origin, egui::vec2(page_width_pts, total_height));
+            let full_rect =
+                egui::Rect::from_min_size(origin, egui::vec2(content_width, total_height));
             let full_response = ui.interact(
                 full_rect,
                 ui.id().with("continuous_interact"),
@@ -617,9 +623,9 @@ fn show_continuous(
 
             if let Some(pos) = full_response.hover_pos() {
                 if let Some((page_number, page_rect)) = page_at(pos, origin) {
-                    if link_target_at_screen_pos(app, pos, page_rect, target_width, page_number).is_some() {
+                    if link_target_at_screen_pos(app, pos, page_rect, page_widths[(page_number as usize).saturating_sub(1)], page_number).is_some() {
                         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                    } else if char_index_at_screen_pos(app, pos, page_rect, target_width, page_number)
+                    } else if char_index_at_screen_pos(app, pos, page_rect, page_widths[(page_number as usize).saturating_sub(1)], page_number)
                         .is_some()
                     {
                         ctx.set_cursor_icon(egui::CursorIcon::Text);
@@ -644,7 +650,7 @@ fn show_continuous(
                 app.selection_page = None;
                 if let Some(pos) = full_response.interact_pointer_pos() {
                     if let Some((page_number, page_rect)) = page_at(pos, origin) {
-                        match link_target_at_screen_pos(app, pos, page_rect, target_width, page_number) {
+                        match link_target_at_screen_pos(app, pos, page_rect, page_widths[(page_number as usize).saturating_sub(1)], page_number) {
                             Some(LinkTarget::Page(page)) => app.go_to_page(page),
                             Some(LinkTarget::Uri(url)) => app.open_external_link(&url),
                             None => {}
@@ -658,7 +664,7 @@ fn show_continuous(
             // (app::continuous_drag_scroll). 텍스트 선택은 좌클릭 드래그만.
             if full_response.dragged_by(egui::PointerButton::Secondary) {
                 let delta = full_response.drag_delta();
-                let max_pan_x = ((page_width_pts - available.x) / 2.0).max(0.0);
+                let max_pan_x = ((content_width - available.x) / 2.0).max(0.0);
                 app.continuous_pan_x =
                     (app.continuous_pan_x + delta.x).clamp(-max_pan_x, max_pan_x);
                 app.continuous_drag_scroll += delta.y;
@@ -679,7 +685,7 @@ fn show_continuous(
                 if let Some((page_number, page_rect)) = hit {
                     if let Some(pos) = full_response.interact_pointer_pos() {
                         if let Some(idx) =
-                            char_index_at_screen_pos(app, pos, page_rect, target_width, page_number)
+                            char_index_at_screen_pos(app, pos, page_rect, page_widths[(page_number as usize).saturating_sub(1)], page_number)
                         {
                             app.selection_drag_start_index = Some(idx);
                             app.selection_page = Some(page_number);
@@ -697,7 +703,7 @@ fn show_continuous(
                                     app,
                                     pos,
                                     page_rect,
-                                    target_width,
+                                    page_widths[(page_number as usize).saturating_sub(1)],
                                     page_number,
                                 ) {
                                     app.selection =
@@ -717,7 +723,7 @@ fn show_continuous(
             // clip 영역과는 다른 좌표계라 `ui.is_rect_visible()`로는 이 범위를 정확히 알 수
             // 없다(egui 문서: "the relative view of the content"). 위아래로 페이지 하나
             // 폭 정도 여유를 둬서 스크롤 도중 팝인이 덜 보이게 미리 렌더링한다.
-            let buffer = page_width_pts.max(200.0);
+            let buffer = content_width.max(200.0);
             let visible_top = (viewport.min.y - buffer).max(0.0);
             let visible_bottom = viewport.max.y + buffer;
 
@@ -781,6 +787,9 @@ fn show_continuous(
             let mut upgraded_this_frame = false;
             for i in render_order {
                 let page_number = (i + 1) as u32;
+                let page_target = page_widths[i];
+                // 스크롤·줌 중에는 반해상도로 빠르게(위 scrolling 주석).
+                let scroll_render_width = (page_target / 2).max(400).min(page_target);
                 let cached_width = app.page_textures.width(page_number);
                 let (needs_render, render_width) = match cached_width {
                     None => (
@@ -788,14 +797,14 @@ fn show_continuous(
                         if !async_render && (scrolling || zoom_settling) {
                             scroll_render_width
                         } else {
-                            target_width
+                            page_target
                         },
                     ),
                     Some(w) => (
-                        w != target_width
+                        w != page_target
                             && !zoom_settling
                             && (async_render || (!scrolling && !upgraded_this_frame)),
-                        target_width,
+                        page_target,
                     ),
                 };
                 if needs_render {
@@ -816,11 +825,9 @@ fn show_continuous(
             let mut painted_ids = Vec::new();
             for i in first_visible..=last_visible {
                 let page_number = (i + 1) as u32;
-                let page_rect = egui::Rect::from_min_size(
-                    egui::pos2(0.0, offsets[i]),
-                    egui::vec2(page_width_pts, heights[i]),
-                )
-                .translate(origin.to_vec2());
+                let page_rect =
+                    egui::Rect::from_min_size(egui::pos2(left_of(i), offsets[i]), sizes[i])
+                        .translate(origin.to_vec2());
 
                 // 렌더 결과를 기다리는 페이지는 흰 페이지로 자리만 잡아 둔다.
                 match app.page_textures.get(page_number) {
@@ -838,9 +845,10 @@ fn show_continuous(
                     }
                 }
 
-                draw_selection_highlight(ui, app, page_rect, target_width, page_number);
-                draw_search_highlight(ui, app, page_rect, target_width, page_number);
-                draw_ocr_mark(ui, app, page_rect, target_width, page_number);
+                let page_target = page_widths[i];
+                draw_selection_highlight(ui, app, page_rect, page_target, page_number);
+                draw_search_highlight(ui, app, page_rect, page_target, page_number);
+                draw_ocr_mark(ui, app, page_rect, page_target, page_number);
             }
             app.page_textures.note_painted(&painted_ids);
 
@@ -852,24 +860,36 @@ fn show_continuous(
         });
 }
 
-/// 연속 스크롤 레이아웃 — 페이지별 상단 y·높이(pt)와 전체 높이. 크기를 이 한 식으로만
-/// 정하므로 그리기·히트테스트·가상화 범위·스크롤 보정이 서로 어긋날 수 없다.
-/// page_aspects(문서를 열 때 1회 계산, app.rs 참고)가 아직 없으면 A4 비슷한 기본값을 쓴다.
-fn continuous_layout(
-    page_aspects: &[f32],
-    total_pages: usize,
-    page_width: f32,
-) -> (Vec<f32>, Vec<f32>, f32) {
+/// 연속 스크롤 레이아웃 — 페이지별 상단 y와 화면상 크기(pt), 전체 높이, 그리고 가장 넓은
+/// 페이지의 폭. 크기를 이 한 식으로만 정하므로 그리기·히트테스트·가상화 범위·스크롤 보정이
+/// 서로 어긋날 수 없다.
+///
+/// **페이지마다 크기가 다르다**(2026-09-27). 예전에는 모든 페이지를 패널 폭에 맞춰 같은
+/// 폭으로 그렸는데, 그러면 400pt짜리 책등 스캔이 2604pt 본문과 같은 폭이 되어 물리적으로
+/// 틀린 화면이 됐다. 이제는 실제 크기에 같은 배율을 곱하므로 서로의 크기 관계가 보존된다.
+struct ContinuousLayout {
+    /// 각 페이지 상단의 y(레이아웃 좌표).
+    offsets: Vec<f32>,
+    /// 각 페이지의 화면상 크기(pt).
+    sizes: Vec<egui::Vec2>,
+    total_height: f32,
+    /// 가장 넓은 페이지의 폭 — 스크롤 영역의 가로 크기이자 좌우 가운데 정렬의 기준.
+    content_width: f32,
+}
+
+fn continuous_layout(page_sizes: &[egui::Vec2], total_pages: usize, zoom: f32) -> ContinuousLayout {
     let mut offsets = Vec::with_capacity(total_pages);
-    let mut heights = Vec::with_capacity(total_pages);
+    let mut sizes = Vec::with_capacity(total_pages);
     let mut cursor = 0.0_f32;
+    let mut content_width = 0.0_f32;
     for i in 0..total_pages {
-        let height = page_width * page_aspects.get(i).copied().unwrap_or(1.414);
+        let size = page_sizes.get(i).copied().unwrap_or(egui::vec2(595.28, 841.89)) * zoom;
         offsets.push(cursor);
-        heights.push(height);
-        cursor += height + PAGE_GAP;
+        sizes.push(size);
+        content_width = content_width.max(size.x);
+        cursor += size.y + PAGE_GAP;
     }
-    (offsets, heights, (cursor - PAGE_GAP).max(0.0))
+    ContinuousLayout { offsets, sizes, total_height: (cursor - PAGE_GAP).max(0.0), content_width }
 }
 
 /// 배율과 무관한 스크롤 기준점 — "몇 번째(0-based) 페이지의 몇 % 지점".
@@ -1108,22 +1128,76 @@ fn draw_search_highlight(
 /// 페이지 경계를 넘겨 미는 동작의 상태(쪽 단위 보기).
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct EdgeState {
-    /// 경계를 넘겨 민 양의 합(pt). 위로 밀면 음수(다음 쪽), 아래로 밀면 양수.
+    /// **넘김 판정용** 누적(pt). 위로 밀면 음수(다음 쪽), 아래로 밀면 양수. 넘기면 0으로
+    /// 비우고, 쿨다운 중에는 모으지 않는다.
     pub push: f32,
+    /// **탄성용** 누적(pt). 넘김 판정과 분리해 둔 것이 핵심이다(→ [`SPRING_LIMIT`]).
+    pub spring: f32,
+    /// 미는 힘의 포락선(pt/초). 힘이 이 값 이상일 때만 탄성이 늘어난다(→ [`ENVELOPE_DECAY`]).
+    pub rate_envelope: f32,
     /// 마지막으로 민 시각(초).
     pub push_at: f64,
-    /// 넘긴 직후 — 스크롤이 멎을 때까지 다시 넘기지 않는다.
-    pub locked: bool,
+    /// 이 시각(초)까지는 다시 넘기지 않는다. **시간이 지나면 조건 없이 만료된다** —
+    /// 입력이 끊기기를 기다리던 옛 잠금과 다른 점이고, "아예 안 넘어간다"가 재발할 수 없는
+    /// 이유다(→ [`FLIP_COOLDOWN`]).
+    pub cooldown_until: f64,
     /// 페이지가 경계 밖으로 따라 나간 거리(pt, 감쇠 적용).
     pub overscroll: f32,
 }
 
-/// 경계에서 이만큼(pt) 더 밀어야 넘어간다.
+/// 경계에서 이만큼(pt) 더 밀어야 한 장 넘어간다.
 ///
 /// 같은 시스템의 PDF-Redactify(`src/utils/wheelPageTurn.ts`)가 같은 사용자의 "살짝 스쳐도
 /// 넘어간다" 리포트로 120 → 320 → 600 → 1200까지 올린 기록을 참고했다. 트랙패드는 한 번 쓸어도
 /// 관성으로 이벤트가 길게 이어져서, 의도적으로 미는 것과 스치는 것을 가르려면 큰 값이 필요하다.
-const FLIP_THRESHOLD: f32 = 1000.0;
+///
+/// **재는 대상은 "힘이 세지거나 유지되는 동안" 민 양이다**(→ [`ENVELOPE_DECAY`]) — 관성 꼬리로
+/// 밀린 양은 세지 않는다. 그 전에는 꼬리까지 다 세서, 판정이 정점보다 **한참 뒤에** 떨어졌다
+/// (사용자 리포트 "이따금 신장-복원 후 약간 딜레이됐다가 페이지가 바뀐다", 2026-09-27).
+/// 계산해 보니 경계에 가까운 스와이프에서 정점보다 최대 0.30초 늦었다 — 복원이 끝나갈 무렵이다.
+/// 탄성과 넘김이 같은 창을 쓰면 판정이 정점 전후에 떨어지고 화면과 어긋나지 않는다.
+///
+/// 값의 내력: 꼬리까지 세던 시절 1000 → 2200 → 1800("살짝만 스와이프해도 넘어간다" →
+/// "잘 작동하는데 조금만 더 낮춰줘"). 꼬리를 빼면 총량의 **26%**만 남으므로(손가락 0.15초 +
+/// 꼬리 프레임당 0.96 감쇠로 계산 — 총량과 무관하게 일정한 비율이다), 사용자가 승인한 감도
+/// 1800pt를 그대로 옮기면 480이다. 거기서 실 점검으로 480 → 420 → 400까지 내렸다
+/// (총량으로는 약 1500pt에 해당).
+const FLIP_THRESHOLD: f32 = 400.0;
+/// 한 장 넘긴 뒤 이 시간(초) 동안은 다시 넘기지 않고, 그동안 들어온 밀린 양은 버린다.
+///
+/// **값은 "스와이프 한 번이 힘을 주는 시간"과 "사용자가 다시 쓰는 간격" 사이에 있어야 한다.**
+/// - 짧으면: 한 번 쓴 힘이 두 장을 넘긴다.
+/// - 길면(= 다시 쓰는 간격보다 길면): 쿨다운 안에 떨어진 **스와이프가 통째로 버려진다.**
+///
+/// 0.7 → 0.32로 내렸다. 실측 로그(`edge_push.log`, 2026-09-27)에서 사용자의 스와이프 간격이
+/// 약 0.6초인데 쿨다운이 0.7초라 **두 번 써서 한 장씩** 넘어갔다 — 7.11초에 7장(장당 1.02초),
+/// 간격이 1.01~1.14초로 한결같았다. 0.32초면 한 스와이프가 힘을 주는 구간(약 0.2초)은 덮으면서
+/// 다음 스와이프는 놓치지 않는다.
+///
+/// 처음 0.7로 크게 잡았던 이유는 그때는 **관성 꼬리가 넘김 판정에 그대로 더해졌기** 때문이다
+/// (한 번 쓸면 총량이 임계값의 몇 배). 지금은 포락선 게이트가 꼬리를 걸러내므로(→
+/// [`ENVELOPE_DECAY`]) 한 스와이프가 판정에 보태는 양이 임계값 한 장 분량 남짓이고, 쿨다운은
+/// 그 한 번의 힘이 두 장으로 번지는 것만 막으면 된다.
+///
+/// 입력이 끊기기를 기다리던 옛 잠금과 결정적으로 다른 점: **시간이 지나면 조건 없이
+/// 만료된다.** 관성이 이어지는 동안 다음 스와이프가 들어와도 무한히 이어질 수 없다 — 그것이
+/// "아예 안 넘어간다"의 정체였다(같은 증상으로 두 번 리포트받았다).
+const FLIP_COOLDOWN: f64 = 0.32;
+/// 한 프레임이 보탤 수 있는 양(pt)의 상한 — **비현실적인 값만 걸러내는 안전장치다.**
+///
+/// 넘긴 직후 프레임에는 "새 쪽의 끝으로 보내라"는 표식(`pan_offset.y = ±극값`)이 잘려 나가며
+/// 페이지 크기 단위의 값이 잡힐 수 있다. 그것이 그대로 더해지는 것을 막는다.
+///
+/// **실제 입력을 깎지 않는 것이 중요하다.** 한때 임계값에 비례하게(×0.35 = 140pt) 묶어 뒀는데,
+/// 실측 로그(`edge_push.log`, 2026-09-27)에서 사용자의 밀림이 **프레임당 평균 139pt**로 나와
+/// 정상 입력을 상시로 깎고 있었다. 그 탓에 감쇠하던 입력이 상한에 눌려 **일정한 값**으로
+/// 바뀌고, 포락선 게이트가 그것을 "힘을 유지하는 중"으로 읽어 관성 꼬리에도 게이트가 열렸다
+/// (한 번 쓸어 두 장이 넘어가는 회귀 테스트가 잡았다). 그래서 실측 평균의 네 배 남짓으로
+/// 넉넉히 둔다 — 정상 입력은 여기에 닿지 않고, 페이지 단위 표식은 훨씬 크다.
+///
+/// 임계값보다 크므로 이 상한만으로는 "이상값 한 프레임이 페이지를 넘기는 것"을 막지 못한다.
+/// 그쪽은 [`FLIP_COOLDOWN`]이 막는다 — 표식이 잡히는 프레임은 넘긴 직후, 즉 쿨다운 안이다.
+const MAX_FRAME_PUSH: f32 = 600.0;
 /// 탄성이 점근하는 거리(pt) — 스프링이 늘어날 수 있는 한계처럼 작동한다.
 const RUBBER_LIMIT: f32 = 200.0;
 /// 처음 미는 힘이 얼마나 그대로 전달되는지(0~1). 스프링 상수에 해당한다 — 작을수록 묵직하다.
@@ -1138,48 +1212,129 @@ const RELEASE_RATE: f32 = 12.0;
 const RELEASE_AFTER: f64 = 0.08;
 /// 이 시간(초) 동안 스크롤이 없으면 모아 둔 양을 잊는다.
 const FORGET_AFTER: f64 = 0.35;
-/// 스크롤 속도가 이보다 작아지면 "멎었다"고 보고 잠금을 푼다(pt/프레임).
-const RESTING_SPEED: f32 = 1.0;
+/// 모아 둔 양이 이보다 작아지면 0으로 본다 — 지수 감쇠는 정확히 0이 되지 않아서, 이 처리가
+/// 없으면 `overscroll`이 아주 작은 값에 머물며 리페인트가 끝없이 이어진다.
+const PUSH_EPSILON: f32 = 1.0;
+/// 탄성용 누적([`EdgeState::spring`])의 상한(pt). 넘김 임계값과는 **무관하다** — 임계값을
+/// 올린다고 페이지가 더 멀리 끌려 나가서는 안 된다.
+///
+/// **탄성은 넘김 판정과 분리해서 굴린다.** 한때 둘이 같은 누적값을 썼는데, 넘길 때 그 값을
+/// 0으로 비우니 탄성도 같이 사라졌다 — 사용자 리포트: "두 번째 스와이프부터는 탄성이
+/// 사라졌다가 한참(1초 이상) 있다가 살짝 나타남"(2026-09-27). 탄성은 **미는 힘이 있으면
+/// 언제나 즉시** 반응해야 한다.
+///
+/// 연달아 쓸 때는 직전 스와이프가 만든 자리(늘어나는 중이든 돌아오는 중이든)에서 이어서
+/// 더 늘어난다 — 누적값을 0으로 되돌리지 않으므로 [`rubber_band`] 곡선의 그 지점을 그대로
+/// 이어받고, 곡선이 갈수록 완만하니 아무리 덧대도 [`RUBBER_LIMIT`]을 넘지 못한다(사용자
+/// 설계 지시).
+const SPRING_LIMIT: f32 = 2000.0;
+/// 탄성이 풀리는 속도(초당 비율). **매 프레임 적용된다** — 미는 중에도 풀린다.
+/// 정점을 지난 뒤 눈에 보이게 돌아오는 데 걸리는 시간이 이 값으로 정해진다(12 → 약 0.30초).
+const SPRING_DECAY: f32 = 12.0;
+/// 미는 힘의 포락선이 잦아드는 속도(초당 비율). **"정점에서 1초쯤 멈췄다 복원된다"의 해법**
+/// 이다(사용자 리포트 2026-09-27).
+///
+/// 증상의 정체: 트랙패드 관성 꼬리는 1초 가까이 이어지며 매 프레임 값을 보탠다. 늘어난 양이
+/// **현재 미는 힘**에 비례하게 두면, 힘이 꼬리를 따라 천천히 잦아드는 동안 페이지도 천천히
+/// 내려온다 — 즉 복원 시간이 [`SPRING_DECAY`]가 아니라 **꼬리 길이**로 정해져 버린다. 풀리는
+/// 속도를 아무리 올려도 이 시간은 줄지 않는다(계산으로 확인).
+///
+/// 그래서 **힘이 세지거나 유지되는 동안만** 탄성에 힘을 먹인다. 판정은 "이번 프레임 미는
+/// 속도가 포락선 이상인가"이고, 포락선은 매 프레임 이 비율로 잦아든다. 손가락을 대고 있으면
+/// 속도가 일정하니(잦아드는 비율 0) 포락선을 계속 넘어 늘어난 채로 있고, 손을 떼면 꼬리가
+/// 이 값보다 빠르게 잦아들어(관성은 아무리 길어도 초당 1 이상) 포락선 아래로 떨어지므로
+/// 그 순간부터 먹이기가 멎고 곧바로 돌아온다. **정점이 곧 "가속도 부호가 바뀌는 시점"이 되어
+/// 사용자가 말한 물리와 맞는다.**
+///
+/// 값을 0.8로 정한 근거(꼬리 길이별로 계산한 "정점 후 90% 복원" 시간):
+///
+/// | 이 값 | 살짝 1회(꼬리 τ0.35) | 세게 1회(τ0.5) | 꼬리가 긴 경우(τ1.0) | 손가락 1초 유지 |
+/// |---|---|---|---|---|
+/// | **0.8** | 0.30초 | 0.30초 | 0.30초 | 유지 후 0.30초 |
+/// | 1.2 | 0.30초 | 0.30초 | **2.52초** | 유지 후 0.30초 |
+/// | 3.0 | **0.97초** | **1.38초** | **2.52초** | 유지 후 0.30초 |
+///
+/// 0.8이면 꼬리 길이와 무관하게 늘 0.30초다 — "손가락 유지(잦아듦 0)"와 "가장 느린 관성
+/// (초당 1)" 사이에 값이 들어가 있기 때문이다.
+const ENVELOPE_DECAY: f32 = 0.8;
 
 /// 한 프레임의 경계 밀기 처리(순수 함수). `overflow`는 클리핑으로 잘려 나간 이동량(pt),
-/// `dt`는 프레임 간격(초), `scroll_speed`는 이번 프레임 스크롤 속도. 페이지를 넘겨야 하면
-/// 방향(1=다음, -1=이전).
+/// `dt`는 프레임 간격(초). 페이지를 넘겨야 하면 방향(1=다음, -1=이전).
 ///
-/// - 미는 동안은 스프링처럼 저항을 받으며 페이지가 따라 나가고(`overscroll`), 손을 떼면 돌아온다.
-/// - 화면 위치는 목표값으로 곧장 뛰지 않고 `FOLLOW_RATE`로 수렴한다 — 입력이 있는 프레임과 없는
-///   프레임이 번갈아 오는 관성 구간에서 떨리지 않게.
-/// - 관성 스크롤 한 번에 여러 장 넘어가지 않게, 넘긴 뒤에는 스크롤이 멎을 때까지 잠근다.
-/// - 한동안 스크롤이 없으면 모아 둔 양을 잊는다(조금씩 여러 번 민 것이 쌓이지 않게).
-pub fn edge_step(state: &mut EdgeState, overflow: f32, now: f64, dt: f32, scroll_speed: f32) -> Option<i32> {
-    let mut flip = None;
-    if state.locked {
-        if scroll_speed <= RESTING_SPEED {
-            state.locked = false;
-        }
+/// 두 갈래를 **따로** 굴린다. 서로 규칙이 다르기 때문이다.
+///
+/// - `spring`(탄성): 미는 힘이 있으면 **언제나 즉시** 늘어나고, 힘이 끊기면 돌아온다. 쿨다운도
+///   넘김도 이쪽을 막지 않는다. 연달아 밀면 지금 늘어난 자리에서 이어서 더 늘어나되,
+///   [`rubber_band`] 곡선이 갈수록 완만해 무한정 덧대어지지 않는다.
+/// - `push`(넘김 판정): 넘기면 0으로 비우고, 넘긴 뒤 [`FLIP_COOLDOWN`] 동안은 모으지 않는다.
+///
+/// 화면 위치(`overscroll`)는 목표로 곧장 뛰지 않고 `FOLLOW_RATE`로 수렴한다 — 입력이 있는
+/// 프레임과 없는 프레임이 번갈아 오는 관성 구간에서 떨리지 않게.
+pub fn edge_step(state: &mut EdgeState, overflow: f32, now: f64, dt: f32) -> Option<i32> {
+    let idle = now - state.push_at;
+    if idle > FORGET_AFTER {
         state.push = 0.0;
-    } else {
-        if now - state.push_at > FORGET_AFTER {
+    }
+    // 넘긴 직후 얼마간은 모으지 않는다. 시간이 지나면 조건 없이 만료된다.
+    let cooling = now < state.cooldown_until;
+    let step = overflow.clamp(-MAX_FRAME_PUSH, MAX_FRAME_PUSH);
+    // 미는 힘이 **세지거나 유지되는** 동안만 "미는 것"으로 센다(→ `ENVELOPE_DECAY`).
+    // 탄성과 넘김 판정이 **같은 창**을 쓰는 것이 중요하다 — 한쪽만 게이트를 걸면 화면은
+    // 이미 제자리로 돌아온 뒤에 페이지가 넘어간다(사용자 리포트, 2026-09-27).
+    let rate = if dt > 0.0 { step / dt } else { 0.0 };
+    // 반대 방향으로 밀면 새 제스처다 — 포락선을 비운다. 포락선은 일부러 느리게 잦아들므로
+    // (관성보다 느려야 한다) 이 처리가 없으면 방향을 바꾼 스와이프가 한참 동안 먹히지 않는다.
+    if rate != 0.0 && state.rate_envelope != 0.0 && rate.signum() != state.rate_envelope.signum() {
+        state.rate_envelope = 0.0;
+    }
+    let pushing = rate.abs() >= state.rate_envelope.abs();
+    if rate.abs() > state.rate_envelope.abs() {
+        state.rate_envelope = rate;
+    }
+    state.rate_envelope -= state.rate_envelope * approach(ENVELOPE_DECAY, dt);
+    // 탄성은 넘김·쿨다운과 무관하게 지금 자리에서 이어서 늘어난다. 반대로 밀면 그만큼
+    // 되돌아간다(부호가 자연히 상쇄되므로 방향 전환을 따로 다루지 않는다).
+    if pushing {
+        state.spring = (state.spring + step).clamp(-SPRING_LIMIT, SPRING_LIMIT);
+    }
+    if overflow != 0.0 {
+        if cooling {
             state.push = 0.0;
-        }
-        if overflow != 0.0 {
-            // 방향이 바뀌면 처음부터 다시 센다.
-            if state.push.signum() != overflow.signum() {
+        } else if pushing {
+            // 방향이 바뀌면 처음부터 다시 센다. `push`가 0인 경우는 방향 전환이 아니다 —
+            // `(+0.0).signum()`은 1.0이라, 이 확인을 빼면 넘긴 직후(push를 0으로 비운 상태)에
+            // 위로 미는 입력이 매번 "방향 전환"으로 잡혀 판정이 헝클어진다.
+            if state.push != 0.0 && state.push.signum() != step.signum() {
                 state.push = 0.0;
             }
-            state.push += overflow;
-            state.push_at = now;
-        } else if now - state.push_at > RELEASE_AFTER {
-            // 입력이 끊기면 스프링이 풀리듯 모아 둔 양도 줄어든다.
-            state.push -= state.push * approach(RELEASE_RATE, dt);
+            state.push += step;
         }
-        if state.push.abs() >= FLIP_THRESHOLD {
-            // 위로 밀면(손가락을 위로) 화면이 올라가며 pan_offset.y가 줄어 overflow가 음수다.
-            flip = Some(if state.push < 0.0 { 1 } else { -1 });
+        state.push_at = now;
+    } else if idle > RELEASE_AFTER {
+        // 넘김 판정용 누적은 입력이 끊긴 뒤에만 풀린다 — 빈 프레임마다 깎으면 프레임을
+        // 건너뛰며 들어오는 관성 구간에서 넘김이 들쭉날쭉해진다.
+        state.push -= state.push * approach(RELEASE_RATE, dt);
+        if state.push.abs() < PUSH_EPSILON {
             state.push = 0.0;
         }
     }
+    // 탄성은 **매 프레임** 풀린다(미는 중에도) — 먹이기가 멎으면 그대로 복원이 된다.
+    state.spring -= state.spring * approach(SPRING_DECAY, dt);
+    if state.spring.abs() < PUSH_EPSILON {
+        state.spring = 0.0;
+    }
+    let mut flip = None;
+    if !cooling && state.push.abs() >= FLIP_THRESHOLD {
+        // 위로 밀면(손가락을 위로) 화면이 올라가며 pan_offset.y가 줄어 overflow가 음수다.
+        flip = Some(if state.push < 0.0 { 1 } else { -1 });
+        state.push = 0.0;
+        state.cooldown_until = now + FLIP_COOLDOWN;
+        // 넘어갈 때는 "신장만" 하고 복원은 없다 — 늘어난 것이 넘김으로 소진되고 새 쪽이 제자리에
+        // 들어온다(사용자 설계 지시). 남은 힘은 다음 프레임부터 새 쪽을 다시 늘리기 시작한다.
+        state.spring = 0.0;
+    }
 
-    let target = if flip.is_some() { 0.0 } else { rubber_band(state.push) };
+    let target = rubber_band(state.spring);
     state.overscroll += (target - state.overscroll) * approach(FOLLOW_RATE, dt);
     if (state.overscroll - target).abs() < 0.3 {
         state.overscroll = target;
@@ -1205,22 +1360,33 @@ fn approach(rate: f32, dt: f32) -> f32 {
 
 
 /// [`edge_step`]의 결과를 화면에 반영한다 — 넘길 수 있으면 페이지를 넘기고 새 쪽의 시작 위치를 잡는다.
-fn flip_page_at_edge(ctx: &egui::Context, app: &mut PdfViewerApp, overflow: f32) {
-    let (now, dt, scroll_speed) = ctx.input(|i| (i.time, i.stable_dt, i.smooth_scroll_delta.y.abs()));
-    let direction = edge_step(&mut app.edge, overflow, now, dt, scroll_speed);
-    if app.edge.overscroll != 0.0 {
-        ctx.request_repaint(); // 돌아오는 동안 계속 그린다
+fn flip_page_at_edge(
+    ctx: &egui::Context,
+    app: &mut PdfViewerApp,
+    overflow: f32,
+    page_size: egui::Vec2,
+    available: egui::Vec2,
+) {
+    let (now, dt) = ctx.input(|i| (i.time, i.stable_dt));
+    let direction = edge_step(&mut app.edge, overflow, now, dt);
+    // 모아 둔 양이 남아 있거나 페이지가 밀려 나가 있는 동안은 계속 그린다. egui는 입력이
+    // 없으면 리페인트를 하지 않으므로, 마지막 스크롤 이벤트 뒤로 프레임이 아예 돌지 않으면
+    // 스프링이 돌아오지도, 모아 둔 양이 풀리지도 않는다.
+    if app.edge.overscroll != 0.0 || app.edge.push != 0.0 || app.edge.spring != 0.0 || now < app.edge.cooldown_until {
+        ctx.request_repaint();
     }
     let Some(direction) = direction else { return };
     let blocked = (direction > 0 && app.current_page >= app.total_pages) || (direction < 0 && app.current_page <= 1);
     if blocked {
         return;
     }
-    app.edge.locked = true;
     app.edge.overscroll = 0.0;
     app.go_to_page_delta(direction);
-    // 넘어간 쪽은 이어지는 자리에서 시작한다(다음 쪽은 맨 위, 이전 쪽은 맨 아래).
+    // 넘어간 쪽은 이어지는 자리에서 시작한다(다음 쪽은 맨 위, 이전 쪽은 맨 아래). 극값을
+    // 그대로 두면 다음 프레임에 그게 통째로 "밀린 양"으로 잡히므로 여기서 바로 범위 안으로
+    // 접어 둔다(새 쪽 크기는 다음 프레임에 다시 맞춰진다).
     app.viewport.pan_offset.y = if direction > 0 { f32::MAX } else { f32::MIN };
+    app.viewport.clamp_pan(page_size, available);
 }
 
 /// OCR 결과 창에서 "보기"로 고른 자리(가져오기 검증에서 문제가 된 단어)를 빨간 테두리로 그린다.
@@ -1256,24 +1422,75 @@ fn draw_ocr_mark(ui: &egui::Ui, app: &PdfViewerApp, image_rect: egui::Rect, targ
 mod edge_flip_tests {
     use super::{edge_step, EdgeState, FLIP_THRESHOLD};
 
-    /// 한 번에 쭉 미는 동작 — 임계값을 넘으면 딱 한 번만 넘어간다.
-    #[test]
-    fn one_push_turns_one_page() {
-        let mut state = EdgeState::default();
+    /// 트랙패드 스와이프 한 번의 프레임별 밀림(pt). 손가락을 대고 있는 동안은 일정하고,
+    /// 떼면 관성이 지수로 잦아든다 — 이 두 단계를 구별하는 것이 판정의 전제이므로(→
+    /// `ENVELOPE_DECAY`) 테스트도 같은 모양으로 만든다. 순수 지수 감쇠만 주면 "처음부터 손을
+    /// 뗀 상태"라는 있을 수 없는 입력이 된다.
+    ///
+    /// `total`은 한 번에 밀리는 총량(pt). 실측 하한은 제대로 한 번 쓸면 3000pt를 넘는다.
+    fn swipe(total: f32, finger_frames: i32, tail_decay: f32) -> Vec<f32> {
+        let tail_frames = 180;
+        // 총량이 `total`이 되도록 프레임당 속도를 맞춘다.
+        let tail_sum: f32 = (0..tail_frames).map(|f| tail_decay.powi(f)).sum();
+        let per_frame = total / (finger_frames as f32 + tail_sum);
+        (0..finger_frames + tail_frames)
+            .map(|f| {
+                let decayed = (f - finger_frames + 1).max(0);
+                -per_frame * tail_decay.powi(decayed)
+            })
+            .collect()
+    }
+
+    /// 프레임 목록을 그대로 흘려 넣고 (넘긴 횟수, 프레임별 `overscroll`)을 돌려준다.
+    fn play(state: &mut EdgeState, frames: &[f32], from: i32) -> (i32, Vec<f32>) {
         let mut turns = 0;
-        // 위로 미는 중(overflow 음수)을 프레임마다 조금씩, 임계값의 세 배까지.
-        for frame in 0..60 {
-            let now = frame as f64 * 0.016;
-            if let Some(direction) = edge_step(&mut state, -50.0, now, 1.0 / 60.0, 50.0) {
-                assert_eq!(direction, 1, "위로 밀면 다음 쪽");
+        let mut trail = Vec::new();
+        for (index, overflow) in frames.iter().enumerate() {
+            let now = (from + index as i32) as f64 / 60.0;
+            if edge_step(state, *overflow, now, 1.0 / 60.0).is_some() {
                 turns += 1;
-                state.locked = true; // 호출 측이 하는 일
+                state.overscroll = 0.0; // 호출 측이 하는 일(`flip_page_at_edge`)
             }
+            trail.push(state.overscroll);
         }
+        (turns, trail)
+    }
+
+    /// 한 번 쓸면(관성이 감쇠하며 이어지면) 딱 한 장만 넘어간다.
+    #[test]
+    fn one_swipe_turns_one_page() {
+        let mut state = EdgeState::default();
+        let (turns, _) = play(&mut state, &swipe(3000.0, 9, 0.96), 0);
         assert_eq!(turns, 1, "관성이 이어져도 한 장만");
-        // 스크롤이 멎으면 잠금이 풀린다.
-        edge_step(&mut state, 0.0, 2.0, 1.0 / 60.0, 0.0);
-        assert!(!state.locked);
+    }
+
+    /// **넘김은 페이지가 아직 늘어나 있는 동안 일어난다.** 예전에는 관성 꼬리로 밀린 양까지
+    /// 세는 바람에 판정이 정점보다 최대 0.30초 늦게 떨어져, 화면은 이미 제자리로 돌아온 뒤에
+    /// 페이지가 바뀌었다(사용자 리포트 "이따금 신장-복원 후 약간 딜레이됐다가 페이지가
+    /// 바뀐다", 2026-09-27).
+    #[test]
+    fn the_flip_happens_while_the_page_is_still_stretched() {
+        // 임계값을 겨우 넘는 정도부터 넉넉히 넘는 정도까지 — 예전에 가장 늦게 떨어졌던 쪽이
+        // 경계에 가까운 스와이프다.
+        for total in [2400.0_f32, 3000.0, 4000.0, 6000.0] {
+            let mut state = EdgeState::default();
+            let frames = swipe(total, 9, 0.96);
+            let mut stretch_at_flip = None;
+            let mut peak = 0.0_f32;
+            for (index, overflow) in frames.iter().enumerate() {
+                let before = state.overscroll;
+                let flipped = edge_step(&mut state, *overflow, index as f64 / 60.0, 1.0 / 60.0);
+                peak = peak.max(before.abs());
+                if flipped.is_some() {
+                    stretch_at_flip = Some(before.abs());
+                    break;
+                }
+            }
+            let stretch = stretch_at_flip.unwrap_or_else(|| panic!("{total}pt로 넘어가지 않았다"));
+            // 넘기는 순간의 신장이 그때까지의 최대 신장에 가까워야 한다 — 복원이 한참 진행된
+            // 뒤라면 이 값이 훨씬 작아진다.
+            assert!(stretch >= peak * 0.9, "{total}pt: 넘길 때 신장 {stretch:.1}pt, 최대 {peak:.1}pt");
+        }
     }
 
     /// 살짝 미는 정도로는 넘어가지 않고, 손을 떼면 제자리로 돌아온다.
@@ -1281,12 +1498,12 @@ mod edge_flip_tests {
     fn small_push_only_bounces() {
         let mut state = EdgeState::default();
         for frame in 0..4 {
-            assert_eq!(edge_step(&mut state, -30.0, frame as f64 * 0.016, 1.0 / 60.0, 30.0), None);
+            assert_eq!(edge_step(&mut state, -30.0, frame as f64 * 0.016, 1.0 / 60.0), None);
         }
         assert!(state.overscroll < 0.0, "페이지가 따라 나간다");
         assert!(state.overscroll.abs() < super::RUBBER_LIMIT);
         for frame in 0..40 {
-            edge_step(&mut state, 0.0, 1.0 + frame as f64 * 0.016, 1.0 / 60.0, 0.0);
+            edge_step(&mut state, 0.0, 1.0 + frame as f64 * 0.016, 1.0 / 60.0);
         }
         assert_eq!(state.overscroll, 0.0, "손을 떼면 제자리로");
     }
@@ -1299,7 +1516,7 @@ mod edge_flip_tests {
         let mut moves = 0;
         for frame in 0..19 {
             // 임계값의 95%까지만 민다(넘기지 않고 곡선만 본다).
-            assert_eq!(edge_step(&mut state, -FLIP_THRESHOLD * 0.05, frame as f64 * 0.016, 1.0 / 60.0, 50.0), None);
+            assert_eq!(edge_step(&mut state, -FLIP_THRESHOLD * 0.05, frame as f64 * 0.016, 1.0 / 60.0), None);
             if state.overscroll < last - 0.2 {
                 moves += 1;
             }
@@ -1313,20 +1530,32 @@ mod edge_flip_tests {
         assert!(at(1000.0) - at(900.0) > 3.0, "끝까지 움직인다");
     }
 
-    /// 관성 구간처럼 스크롤 이벤트가 띄엄띄엄 와도 화면이 위아래로 떨리지 않는다.
+    /// 관성 구간처럼 스크롤 이벤트가 띄엄띄엄 와도 화면이 눈에 보이게 떨리지 않는다.
+    ///
+    /// 탄성을 **매 프레임** 풀기로 바꾼 뒤(→ `SPRING_DECAY`, "정점에서 1초 멈춤" 수정)
+    /// 프레임을 하나씩 건너뛰는 입력에는 원리상 잔물결이 남는다 — 힘이 켜졌다 꺼지는 대로
+    /// 늘어난 양도 오르내린다. 크기가 문제이므로 크기로 못박는다: 1pt 아래, 즉 화면에서
+    /// 1픽셀 수준이다. 리포트를 받았던 예전 떨림은 목표값이 수십 pt씩 튀던 것으로, 조건부로
+    /// 풀 때 빈 프레임마다 목표가 무너졌다 돌아온 탓이었다.
     #[test]
-    fn no_jitter_when_events_arrive_in_bursts() {
+    fn no_visible_jitter_when_events_arrive_in_bursts() {
+        const RIPPLE_LIMIT: f32 = 1.0;
         let mut state = EdgeState::default();
         let mut trail = Vec::new();
-        for frame in 0..30 {
+        for frame in 0..60 {
             // 한 프레임 걸러 한 번씩만 입력이 들어오는 상황.
-            let overflow = if frame % 2 == 0 { -40.0 } else { 0.0 };
-            edge_step(&mut state, overflow, frame as f64 / 60.0, 1.0 / 60.0, 40.0);
+            let overflow = if frame % 2 == 0 { -12.0 } else { 0.0 };
+            edge_step(&mut state, overflow, frame as f64 / 60.0, 1.0 / 60.0);
             trail.push(state.overscroll);
         }
         for pair in trail.windows(2) {
-            assert!(pair[1] <= pair[0] + 0.01, "한 방향으로만 움직여야 한다: {trail:?}");
+            assert!(pair[1] <= pair[0] + RIPPLE_LIMIT, "되밀림이 보일 만큼 크다: {trail:?}");
         }
+        // 평형에 다다른 뒤의 잔물결 폭(최대 - 최소)도 같은 한계 안이다.
+        let settled = &trail[trail.len() / 2..];
+        let high = settled.iter().copied().fold(f32::MIN, f32::max);
+        let low = settled.iter().copied().fold(f32::MAX, f32::min);
+        assert!(high - low < RIPPLE_LIMIT, "잔물결 {}pt: {settled:?}", high - low);
     }
 
     /// 손을 떼면 떨림 없이 제자리로 돌아온다.
@@ -1334,11 +1563,11 @@ mod edge_flip_tests {
     fn returns_smoothly_after_release() {
         let mut state = EdgeState::default();
         for frame in 0..10 {
-            edge_step(&mut state, -60.0, frame as f64 / 60.0, 1.0 / 60.0, 60.0);
+            edge_step(&mut state, -60.0, frame as f64 / 60.0, 1.0 / 60.0);
         }
         let mut trail = vec![state.overscroll];
         for frame in 10..90 {
-            edge_step(&mut state, 0.0, frame as f64 / 60.0, 1.0 / 60.0, 0.0);
+            edge_step(&mut state, 0.0, frame as f64 / 60.0, 1.0 / 60.0);
             trail.push(state.overscroll);
         }
         // 가장 멀리 밀린 지점(수렴 지연으로 몇 프레임 뒤) 이후로는 한 방향으로만 돌아온다.
@@ -1353,14 +1582,230 @@ mod edge_flip_tests {
     #[test]
     fn pushes_expire_and_direction_resets() {
         let mut state = EdgeState::default();
-        edge_step(&mut state, -FLIP_THRESHOLD * 0.9, 0.0, 1.0 / 60.0, 100.0);
+        for frame in 0..10 {
+            edge_step(&mut state, -30.0, frame as f64 / 60.0, 1.0 / 60.0);
+        }
         // 한참 뒤 다시 조금 밀어도 넘어가지 않는다.
-        assert_eq!(edge_step(&mut state, -100.0, 5.0, 1.0 / 60.0, 100.0), None);
+        assert_eq!(edge_step(&mut state, -100.0, 5.0, 1.0 / 60.0), None);
         assert!(state.push.abs() < FLIP_THRESHOLD);
-        // 반대 방향으로 밀면 그동안 모은 것은 버린다.
-        edge_step(&mut state, -FLIP_THRESHOLD * 0.9, 5.1, 1.0 / 60.0, 100.0);
-        assert_eq!(edge_step(&mut state, 100.0, 5.12, 1.0 / 60.0, 100.0), None);
-        assert!(state.push > 0.0);
+        // 반대 방향으로 밀면 그동안 모은 것은 버린다. 포락선도 함께 비워지므로 방향을 바꾼
+        // 스와이프가 곧바로 먹힌다 — 포락선은 일부러 느리게 잦아들어서, 비우지 않으면 한참
+        // 동안 "힘이 약해지는 중"으로 잡혀 무시된다.
+        edge_step(&mut state, -150.0, 5.1, 1.0 / 60.0);
+        assert!(state.push < 0.0);
+        assert_eq!(edge_step(&mut state, 100.0, 5.12, 1.0 / 60.0), None);
+        assert!(state.push > 0.0, "방향을 바꾼 밀기가 곧바로 잡힌다: {}", state.push);
+    }
+
+    /// 넘긴 뒤 남은 관성만으로는 다시 넘어가지 않는다 — 쿨다운이 있는 이유. **세게 튕겨도
+    /// 마찬가지다**: 밀린 양으로만 재던 방식은 여기서 무너졌다(총량이 임계값의 몇 배라
+    /// 꼬리만으로 둘째 장이 넘어갔다).
+    #[test]
+    fn leftover_momentum_does_not_flip_again() {
+        // 제대로 한 번 쓴 정도(3000pt)부터 그 여섯 배(18000pt)까지 한 장이어야 한다.
+        for total in [3000.0_f32, 6000.0, 12000.0, 18000.0] {
+            let mut state = EdgeState::default();
+            let (turns, _) = play(&mut state, &swipe(total, 9, 0.96), 0);
+            assert_eq!(turns, 1, "한 번 쓸어 한 장 — 총 {total}pt");
+        }
+    }
+
+    /// **탄성은 미는 힘이 있으면 언제나 즉시 반응한다** — 넘김 판정과 분리해 둔 이유다.
+    /// 한때 둘이 같은 누적값을 써서, 넘길 때 그 값을 비우면 탄성도 같이 사라졌다(리포트:
+    /// "두 번째 스와이프부터는 탄성이 사라졌다가 한참 있다가 살짝 나타남", 2026-09-27).
+    #[test]
+    fn the_spring_answers_every_push_even_right_after_a_flip() {
+        let mut state = EdgeState::default();
+        let mut frame = 0;
+        let step = |state: &mut EdgeState, frame: &mut i32| {
+            let flip = edge_step(state, -60.0, *frame as f64 / 60.0, 1.0 / 60.0);
+            *frame += 1;
+            flip
+        };
+        // 첫 장을 넘길 때까지 민다.
+        while step(&mut state, &mut frame).is_none() {
+            assert!(frame < 200, "넘어가지 않았다");
+        }
+        state.overscroll = 0.0; // 호출 측이 하는 일 — 새 쪽은 제자리에서 시작한다
+        assert_eq!(state.spring, 0.0, "넘김으로 소진된다(신장만, 복원 없음)");
+
+        // 넘긴 직후에도 미는 힘이 이어지면 새 쪽이 곧바로 늘어난다.
+        for _ in 0..5 {
+            step(&mut state, &mut frame);
+        }
+        assert!(state.overscroll < -1.0, "즉시 늘어나야 한다: {}", state.overscroll);
+    }
+
+    /// **정점을 지나면 곧바로 돌아온다 — 관성 꼬리가 아무리 길어도.**
+    ///
+    /// 리포트: "신장 후 최정점(가속도 부호가 바뀌는 시점)에서 페이지가 일정시간 멈췄다가
+    /// 복원되는데, 이 시간이 너무 길어. 약 1초 가량"(2026-09-27). 늘어난 양을 **현재 미는
+    /// 힘**에 비례하게 두면 복원 시간이 `SPRING_DECAY`가 아니라 **꼬리 길이**로 정해진다.
+    /// 그래서 힘이 세지거나 유지되는 동안만 먹인다(→ `ENVELOPE_DECAY`).
+    #[test]
+    fn the_stretch_returns_right_after_the_peak_however_long_the_tail() {
+        // 꼬리가 짧은 경우와 아주 긴 경우(프레임당 감쇠율 0.96 ≈ τ0.4초, 0.985 ≈ τ1.1초).
+        for decay in [0.96_f32, 0.985] {
+            let mut state = EdgeState::default();
+            let mut speed = 1200.0 / 60.0; // 프레임당 pt
+            let mut trail = Vec::new();
+            for frame in 0..180 {
+                // 손가락 0.15초(9프레임)는 일정하게, 그 뒤로는 관성이 잦아든다.
+                if frame >= 9 {
+                    speed *= decay;
+                }
+                edge_step(&mut state, -speed, frame as f64 / 60.0, 1.0 / 60.0);
+                trail.push(state.overscroll);
+            }
+            let apex = (0..trail.len()).min_by(|a, b| trail[*a].total_cmp(&trail[*b])).unwrap();
+            let peak = trail[apex];
+            assert!(peak < -5.0, "늘어나야 한다: {peak}");
+            let back = (apex..trail.len()).find(|i| trail[*i] > peak * 0.1);
+            let seconds = back.map(|i| (i - apex) as f32 / 60.0);
+            assert!(
+                seconds.is_some_and(|s| s < 0.5),
+                "정점({:.2}초) 뒤 90% 복원까지 {seconds:?}초 — 감쇠 {decay}",
+                apex as f32 / 60.0,
+            );
+        }
+    }
+
+    /// 손가락을 대고 일정하게 끄는 동안에는 늘어난 채로 있는다 — 힘이 유지되면 먹이기도
+    /// 이어진다(포락선이 잦아드는 속도를 "유지(0)"와 "가장 느린 관성" 사이에 둔 이유).
+    #[test]
+    fn a_steady_drag_holds_the_stretch() {
+        let mut state = EdgeState::default();
+        for frame in 0..60 {
+            edge_step(&mut state, -20.0, frame as f64 / 60.0, 1.0 / 60.0);
+        }
+        assert!(state.overscroll < -5.0, "1초를 끄는 동안 늘어난 채로: {}", state.overscroll);
+    }
+
+    /// 돌아오는 중에 다시 밀면 **지금 늘어난 자리에서 이어서** 더 늘어난다. 아무리 덧대도
+    /// 곡선이 완만해져 한계를 넘지 못한다(사용자 설계 지시, 2026-09-27).
+    #[test]
+    fn repeated_pushes_continue_the_stretch_without_stacking() {
+        let mut state = EdgeState::default();
+        let mut now = 0.0;
+        let push_for = |state: &mut EdgeState, now: &mut f64, frames: i32, overflow: f32| {
+            for _ in 0..frames {
+                edge_step(state, overflow, *now, 1.0 / 60.0);
+                *now += 1.0 / 60.0;
+            }
+        };
+        push_for(&mut state, &mut now, 10, -60.0);
+        let stretched = state.overscroll;
+        assert!(stretched < -1.0, "늘어났다: {stretched}");
+        // 손을 떼면 돌아온다. `overscroll`은 목표를 뒤따라가므로 몇 프레임은 더 늘어나다가
+        // 정점을 지나 돌아오기 시작한다(`returns_smoothly_after_release` 참고).
+        push_for(&mut state, &mut now, 20, 0.0);
+        let restoring = state.overscroll;
+        assert!(restoring > stretched, "돌아오는 중: {stretched} → {restoring}");
+        assert!(restoring < 0.0, "아직 제자리는 아니다: {restoring}");
+
+        // 돌아오는 중에 다시 밀면 그 자리에서 더 늘어난다(0에서 다시 시작하지 않는다).
+        push_for(&mut state, &mut now, 3, -60.0);
+        assert!(state.overscroll < restoring, "이어서 늘어난다: {}", state.overscroll);
+
+        // 몇 번을 덧대도 한계 안이다.
+        for _ in 0..12 {
+            push_for(&mut state, &mut now, 4, -super::MAX_FRAME_PUSH);
+            push_for(&mut state, &mut now, 3, 0.0);
+        }
+        assert!(state.overscroll.abs() < super::RUBBER_LIMIT, "{}", state.overscroll);
+    }
+
+    /// 넘긴 바로 다음 프레임에는 "새 쪽의 끝으로 보내라"는 표식(`pan_offset.y = ±극값`)이
+    /// 잘려 나가며 비현실적으로 큰 "밀린 양"이 잡힐 수 있다. 그것이 곧바로 한 장을 더 넘기던
+    /// 것이 "한 번에 두 장씩" 리포트의 원인이었다(2026-09-27).
+    ///
+    /// 막는 것은 **쿨다운**이다 — 그 프레임은 정의상 넘긴 직후, 즉 쿨다운 안이다. 한 프레임
+    /// 상한(`MAX_FRAME_PUSH`)은 실제 입력을 깎지 않으려면 임계값보다 커야 해서(실측 평균이
+    /// 프레임당 139pt) 이 역할을 맡을 수 없다.
+    #[test]
+    fn the_absurd_frame_after_a_flip_cannot_flip_again() {
+        let mut state = EdgeState { cooldown_until: 1.0, ..EdgeState::default() };
+        assert_eq!(edge_step(&mut state, -f32::MAX, 0.016, 1.0 / 60.0), None);
+        assert_eq!(state.push, 0.0, "쿨다운 중에는 모으지 않는다");
+
+        // 상한 자체는 값이 무한정 더해지는 것만 막는다(넉넉해야 정상 입력을 깎지 않는다).
+        let mut state = EdgeState::default();
+        edge_step(&mut state, f32::MAX, 0.016, 1.0 / 60.0);
+        assert!(state.push.abs() <= super::MAX_FRAME_PUSH, "보태는 양에 상한이 있다");
+        assert!(super::MAX_FRAME_PUSH > FLIP_THRESHOLD, "정상 입력을 깎지 않을 만큼 넉넉하다");
+    }
+
+    /// **관성 꼬리가 아직 이어지는 동안 들어온 다음 스와이프도 먹힌다.** 예전에는 넘긴 뒤
+    /// "미는 입력이 끊기기"를 기다려 잠갔는데, 사용자가 쉬지 않고 연달아 쓸면 입력이 끊기지
+    /// 않아 잠금이 풀리지 않고 **아예 넘어가지 않았다**(사용자 리포트 2회, 2026-09-27).
+    #[test]
+    fn a_second_swipe_during_the_momentum_tail_still_flips() {
+        // 0.4초(24프레임)마다 다시 쓴다. 관성은 그보다 오래 이어지므로 미는 입력이 한 번도
+        // 끊기지 않는다 — 잠금 방식이라면 첫 장 뒤로 전부 무시되던 상황이다(리포트 2회).
+        const SWIPES: i32 = 8;
+        const EVERY: i32 = 24;
+        // 손가락이 새로 닿으면 앞 스와이프의 관성은 끊긴다 — 겹쳐 더하지 않고 갈아탄다.
+        let one = swipe(3000.0, 9, 0.96);
+        let frames: Vec<f32> = (0..SWIPES * EVERY)
+            .map(|frame| one[(frame % EVERY) as usize])
+            .collect();
+        let mut state = EdgeState::default();
+        let (turns, _) = play(&mut state, &frames, 0);
+        // **쓴 횟수만큼 넘어가야 한다.** 쿨다운이 다시 쓰는 간격보다 길면 쿨다운 안에 떨어진
+        // 스와이프가 통째로 버려져 두 번 써서 한 장씩 넘어간다(실측으로 확인, 2026-09-27).
+        assert_eq!(turns, SWIPES, "{SWIPES}번 써서 {turns}장");
+    }
+
+    /// 손가락을 떼지 않고 계속 끌면 쿨다운 간격으로 계속 넘어간다. 잠금이 있던 동안에는
+    /// 첫 장 뒤로 아무리 끌어도 넘어가지 않았다.
+    #[test]
+    fn a_long_continuous_drag_keeps_advancing() {
+        let mut state = EdgeState::default();
+        let mut turns = 0;
+        for frame in 0..600 {
+            if edge_step(&mut state, -120.0, frame as f64 / 60.0, 1.0 / 60.0).is_some() {
+                turns += 1;
+            }
+        }
+        // 10초 동안 쿨다운 상한(초당 1.4장)에 가깝게.
+        assert!(turns >= 10, "계속 끄는 동안 멈추지 않는다: {turns}장");
+    }
+
+    /// 쿨다운은 **시간이 지나면 조건 없이** 만료된다 — 미는 입력이 끊기기를 기다리지 않는다.
+    /// 그 기다림이 "아예 안 넘어간다"의 정체였다(사용자 리포트 2회, 2026-09-27).
+    #[test]
+    fn the_cooldown_expires_even_while_the_pushing_never_stops() {
+        let mut state = EdgeState::default();
+        let mut turns = 0;
+        let mut flips_at = Vec::new();
+        // 한 번도 끊기지 않는 일정한 밀기 — 옛 잠금이라면 영원히 잠긴 채였다.
+        for frame in 0..300 {
+            let now = frame as f64 / 60.0;
+            if edge_step(&mut state, -200.0, now, 1.0 / 60.0).is_some() {
+                turns += 1;
+                flips_at.push(now);
+            }
+        }
+        assert!(turns >= 5, "{turns}장");
+        for pair in flips_at.windows(2) {
+            let gap = pair[1] - pair[0];
+            assert!(gap >= super::FLIP_COOLDOWN, "넘김 간격이 쿨다운보다 짧다: {gap}초");
+        }
+    }
+
+    /// 입력이 끊긴 뒤 모아 둔 양이 정확히 0이 된다 — 그러지 않으면 `overscroll`이 미세한
+    /// 값에 머물러 리페인트가 끝없이 이어진다.
+    #[test]
+    fn everything_settles_to_exactly_zero() {
+        let mut state = EdgeState::default();
+        for frame in 0..10 {
+            edge_step(&mut state, -80.0, frame as f64 / 60.0, 1.0 / 60.0);
+        }
+        for frame in 10..200 {
+            edge_step(&mut state, 0.0, frame as f64 / 60.0, 1.0 / 60.0);
+        }
+        assert_eq!(state.push, 0.0);
+        assert_eq!(state.overscroll, 0.0);
     }
 
     /// 아래로 밀면 이전 쪽으로.
@@ -1369,7 +1814,7 @@ mod edge_flip_tests {
         let mut state = EdgeState::default();
         let mut result = None;
         for frame in 0..40 {
-            if let Some(direction) = edge_step(&mut state, 60.0, frame as f64 * 0.016, 1.0 / 60.0, 60.0) {
+            if let Some(direction) = edge_step(&mut state, 60.0, frame as f64 * 0.016, 1.0 / 60.0) {
                 result = Some(direction);
                 break;
             }
@@ -1380,45 +1825,64 @@ mod edge_flip_tests {
 
 #[cfg(test)]
 mod scroll_anchor_tests {
-    use super::{anchor_at, continuous_layout, y_for_anchor, ScrollAnchor, PAGE_GAP};
+    use super::{anchor_at, continuous_layout, y_for_anchor, ContinuousLayout, ScrollAnchor, PAGE_GAP};
 
     const PAGES: usize = 200;
     const HALF_VIEW: f32 = 400.0;
 
-    /// 세로형/가로형이 섞인 문서 — 페이지마다 높이가 달라도 성립해야 한다.
-    fn aspects() -> Vec<f32> {
-        (0..PAGES).map(|i| if i % 3 == 0 { 0.773 } else { 1.414 }).collect()
+    /// 세로형/가로형이 섞인 문서 — 페이지마다 크기가 달라도 성립해야 한다.
+    fn pages() -> Vec<egui::Vec2> {
+        (0..PAGES)
+            .map(|i| if i % 3 == 0 { egui::vec2(842.0, 651.0) } else { egui::vec2(595.0, 841.0) })
+            .collect()
     }
 
-    /// 폭 `from` 레이아웃의 스크롤 오프셋을 폭 `to` 레이아웃으로 옮긴다(show_continuous와 같은 절차).
-    fn rezoom(aspects: &[f32], scroll: f32, from: f32, to: f32) -> f32 {
-        let (old_offsets, old_heights, _) = continuous_layout(aspects, PAGES, from);
-        let (new_offsets, new_heights, _) = continuous_layout(aspects, PAGES, to);
-        let anchor = anchor_at(&old_offsets, &old_heights, scroll + HALF_VIEW);
-        (y_for_anchor(&new_offsets, &new_heights, anchor) - HALF_VIEW).max(0.0)
+    fn heights(layout: &ContinuousLayout) -> Vec<f32> {
+        layout.sizes.iter().map(|s| s.y).collect()
+    }
+
+    /// 배율 `from` 레이아웃의 스크롤 오프셋을 배율 `to` 레이아웃으로 옮긴다(show_continuous와 같은 절차).
+    fn rezoom(sizes: &[egui::Vec2], scroll: f32, from: f32, to: f32) -> f32 {
+        let old = continuous_layout(sizes, PAGES, from);
+        let new = continuous_layout(sizes, PAGES, to);
+        let anchor = anchor_at(&old.offsets, &heights(&old), scroll + HALF_VIEW);
+        (y_for_anchor(&new.offsets, &heights(&new), anchor) - HALF_VIEW).max(0.0)
     }
 
     #[test]
     fn anchor_roundtrips_within_layout() {
-        let aspects = aspects();
-        let (offsets, heights, _) = continuous_layout(&aspects, PAGES, 700.0);
+        let layout = continuous_layout(&pages(), PAGES, 1.0);
+        let (offsets, heights) = (&layout.offsets, heights(&layout));
         let y = offsets[120] + heights[120] * 0.37;
-        let anchor = anchor_at(&offsets, &heights, y);
+        let anchor = anchor_at(offsets, &heights, y);
         assert_eq!(anchor.page, 120);
         assert!((anchor.fraction - 0.37).abs() < 1e-3);
-        assert!((y_for_anchor(&offsets, &heights, anchor) - y).abs() < 0.05);
+        assert!((y_for_anchor(offsets, &heights, anchor) - y).abs() < 0.05);
+    }
+
+    /// 판형이 섞인 문서에서 각 페이지의 화면 크기는 실제 크기 비율을 지킨다 — 예전처럼
+    /// 모두 같은 폭으로 늘리지 않는다(2026-09-27).
+    #[test]
+    fn pages_keep_their_relative_size() {
+        let sizes = vec![egui::vec2(2604.0, 3671.0), egui::vec2(400.0, 3679.0)];
+        let layout = continuous_layout(&sizes, 2, 0.25);
+        assert_eq!(layout.sizes[0], egui::vec2(651.0, 917.75));
+        assert_eq!(layout.sizes[1], egui::vec2(100.0, 919.75));
+        // 스크롤 영역 폭은 가장 넓은 페이지 기준.
+        assert_eq!(layout.content_width, 651.0);
     }
 
     /// 한 번 확대해도 뷰포트 중앙은 같은 페이지의 같은 % 지점에 머문다.
     #[test]
     fn zoom_keeps_center_on_same_spot() {
-        let aspects = aspects();
-        let (offsets, heights, _) = continuous_layout(&aspects, PAGES, 700.0);
-        let scroll = offsets[150] + heights[150] * 0.5 - HALF_VIEW;
-        let new_scroll = rezoom(&aspects, scroll, 700.0, 875.0);
+        let sizes = pages();
+        let layout = continuous_layout(&sizes, PAGES, 1.0);
+        let scroll = layout.offsets[150] + heights(&layout)[150] * 0.5 - HALF_VIEW;
+        let new_scroll = rezoom(&sizes, scroll, 1.0, 1.25);
 
-        let (new_offsets, new_heights, _) = continuous_layout(&aspects, PAGES, 875.0);
-        let anchor = anchor_at(&new_offsets, &new_heights, new_scroll + HALF_VIEW);
+        let new = continuous_layout(&sizes, PAGES, 1.25);
+        let (new_offsets, new_heights) = (&new.offsets, heights(&new));
+        let anchor = anchor_at(new_offsets, &new_heights, new_scroll + HALF_VIEW);
         assert_eq!(anchor.page, 150);
         assert!((anchor.fraction - 0.5).abs() < 1e-3);
     }
@@ -1427,13 +1891,13 @@ mod scroll_anchor_tests {
     /// — 앵커 방식을 쓰는 이유를 고정해 둔다.
     #[test]
     fn ratio_scaling_misplaces_by_gap_error() {
-        let aspects = aspects();
-        let (offsets, heights, _) = continuous_layout(&aspects, PAGES, 700.0);
-        let scroll = offsets[150] + heights[150] * 0.5 - HALF_VIEW;
-        let ratio = 875.0 / 700.0;
+        let sizes = pages();
+        let layout = continuous_layout(&sizes, PAGES, 1.0);
+        let scroll = layout.offsets[150] + heights(&layout)[150] * 0.5 - HALF_VIEW;
+        let ratio = 1.25;
         // 기준점(뷰포트 중앙)은 같게 두고 보정 방식만 비교한다.
         let naive = (scroll + HALF_VIEW) * ratio - HALF_VIEW;
-        let anchored = rezoom(&aspects, scroll, 700.0, 875.0);
+        let anchored = rezoom(&sizes, scroll, 1.0, 1.25);
         let expected_error = PAGE_GAP * 150.0 * (ratio - 1.0);
         assert!(((naive - anchored).abs() - expected_error).abs() < expected_error * 0.1);
     }
@@ -1441,14 +1905,14 @@ mod scroll_anchor_tests {
     /// 확대/축소를 여러 번 왕복해도 원래 위치로 돌아온다.
     #[test]
     fn repeated_zoom_roundtrip_does_not_drift() {
-        let aspects = aspects();
-        let widths = [700.0, 875.0, 1050.0, 1400.0, 1050.0, 875.0, 700.0];
-        let (offsets, heights, _) = continuous_layout(&aspects, PAGES, widths[0]);
-        let start = offsets[120] + heights[120] * 0.37 - HALF_VIEW;
+        let sizes = pages();
+        let zooms = [1.0, 1.25, 1.5, 2.0, 1.5, 1.25, 1.0];
+        let layout = continuous_layout(&sizes, PAGES, zooms[0]);
+        let start = layout.offsets[120] + heights(&layout)[120] * 0.37 - HALF_VIEW;
 
         let mut scroll = start;
-        for pair in widths.windows(2) {
-            scroll = rezoom(&aspects, scroll, pair[0], pair[1]);
+        for pair in zooms.windows(2) {
+            scroll = rezoom(&sizes, scroll, pair[0], pair[1]);
         }
         assert!((scroll - start).abs() < 0.5, "drifted {} pt", scroll - start);
     }
@@ -1456,8 +1920,8 @@ mod scroll_anchor_tests {
     /// 페이지 사이 간격에 있는 y는 위 페이지 아래 끝에 붙는다.
     #[test]
     fn gap_snaps_to_page_above() {
-        let aspects = aspects();
-        let (offsets, heights, _) = continuous_layout(&aspects, PAGES, 700.0);
+        let layout = continuous_layout(&pages(), PAGES, 1.0);
+        let (offsets, heights) = (&layout.offsets, heights(&layout));
         let y = offsets[5] + heights[5] + PAGE_GAP / 2.0;
         assert_eq!(anchor_at(&offsets, &heights, y), ScrollAnchor { page: 5, fraction: 1.0 });
     }
