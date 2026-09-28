@@ -689,14 +689,10 @@ fn run_folder_removal(
             done_pages += file_pages;
             continue;
         }
-        let backup = batch_backup_path(file);
-        if backup.exists() {
-            let reason = "백업이 이미 있는 파일".to_string();
-            report.entries.push(entry.finish("건너뜀", None, reason.clone()));
-            report.skipped.push((name, reason));
-            done_pages += file_pages;
-            continue;
-        }
+        // 백업이 이미 있어도 건너뛰지 않는다 — 이름에 시각이 들어가 이전 백업을 덮어쓸 일이
+        // 없기 때문이다(2026-09-28). 전에는 `문서.pdf.backup` 하나뿐이라 덮어쓰지 않으려고
+        // 건너뛰었다. 다시 돌려도 지울 것이 없는 파일은 "변경 없음"으로 지나가므로 해가 없다.
+        let backup = crate::app::backup_path(file, &crate::app::backup_stamp());
         let temp = file.with_extension("ocr_tmp.pdf");
         // 파일 안의 진행(검증 단계)을 이 파일 쪽수로 환산해 전체 진행률에 더한다.
         let base = done_pages;
@@ -765,12 +761,6 @@ fn collect_pdfs(dir: &Path, out: &mut Vec<PathBuf>) {
             _ => {}
         }
     }
-}
-
-fn batch_backup_path(pdf: &Path) -> PathBuf {
-    let mut name = pdf.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-    name.push(".backup");
-    pdf.with_file_name(name)
 }
 
 /// 파일별 결과를 CSV로 남긴다(UTF-8 BOM — Excel이 한글을 제대로 읽게).

@@ -2125,6 +2125,42 @@ pub(crate) fn create_engine() -> Option<PdfEngine> {
     None
 }
 
+/// 원본 보존용 백업 경로 — `문서.pdf-20260928143022.backup`.
+///
+/// 이름에 실행 시각을 넣어 **실행마다 새 백업이 남는다**(2026-09-28 사용자 결정 — 업무용이라
+/// 백업이 쌓이는 것을 감수하고 안전을 택했다). 전에는 `문서.pdf.backup` 하나였고 이미 있으면
+/// 새로 만들지 않아, 두 번 연달아 작업하면 **그 직전 상태가 어디에도 남지 않았다.**
+///
+/// 시각이 들어가므로 같은 이름이 이미 있을 일이 없다 — "백업이 있으면 어떻게 할지"를 따질
+/// 필요도, 그걸 이유로 파일을 건너뛸 필요도 없어졌다. OCR 삭제와 북마크 일괄 적용이 같은
+/// 형식을 쓴다.
+pub(crate) fn backup_path(file: &Path, stamp: &str) -> PathBuf {
+    let mut name = file.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(format!("-{stamp}.backup"));
+    file.with_file_name(name)
+}
+
+/// 백업 이름에 넣을 실행 시각 `YYYYMMDDHHMMSS`.
+pub(crate) fn backup_stamp() -> String {
+    chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
+}
+
+/// 이 파일의 백업이 하나라도 있는지. 이름에 시각이 들어가 정확한 이름을 알 수 없으므로
+/// `문서.pdf-*.backup` 꼴을 찾는다. 실행 흐름에서는 쓰지 않는다 — 백업이 있는지 따져서
+/// 행동을 바꾸는 곳이 더는 없기 때문이다(늘 새로 만든다). 테스트에서 결과를 확인할 때만 쓴다.
+#[cfg(test)]
+pub(crate) fn has_backup(file: &Path) -> bool {
+    let (Some(name), Some(dir)) = (file.file_name().and_then(|n| n.to_str()), file.parent()) else {
+        return false;
+    };
+    let prefix = format!("{name}-");
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries.flatten().any(|e| {
+            e.file_name().to_str().is_some_and(|f| f.starts_with(&prefix) && f.ends_with(".backup"))
+        })
+    })
+}
+
 /// 팝업창을 Esc로 닫는다 — 눌렸으면 **소비**해서 다음 창이 같은 Esc로 함께 닫히지 않게 한다
 /// (창은 위에서 아래로 검사하므로 먼저 검사한 창이 받는다). 사용자 요청 2026-09-27.
 ///
@@ -2149,7 +2185,11 @@ fn show_unsaved_changes_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
     egui::Window::new("변경사항 저장")
         .collapsible(false)
         .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        // 끌어서 옮길 수 있게 anchor 대신 pivot + default_pos를 쓴다(2026-09-28 요청).
+        // anchor를 주면 egui가 매 프레임 위치를 다시 고정해 드래그가 먹지 않는다 —
+        // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.screen_rect().center())
         .show(ctx, |ui| {
             ui.label("새 문서를 열면 기존 북마크 변경사항이 유실됩니다.");
             ui.label("기존 내용을 저장하시겠습니까?");
@@ -2185,7 +2225,11 @@ fn show_crash_recovery_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
     egui::Window::new("이전 세션 복구")
         .collapsible(false)
         .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        // 끌어서 옮길 수 있게 anchor 대신 pivot + default_pos를 쓴다(2026-09-28 요청).
+        // anchor를 주면 egui가 매 프레임 위치를 다시 고정해 드래그가 먹지 않는다 —
+        // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.screen_rect().center())
         .show(ctx, |ui| {
             ui.label("이전 실행이 비정상 종료된 것으로 보입니다.");
             ui.label(format!("문서: {file_name}"));
@@ -2218,7 +2262,11 @@ fn show_quit_confirmation_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
     egui::Window::new("변경사항 저장")
         .collapsible(false)
         .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        // 끌어서 옮길 수 있게 anchor 대신 pivot + default_pos를 쓴다(2026-09-28 요청).
+        // anchor를 주면 egui가 매 프레임 위치를 다시 고정해 드래그가 먹지 않는다 —
+        // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.screen_rect().center())
         .show(ctx, |ui| {
             ui.label("앱을 종료하면 기존 북마크 변경사항이 유실됩니다.");
             ui.label("기존 내용을 저장하시겠습니까?");
@@ -2251,7 +2299,11 @@ fn show_search_no_results_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
     egui::Window::new("검색")
         .collapsible(false)
         .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        // 끌어서 옮길 수 있게 anchor 대신 pivot + default_pos를 쓴다(2026-09-28 요청).
+        // anchor를 주면 egui가 매 프레임 위치를 다시 고정해 드래그가 먹지 않는다 —
+        // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.screen_rect().center())
         .show(ctx, |ui| {
             ui.label("일치하는 결과가 없습니다.");
             ui.add_space(8.0);
@@ -2339,7 +2391,11 @@ fn show_clear_bookmarks_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
     egui::Window::new("북마크 전체 삭제")
         .collapsible(false)
         .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        // 끌어서 옮길 수 있게 anchor 대신 pivot + default_pos를 쓴다(2026-09-28 요청).
+        // anchor를 주면 egui가 매 프레임 위치를 다시 고정해 드래그가 먹지 않는다 —
+        // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.screen_rect().center())
         .show(ctx, |ui| {
             ui.label(format!("이 문서의 북마크 {count}개를 모두 지웁니다."));
             ui.weak("되돌리기(Undo)로 복구할 수 있고, PDF에 반영하려면 저장해야 합니다.");

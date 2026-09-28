@@ -91,29 +91,26 @@ fn poll_export_probe(app: &mut PdfViewerApp) {
         finish_probe(app);
         return;
     }
-    loop {
-        let Some(probe) = app.ocr_export_probe.as_ref() else { return };
-        match probe.poll() {
-            WorkerPoll::Empty => return,
-            WorkerPoll::Event(Event::TextKinds { visible, invisible }) => {
-                if let Some(dialog) = app.ocr_export_dialog.as_mut() {
-                    dialog.text_kinds = Some(TextKinds { visible, invisible });
-                    // 한쪽만 있으면 그쪽으로 굳힌다 — 빈 파일이 나오는 선택으로 시작하지 않게.
-                    if visible != invisible {
-                        dialog.invisible_only = invisible;
-                    }
+    // 답은 한 번뿐이라 한 프레임에 한 줄만 읽는다(끝 이벤트든 실패든 바로 확인을 놓는다).
+    let Some(probe) = app.ocr_export_probe.as_ref() else { return };
+    match probe.poll() {
+        WorkerPoll::Empty => {}
+        WorkerPoll::Event(Event::TextKinds { visible, invisible }) => {
+            if let Some(dialog) = app.ocr_export_dialog.as_mut() {
+                dialog.text_kinds = Some(TextKinds { visible, invisible });
+                // 한쪽만 있으면 그쪽으로 굳힌다 — 빈 파일이 나오는 선택으로 시작하지 않게.
+                if visible != invisible {
+                    dialog.invisible_only = invisible;
                 }
-                finish_probe(app);
-                return;
             }
-            // 다른 이벤트나 실패 — 라디오는 열어 두고, 기다리던 "내보내기…"는 풀어 준다.
-            WorkerPoll::Event(_) | WorkerPoll::Closed => {
-                if let Some(dialog) = app.ocr_export_dialog.as_mut() {
-                    dialog.text_kinds = Some(TextKinds::UNKNOWN);
-                }
-                finish_probe(app);
-                return;
+            finish_probe(app);
+        }
+        // 다른 이벤트나 실패 — 라디오는 열어 두고, 기다리던 "내보내기…"는 풀어 준다.
+        WorkerPoll::Event(_) | WorkerPoll::Closed => {
+            if let Some(dialog) = app.ocr_export_dialog.as_mut() {
+                dialog.text_kinds = Some(TextKinds::UNKNOWN);
             }
+            finish_probe(app);
         }
     }
 }
@@ -334,7 +331,7 @@ fn describe_batch(r: &crate::ocr_worker::BatchReport) -> String {
     for (name, reason) in r.failed.iter().take(10) {
         lines.push(format!("  실패 {name}: {reason}"));
     }
-    lines.push("원본은 파일마다 .backup으로 보존했습니다.".to_string());
+    lines.push("원본은 파일마다 '파일명.pdf-실행시각.backup'으로 보존했습니다.".to_string());
     if let Some(log) = &r.log {
         lines.push(format!("로그(CSV): {log}"));
     }
@@ -369,7 +366,11 @@ fn show_needs_save_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
     egui::Window::new(title)
         .collapsible(false)
         .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        // 끌어서 옮길 수 있게 anchor 대신 pivot + default_pos를 쓴다(2026-09-28 요청).
+        // anchor를 주면 egui가 매 프레임 위치를 다시 고정해 드래그가 먹지 않는다 —
+        // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.screen_rect().center())
         .show(ctx, |ui| {
             ui.label("저장하지 않은 북마크 변경사항이 있습니다.");
             ui.label(format!("{what}는 파일을 새로 쓰므로 북마크를 먼저 PDF에 저장해야 합니다."));
@@ -398,11 +399,8 @@ fn show_needs_save_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
     }
 }
 
-fn backup_path(pdf: &Path) -> PathBuf {
-    let mut name = pdf.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-    name.push(".backup");
-    pdf.with_file_name(name)
-}
+/// 확인 창에 보여 줄 백업 안내. 실제 이름은 작업할 때 정해지므로 형식만 알려 준다.
+const BACKUP_NOTE: &str = "원본은 같은 자리에 '파일명.pdf-실행시각.backup'으로 보존합니다(실행마다 따로 남습니다).";
 
 fn show_removal_confirm(ctx: &egui::Context, app: &mut PdfViewerApp) {
     if app.ocr_removal_confirm.is_some() && crate::app::escape_to_close(ctx) {
@@ -415,7 +413,11 @@ fn show_removal_confirm(ctx: &egui::Context, app: &mut PdfViewerApp) {
     egui::Window::new("OCR 전체 삭제")
         .collapsible(false)
         .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        // 끌어서 옮길 수 있게 anchor 대신 pivot + default_pos를 쓴다(2026-09-28 요청).
+        // anchor를 주면 egui가 매 프레임 위치를 다시 고정해 드래그가 먹지 않는다 —
+        // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.screen_rect().center())
         .show(ctx, |ui| {
             ui.set_max_width(460.0);
             let removed = a.counts.removed() + a.own_layer_pages;
@@ -469,13 +471,7 @@ fn show_removal_confirm(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 ui.weak("빠른 웹 보기(선형화)가 해제됩니다.");
             }
             if removed > 0 {
-                let backup = backup_path(&confirm.pdf);
-                let name = crate::app::display_filename(&backup);
-                if backup.exists() {
-                    ui.weak(format!("이미 있는 백업({name})은 그대로 둡니다(더 이전 원본일 수 있음)."));
-                } else {
-                    ui.weak(format!("원본은 {name}(으)로 보존합니다."));
-                }
+                ui.weak(BACKUP_NOTE);
             }
 
             ui.add_space(8.0);
@@ -548,17 +544,14 @@ fn swap_in_result(
         matches!(err.kind(), std::io::ErrorKind::PermissionDenied)
             .then(|| format!("파일이 다른 앱에서 열려 있어서 {action}. 원본은 바뀌지 않았습니다."))
     };
-    let backup = backup_path(pdf);
-    let backup_note = if backup.exists() {
-        format!("기존 백업 유지: {}", crate::app::display_filename(&backup))
-    } else {
-        if let Err(err) = std::fs::copy(pdf, &backup) {
-            let _ = std::fs::remove_file(temp);
-            return Err(write_blocked(&err)
-                .unwrap_or_else(|| format!("원본 백업 실패({err}) — 원본은 바뀌지 않았습니다.")));
-        }
-        format!("원본 백업: {}", crate::app::display_filename(&backup))
-    };
+    // 이름에 시각이 들어가므로 늘 새 백업을 만든다 — 이전 백업은 그대로 남는다.
+    let backup = crate::app::backup_path(pdf, &crate::app::backup_stamp());
+    if let Err(err) = std::fs::copy(pdf, &backup) {
+        let _ = std::fs::remove_file(temp);
+        return Err(write_blocked(&err)
+            .unwrap_or_else(|| format!("원본 백업 실패({err}) — 원본은 바뀌지 않았습니다.")));
+    }
+    let backup_note = format!("원본 백업: {}", crate::app::display_filename(&backup));
     if let Err(err) = std::fs::rename(temp, pdf) {
         let _ = std::fs::remove_file(temp);
         return Err(write_blocked(&err)
@@ -1058,7 +1051,11 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
     egui::Window::new(title)
         .collapsible(false)
         .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        // 끌어서 옮길 수 있게 anchor 대신 pivot + default_pos를 쓴다(2026-09-28 요청).
+        // anchor를 주면 egui가 매 프레임 위치를 다시 고정해 드래그가 먹지 않는다 —
+        // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.screen_rect().center())
         .show(ctx, |ui| {
             // 내보낼 텍스트가 아예 없으면 **선택지를 모두 감춘다**(2026-09-27 요청) — 고를 것이
             // 없는 화면에 잠긴 위젯만 늘어놓아 봐야 읽을 거리만 늘어난다.

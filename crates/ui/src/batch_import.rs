@@ -1,6 +1,6 @@
 //! 폴더 일괄 북마크 적용(2026-07-19 예약 작업): 폴더 하나 + 북마크 csv/xlsx 하나를 골라
 //! 폴더 안의 모든 PDF를 재귀 순회하며 파일명이 매칭되는 북마크를 각 PDF에 저장한다.
-//! 원본은 `x.pdf.backup`으로 rename해 보존하고, 결과는 원래 이름으로 만들어진다.
+//! 원본은 `x.pdf-실행시각.backup`으로 rename해 보존하고, 결과는 원래 이름으로 만들어진다.
 //!
 //! 이 파이프라인에는 렌더링이 없다 — 행 파싱(import_export) + 트리 구성(bookmark) +
 //! lopdf 증분 쓰기(pdf_outline_writer)만으로 완결되므로 pdfium 없이도 동작한다(§7의
@@ -23,9 +23,7 @@ pub enum FileOutcome {
     Success { bookmark_count: usize },
     /// csv/xlsx에 이 파일명과 일치하는 행이 없음.
     SkippedNoRows,
-    /// `x.pdf.backup`이 이미 존재 — 이전 실행의 흔적으로 보고 건드리지 않는다
     /// (덮어쓰면 진짜 원본 백업이 유실될 수 있음).
-    SkippedBackupExists,
     /// 현재 앱에 열려 있는 파일 — rename하면 문서 핸들/파일 감시(macOS inode 추적)와
     /// 충돌하므로 제외한다. 닫고 다시 실행하면 처리된다.
     SkippedOpenFile,
@@ -45,7 +43,6 @@ impl FileOutcome {
         match self {
             FileOutcome::Success { bookmark_count } => format!("북마크 {bookmark_count}개 저장"),
             FileOutcome::SkippedNoRows => "일치하는 '파일명' 행 없음".to_string(),
-            FileOutcome::SkippedBackupExists => ".backup 파일이 이미 있음(이전 실행 흔적)".to_string(),
             FileOutcome::SkippedOpenFile => "현재 앱에 열려 있는 파일".to_string(),
             FileOutcome::Failed(reason) => reason.clone(),
         }
@@ -218,7 +215,7 @@ fn is_ext(path: &Path, ext: &str) -> bool {
 }
 
 /// 처리 대상 `.pdf`와 북마크 파일 `.xlsx`/`.csv`(전부 대소문자 무시)를 한 번의 재귀
-/// 순회로 수집. `x.pdf.backup`은 확장자가 backup이라 자연히 제외된다. 숨김 파일과
+/// 순회로 수집. `x.pdf-실행시각.backup`은 확장자가 backup이라 자연히 제외된다. 숨김 파일과
 /// Excel이 열려 있는 동안 만드는 잠금 파일(`~$*.xlsx`)은 건너뛴다. 심볼릭 링크
 /// 디렉토리는 따라가지 않는다(순환 방지 — entry의 file_type은 링크를 해석하지 않음).
 fn collect_files(dir: &Path, pdfs: &mut Vec<PathBuf>, sheets: &mut Vec<PathBuf>) {
@@ -270,7 +267,7 @@ pub fn poll(job: &mut BatchImportJob, engine: Option<&PdfEngine>, open_file: Opt
     ctx.request_repaint();
 }
 
-/// 파일 하나 처리: (1) 원본을 `x.pdf.backup`으로 rename, (2) 그 백업을 소스로 lopdf
+/// 파일 하나 처리: (1) 원본을 `x.pdf-실행시각.backup`으로 rename, (2) 그 백업을 소스로 lopdf
 /// 증분 쓰기를 원래 이름에 수행(IncrementalDocument는 원본 바이트 전체 + 새 리비전을
 /// 기록하므로 결과 파일이 그 자체로 완전하다 — 별도 복사 단계 불필요), (3) 가능하면
 /// pdfium으로 재오픈 검증. 실패 시 백업을 원래 이름으로 되돌려 원본을 보존한다.
@@ -289,10 +286,9 @@ fn process_one(
         return FileOutcome::SkippedOpenFile;
     }
 
-    let backup = backup_path(file);
-    if backup.exists() {
-        return FileOutcome::SkippedBackupExists;
-    }
+    // 백업이 이미 있어도 건너뛰지 않는다 — 이름에 시각이 들어가 이전 백업을 덮어쓸 일이 없기
+    // 때문이다(2026-09-28). 전에는 `문서.pdf.backup` 하나뿐이라 덮어쓰지 않으려고 건너뛰었다.
+    let backup = crate::app::backup_path(file, &crate::app::backup_stamp());
 
     let tree = bookmark::build_tree(rows);
 
@@ -319,13 +315,6 @@ fn process_one(
     }
 
     FileOutcome::Success { bookmark_count: rows.len() }
-}
-
-/// `x.pdf` → `x.pdf.backup` (확장자 교체가 아니라 덧붙임 — 원래 이름을 그대로 품는다).
-fn backup_path(file: &Path) -> PathBuf {
-    let mut os = file.as_os_str().to_owned();
-    os.push(".backup");
-    PathBuf::from(os)
 }
 
 /// 실패한 결과 파일(있다면)을 치우고 백업을 원래 이름으로 되돌린다.
@@ -417,7 +406,7 @@ pub fn show_panel(ui: &mut egui::Ui, app: &mut crate::app::PdfViewerApp) {
                 job.files.len(),
                 job.matched_count
             ));
-            ui.label("각 원본은 같은 자리에 '파일명.pdf.backup'으로 보존됩니다.");
+            ui.label("각 원본은 같은 자리에 '파일명.pdf-실행시각.backup'으로 보존됩니다(실행마다 따로 남습니다).");
             if job.matched_count == 0 {
                 ui.colored_label(
                     ui.visuals().warn_fg_color,
@@ -498,10 +487,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backup_path_appends_suffix() {
+    fn backup_path_keeps_the_original_name_and_adds_a_stamp() {
         assert_eq!(
-            backup_path(Path::new("/a/b/문서.pdf")),
-            PathBuf::from("/a/b/문서.pdf.backup")
+            crate::app::backup_path(Path::new("/a/b/문서.pdf"), "20260928143022"),
+            PathBuf::from("/a/b/문서.pdf-20260928143022.backup")
         );
     }
 
@@ -601,14 +590,14 @@ mod tests {
         // 성공 파일: 원본이 .backup으로 남고, 결과는 원래 이름 + 증분이 붙어 더 커야 한다.
         let orig_len = std::fs::metadata(sample("KKZ000160_01.pdf")).unwrap().len();
         for path in [root.join("a.pdf"), root.join("sub/b.pdf")] {
-            assert!(backup_path(&path).exists(), "{path:?} 백업 없음");
+            assert!(crate::app::has_backup(&path), "{path:?} 백업 없음");
             assert!(std::fs::metadata(&path).unwrap().len() > orig_len);
         }
         // 실패 파일(lopdf 파싱 불가): 원본이 제자리에 복원되고 백업은 남지 않는다.
         assert!(root.join("bad.pdf").exists());
-        assert!(!backup_path(&root.join("bad.pdf")).exists());
+        assert!(!crate::app::has_backup(&root.join("bad.pdf")));
         // 매칭 행 없는 파일: 아무것도 안 건드린다.
-        assert!(!backup_path(&root.join("norows.pdf")).exists());
+        assert!(!crate::app::has_backup(&root.join("norows.pdf")));
 
         // 로그 파일이 폴더 루트에 생기고 통계 줄을 담는다.
         let log_file = std::fs::read_dir(root)
@@ -639,6 +628,6 @@ mod tests {
         }
         let stats = job.stats();
         assert_eq!((stats.success, stats.skipped), (0, 1));
-        assert!(!backup_path(&open).exists());
+        assert!(!crate::app::has_backup(&open));
     }
 }
