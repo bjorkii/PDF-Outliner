@@ -1352,12 +1352,28 @@ const DETAIL_HEIGHT: f32 = 150.0;
 /// 항목에 딸린 상세 목록 — 들여쓰고 박스로 묶어 위 항목과 구분하고, 길면 스크롤한다
 /// (2026-09-29 요청: 예전에는 본문 전체가 한 스크롤 영역이라 어디까지가 한 항목인지 몰랐다).
 fn detail_box(ui: &mut egui::Ui, id: &str, rows: usize, add: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
-        ui.add_space(DETAIL_INDENT);
+    indented_box(ui, id, DETAIL_INDENT, rows > DETAIL_ROWS, DETAIL_HEIGHT, add);
+}
+
+/// 들여쓴 박스 하나. **`ui.horizontal`로 들여쓰면 안 된다** — egui는 가로 배치 안에서 줄바꿈을
+/// 끄기 때문에 긴 줄이 창 폭을 넘어가 잘려 보이고, 스크롤도 확인할 수 없다(2026-09-29 리포트).
+/// `indent`로 들여쓰고 폭을 남은 만큼으로 못박은 뒤 줄바꿈을 켠다.
+pub(crate) fn indented_box(
+    ui: &mut egui::Ui,
+    id: &str,
+    indent: f32,
+    scroll: bool,
+    max_height: f32,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    let width = (ui.available_width() - indent).max(120.0);
+    ui.indent(id, |ui| {
+        ui.set_max_width(width);
         egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_min_width(360.0);
-            if rows > DETAIL_ROWS {
-                egui::ScrollArea::vertical().id_salt(id).max_height(DETAIL_HEIGHT).show(ui, add);
+            ui.set_width(ui.available_width());
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            if scroll {
+                egui::ScrollArea::vertical().id_salt(id).max_height(max_height).show(ui, add);
             } else {
                 add(ui);
             }
@@ -1395,7 +1411,9 @@ fn show_job_window(ctx: &egui::Context, app: &mut PdfViewerApp) {
         .resizable(false)
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.screen_rect().center())
-        .show(ctx, |ui| match &job.phase {
+        .show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            match &job.phase {
             JobPhase::Running { done, total } => {
                 if let Some(stage) = &job.stage {
                     ui.label(stage);
@@ -1452,6 +1470,7 @@ fn show_job_window(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 ui.add_space(8.0);
                 let text = report.to_text();
                 buttons(ui, job, &mut reveal, &mut close, text);
+            }
             }
         });
     if let Some(path) = reveal {

@@ -140,6 +140,11 @@ pub fn prepare_job(folder: PathBuf) -> Result<BatchImportJob, String> {
     // 각 PDF 파일명을 어느 북마크 파일이 선점했는지(중복 안내문에 쓸 정보).
     let mut source_of: HashMap<String, PathBuf> = HashMap::new();
     let mut setup_notes = Vec::new();
+    // 이 폴더에 실제로 있는 PDF 이름 — 안내를 **손쓸 수 있는 것에만** 내기 위해 쓴다.
+    let in_folder: std::collections::HashSet<String> =
+        files.iter().map(|f| crate::app::display_filename(f)).collect();
+    // 시트가 가리키지만 폴더에 없는 PDF 이름(이 이름의 행은 아무 일도 하지 않는다).
+    let mut absent: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for sheet in &sheet_files {
         let parsed = if is_ext(sheet, "xlsx") {
@@ -171,6 +176,14 @@ pub fn prepare_job(folder: PathBuf) -> Result<BatchImportJob, String> {
         }
 
         for (name, mut group) in per_file {
+            if !in_folder.contains(&name) {
+                // 이 이름의 PDF가 폴더에 없다 — 이 행들은 어차피 아무 일도 하지 않는다. 그런
+                // 이름의 중복까지 한 줄씩 알리면 손쓸 수 없는 경고만 수십 줄 쌓인다(실측: 어떤
+                // 폴더에서 31줄 중 18줄이 이 경우였다. 2026-09-29 사용자 지적). 아래에 이름만
+                // 한 줄로 모아 알린다.
+                absent.insert(name.clone());
+                continue;
+            }
             if let Some(first_source) = source_of.get(&name) {
                 // 이미 앞선(우선순위 높은) 북마크 파일이 이 PDF의 행을 제공함 — 중복은
                 // 적용하지 않고 건너뛴다(2026-07-19 사용자 지정).
@@ -190,6 +203,14 @@ pub fn prepare_job(folder: PathBuf) -> Result<BatchImportJob, String> {
             rows_by_filename.insert(name.clone(), group);
             source_of.insert(name, sheet.clone());
         }
+    }
+
+    if !absent.is_empty() {
+        setup_notes.push(format!(
+            "[무시] 폴더에 없는 PDF를 가리키는 행이 있습니다 — 파일명 {}종: {}",
+            absent.len(),
+            absent.iter().cloned().collect::<Vec<_>>().join(", ")
+        ));
     }
 
     let matched_count = files
@@ -383,17 +404,7 @@ fn finish(job: &mut BatchImportJob) {
 /// 목록을 들여쓰고 박스로 묶어 위 문장과 구분한다. 줄이 많으면 스크롤한다(2026-09-29 요청 —
 /// OCR 결과 창의 상세 목록과 같은 모양).
 fn list_box(ui: &mut egui::Ui, id: &str, rows: usize, add: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
-        ui.add_space(16.0);
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_min_width(420.0);
-            if rows > 6 {
-                egui::ScrollArea::vertical().id_salt(id).max_height(150.0).show(ui, add);
-            } else {
-                add(ui);
-            }
-        });
-    });
+    crate::ocr_dialogs::indented_box(ui, id, 16.0, rows > 6, 150.0, add);
 }
 
 /// 뷰어 영역(CentralPanel 내부)에 그리는 일괄 처리 화면 — 잡이 존재하는 동안
@@ -593,6 +604,43 @@ mod tests {
             "{:?}",
             job.setup_notes
         );
+    }
+
+    /// 폴더에 없는 PDF를 가리키는 행은 **중복 안내를 내지 않고** 이름만 한 줄로 모아 알린다.
+    ///
+    /// 실측(2026-09-29): 시트 17장이 파일명 4종을 가리키는데 그중 폴더에 있는 PDF는 2개뿐이라,
+    /// 예전 규칙으로는 손쓸 수 없는 [중복] 경고가 31줄 중 18줄이었다. 사용자가 "안내에 나오는
+    /// 파일은 훨씬 많은데 왜 2개만 넣는가"로 읽은 것이 이 때문이다.
+    #[test]
+    fn rows_for_pdfs_that_are_not_here_are_reported_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::copy(sample("KKZ000160_01.pdf"), root.join("a.pdf")).unwrap();
+        let row = |filename: &str, title: &str| BookmarkRow {
+            order: 1,
+            filename: filename.to_string(),
+            depth: 0,
+            title: title.to_string(),
+            page: 1,
+        };
+        // 두 시트가 모두 a.pdf(있음)와 없는 PDF 두 개를 가리킨다.
+        for sheet in ["먼저.xlsx", "나중.xlsx"] {
+            let rows = vec![row("a.pdf", "장"), row("없다.pdf", "장"), row("이것도없다.pdf", "장")];
+            import_export::export_xlsx(&rows, &root.join(sheet)).unwrap();
+        }
+
+        let job = prepare_job(root.to_path_buf()).unwrap();
+        assert_eq!(job.matched_count, 1);
+        // 폴더에 있는 a.pdf만 중복으로 알린다.
+        let dupes: Vec<&String> = job.setup_notes.iter().filter(|n| n.contains("[중복]")).collect();
+        assert_eq!(dupes.len(), 1, "{:?}", job.setup_notes);
+        assert!(dupes[0].contains("a.pdf"), "{:?}", dupes);
+        // 없는 PDF는 한 줄로 모은다.
+        let ignored: Vec<&String> = job.setup_notes.iter().filter(|n| n.contains("[무시]")).collect();
+        assert_eq!(ignored.len(), 1, "{:?}", job.setup_notes);
+        assert!(ignored[0].contains("없다.pdf") && ignored[0].contains("이것도없다.pdf"), "{:?}", ignored);
+        // 없는 이름의 행은 적용 대상에도 들지 않는다.
+        assert!(!job.rows_by_filename.contains_key("없다.pdf"));
     }
 
     /// 전체 파이프라인 실 구동: 하위 폴더 포함 재귀 수집 → 매칭 파일 처리(원본은
