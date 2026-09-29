@@ -404,7 +404,7 @@ fn finish(job: &mut BatchImportJob) {
 /// 목록을 들여쓰고 박스로 묶어 위 문장과 구분한다. 줄이 많으면 스크롤한다(2026-09-29 요청 —
 /// OCR 결과 창의 상세 목록과 같은 모양).
 fn list_box(ui: &mut egui::Ui, id: &str, rows: usize, add: impl FnOnce(&mut egui::Ui)) {
-    crate::ocr_dialogs::indented_box(ui, id, 16.0, rows > 6, 150.0, add);
+    crate::ocr_dialogs::indented_box(ui, id, rows > 6, 150.0, add);
 }
 
 /// 뷰어 영역(CentralPanel 내부)에 그리는 일괄 처리 화면 — 잡이 존재하는 동안

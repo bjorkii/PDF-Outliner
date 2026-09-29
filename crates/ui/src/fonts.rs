@@ -17,11 +17,16 @@ const CANDIDATES: &[&str] = &[
 
 /// 팝업창 안쪽 여백. egui 기본값(6)은 글이 창 테두리에 닿아 답답했다(2026-09-29 요청).
 /// 모든 `egui::Window`가 `style.spacing.window_margin`을 쓰므로 여기 한 번만 주면 된다.
-const WINDOW_MARGIN: f32 = 16.0;
+const WINDOW_MARGIN: f32 = 20.0;
 
 /// 창 여백처럼 앱 전체에 한 번 정하는 모양새.
+///
+/// **`style_mut`이 아니라 `all_styles_mut`을 쓴다.** egui 0.29는 밝은 테마와 어두운 테마의
+/// `Style`을 따로 들고 있어서(`context.rs:1790`), `style_mut`은 **지금 테마 하나에만** 닿는다.
+/// 시작할 때 한 번 주고 마는 값은 두 테마 모두에 넣어야 한다 — 그래서 여백을 줬는데도 창이
+/// 여전히 조여 보였다(2026-09-29 리포트).
 pub fn install_style(ctx: &egui::Context) {
-    ctx.style_mut(|style| {
+    ctx.all_styles_mut(|style| {
         style.spacing.window_margin = egui::Margin::same(WINDOW_MARGIN);
         // 창 안의 줄 사이도 조금 벌린다 — 기본값(4)은 문장이 여러 줄 이어질 때 답답하다.
         style.spacing.item_spacing.y = 6.0;

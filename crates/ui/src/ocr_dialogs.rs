@@ -1341,15 +1341,14 @@ fn remove_leftover_temps(folder: &Path) {
     }
 }
 
-/// 상세 줄을 들여쓸 폭과, 스크롤로 넘기기 시작하는 줄 수.
-const DETAIL_INDENT: f32 = 16.0;
+/// 상세 목록을 스크롤로 넘기기 시작하는 줄 수.
 const DETAIL_ROWS: usize = 6;
 const DETAIL_HEIGHT: f32 = 150.0;
 
 /// 항목에 딸린 상세 목록 — 들여쓰고 박스로 묶어 위 항목과 구분하고, 길면 스크롤한다
 /// (2026-09-29 요청: 예전에는 본문 전체가 한 스크롤 영역이라 어디까지가 한 항목인지 몰랐다).
 fn detail_box(ui: &mut egui::Ui, id: &str, rows: usize, add: impl FnOnce(&mut egui::Ui)) {
-    indented_box(ui, id, DETAIL_INDENT, rows > DETAIL_ROWS, DETAIL_HEIGHT, add);
+    indented_box(ui, id, rows > DETAIL_ROWS, DETAIL_HEIGHT, add);
 }
 
 /// 들여쓴 박스 하나. **`ui.horizontal`로 들여쓰면 안 된다** — egui는 가로 배치 안에서 줄바꿈을
@@ -1358,7 +1357,6 @@ fn detail_box(ui: &mut egui::Ui, id: &str, rows: usize, add: impl FnOnce(&mut eg
 pub(crate) fn indented_box(
     ui: &mut egui::Ui,
     id: &str,
-    indent: f32,
     scroll: bool,
     max_height: f32,
     add: impl FnOnce(&mut egui::Ui),
@@ -1366,6 +1364,19 @@ pub(crate) fn indented_box(
     /// 왼쪽 세로선 두께와 그 선에서 글까지 띄울 폭.
     const BAR: f32 = 3.0;
     const GAP: f32 = 10.0;
+    // 세로선을 불릿이 아니라 **항목 이름 첫 글자** 바로 아래에 세운다(2026-09-29 요청) —
+    // 불릿 아래에 그으면 선이 글을 누르는 것처럼 답답하다. 폰트에 따라 달라지므로 "• "의
+    // 실제 폭을 재서 그만큼 들여쓴다.
+    let indent = ui.fonts(|fonts| {
+        fonts
+            .layout_no_wrap(
+                "• ".to_owned(),
+                egui::TextStyle::Body.resolve(ui.style()),
+                egui::Color32::PLACEHOLDER,
+            )
+            .size()
+            .x
+    });
     // `ui.indent`는 쓰지 않는다 — egui가 옅은 세로선을 하나 더 그려서, 테두리까지 겹치면
     // 선이 둘이 된다(2026-09-29 리포트: "정신이 없다").
     let width = (ui.available_width() - indent - GAP).max(120.0);
