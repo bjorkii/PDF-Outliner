@@ -197,10 +197,10 @@ const OVERLAY_SCOPE_TIP: &str =
 
 /// 켜고 끄는 메뉴 항목. 켜져 있으면 앞에 체크가 붙는다. 값이 바뀌면 `true`.
 fn check_item(ui: &mut egui::Ui, value: &mut bool, label: &str, tooltip: &str) -> bool {
-    // 빈자리를 U+2007(FIGURE SPACE)로 두었더니 한글 대체 폰트에 그 글리프가 없어 네모 두 개로
-    // 보였다(2026-09-30 리포트). 어느 폰트에나 있는 보통 빈칸을 쓴다.
-    let mark = if *value { "✓ " } else { "   " };
-    let response = ui.add(egui::SelectableLabel::new(false, format!("{mark}{label}")));
+    // 해제 상태를 빈칸으로 채워 자리를 맞췄더니 글이 혼자 들여쓰기된 것처럼 보였다
+    // (2026-09-30 리포트). 이 메뉴에만 왼쪽 여백을 줄 수도 없으니, 체크가 있을 때만 앞에 붙인다.
+    let text = if *value { format!("✓ {label}") } else { label.to_string() };
+    let response = ui.add(egui::SelectableLabel::new(false, text));
     let response = if tooltip.is_empty() { response } else { response.on_hover_text(tooltip) };
     if response.clicked() {
         *value = !*value;

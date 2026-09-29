@@ -88,35 +88,58 @@ impl OcrOverlay {
         self.selected.get().is_some()
     }
 
-    /// 고른 낱말에서 화살표 방향으로 가장 가까운 낱말로 옮긴다.
+    /// 고른 낱말에서 화살표 방향으로 이웃 낱말로 옮긴다.
     ///
     /// **방향은 화면 기준으로 받는다** — `down`이 양수면 화면 아래쪽이다. 낱말 좌표는 PDF 사용자
     /// 공간이라 y가 위로 커지므로 안에서 뒤집는다. 부르는 쪽이 이 차이를 신경 쓰지 않게 하려는
     /// 것이다(처음에 그대로 넘겼다가 위아래가 뒤바뀌었다).
     ///
-    /// 고르는 규칙: 그 방향으로 **실제로 넘어간** 낱말들 가운데, 방향 축의 거리를 우선하고 옆으로
-    /// 벗어난 정도에 벌점을 준다. 한 줄을 훑을 때 옆줄로 튀지 않게 하려는 것이다.
+    /// **고르는 규칙**(2026-09-30 개선): 중심점 사이의 거리로 고르면 옆줄로 튀거나 가까운 낱말을
+    /// 건너뛴다 — 넓은 낱말은 중심이 멀어 지고, 좁은 낱말은 딴 줄에 있어도 이긴다. 그래서
     ///
-    /// `/Rotate`가 걸린 쪽에서는 화면 방향과 사용자 공간 축이 어긋난다. 그런 쪽에서는 화살표가
-    /// 돌아간 방향으로 움직이는데, 쓰기 어려울 정도는 아니라 지금은 그대로 둔다.
+    /// 1. **상자 가장자리 사이의 틈**으로 거리를 잰다(중심이 아니라).
+    /// 2. 움직이는 축과 **직각 방향으로 겹치는지**를 먼저 본다. 좌우로 갈 때 세로로 겹치면 같은
+    ///    줄이고, 위아래로 갈 때 가로로 겹치면 같은 단이다. 겹치지 않는 것에는 큰 벌점을 줘서,
+    ///    같은 줄에 후보가 하나라도 있으면 그쪽이 반드시 이긴다.
+    ///
+    /// `/Rotate`가 걸린 쪽에서는 화면 방향과 사용자 공간 축이 어긋나 화살표가 돌아간 방향으로
+    /// 움직인다. 쓰기 어려울 정도는 아니라 지금은 그대로 둔다.
     pub fn move_selection(&self, right: f64, down: f64) -> bool {
-        let (dx, dy) = (right, -down);
+        /// 줄(또는 단)이 다를 때의 벌점. 어떤 틈보다도 커서 같은 줄이 늘 이긴다.
+        const OFF_LINE: f64 = 1.0e6;
+        /// 가장자리가 살짝 겹쳐 있어도 "그 방향에 있다"고 보는 여유(pt).
+        const SLACK: f64 = 1.0;
+
         let Some((page, index)) = self.selected.get() else { return false };
         let cache = self.cache.borrow();
         let Some(words) = cache.get(&page) else { return false };
         let Some(from) = words.get(index) else { return false };
-        let center = |w: &Word| ((w.bounds[0] + w.bounds[2]) / 2.0, (w.bounds[1] + w.bounds[3]) / 2.0);
-        let (fx, fy) = center(from);
+        let (dx, dy) = (right, -down);
+
+        // 움직이는 축(0=가로, 1=세로)과 그 방향(+1/-1).
+        let (axis, sign) = if dx != 0.0 { (0usize, dx.signum()) } else { (1usize, dy.signum()) };
+        let cross = 1 - axis;
+        // `[low, high]` 꼴로 꺼낸다. bounds는 [left, bottom, right, top]이다.
+        let span = |w: &Word, a: usize| if a == 0 { (w.bounds[0], w.bounds[2]) } else { (w.bounds[1], w.bounds[3]) };
+        let (from_low, from_high) = span(from, axis);
+        let (from_c_low, from_c_high) = span(from, cross);
 
         let best = words
             .iter()
             .enumerate()
             .filter(|(i, _)| *i != index)
             .filter_map(|(i, w)| {
-                let (x, y) = center(w);
-                let (along, across) = if dx != 0.0 { ((x - fx) * dx, (y - fy).abs()) } else { ((y - fy) * dy, (x - fx).abs()) };
-                // 그 방향으로 넘어가지 않은 것은 후보가 아니다.
-                (along > 0.5).then_some((i, along + across * 3.0))
+                let (low, high) = span(w, axis);
+                // 그 방향으로 넘어간 만큼(상자 가장자리 사이의 틈). 음수면 아직 안 넘어간 것이다.
+                let gap = if sign > 0.0 { low - from_high } else { from_low - high };
+                if gap < -SLACK {
+                    return None;
+                }
+                // 직각 방향으로 겹치면 같은 줄·같은 단이다.
+                let (c_low, c_high) = span(w, cross);
+                let overlap = c_high.min(from_c_high) - c_low.max(from_c_low);
+                let penalty = if overlap > 0.0 { 0.0 } else { OFF_LINE - overlap };
+                Some((i, gap.max(0.0) + penalty))
             })
             .min_by(|(_, a), (_, b)| a.total_cmp(b));
         match best {
@@ -339,6 +362,67 @@ mod tests {
         assert_eq!(text(&overlay), "라", "아래 화살표는 바로 밑 낱말로");
         assert!(overlay.move_selection(0.0, -1.0));
         assert_eq!(text(&overlay), "나", "위 화살표로 되돌아온다");
+    }
+
+    /// 중심점 거리로 고르던 때 틀렸던 배치들. 넓은 낱말은 중심이 멀어 지고, 좁은 낱말은 딴
+    /// 줄에 있어도 이겼다(2026-09-30 리포트: "인근 박스가 있어도 몇 단계 점프하거나 딴 방향으로
+    /// 튄다").
+    #[test]
+    fn a_wide_neighbour_wins_over_a_far_narrow_one_on_another_line() {
+        let overlay = OcrOverlay { on: true, ..Default::default() };
+        overlay.cache.borrow_mut().insert(
+            1,
+            vec![
+                word(0.0, 100.0, 10.0, 110.0, "기준"),
+                // 바로 오른쪽에 붙은 아주 넓은 낱말 — 중심은 멀지만 가장자리는 붙어 있다.
+                word(12.0, 100.0, 200.0, 110.0, "아주긴낱말"),
+                // 윗줄의 좁은 낱말 — 중심 거리로는 더 가깝다.
+                word(14.0, 120.0, 20.0, 130.0, "딴줄"),
+            ],
+        );
+        let text = |o: &OcrOverlay| {
+            let (page, index) = o.selected().unwrap();
+            o.cache.borrow()[&page][index].text.clone()
+        };
+        overlay.select(Some((1, 0)));
+        assert!(overlay.move_selection(1.0, 0.0));
+        assert_eq!(text(&overlay), "아주긴낱말", "같은 줄에서 가장자리가 가까운 쪽");
+    }
+
+    /// 같은 줄에 후보가 없을 때만 다른 줄로 넘어간다.
+    #[test]
+    fn it_leaves_the_line_only_when_nothing_is_left_on_it() {
+        let overlay = OcrOverlay { on: true, ..Default::default() };
+        overlay.cache.borrow_mut().insert(
+            1,
+            vec![
+                word(100.0, 100.0, 110.0, 110.0, "줄끝"),
+                word(0.0, 80.0, 10.0, 90.0, "다음줄머리"),
+            ],
+        );
+        let text = |o: &OcrOverlay| {
+            let (page, index) = o.selected().unwrap();
+            o.cache.borrow()[&page][index].text.clone()
+        };
+        overlay.select(Some((1, 0)));
+        // 오른쪽에는 아무것도 없다.
+        assert!(!overlay.move_selection(1.0, 0.0));
+        // 아래로는 줄이 겹치지 않아도 유일한 후보라 넘어간다.
+        assert!(overlay.move_selection(0.0, 1.0));
+        assert_eq!(text(&overlay), "다음줄머리");
+    }
+
+    /// 살짝 겹쳐 있는 이웃도 그 방향에 있는 것으로 본다(OCR 상자는 자주 겹친다).
+    #[test]
+    fn slightly_overlapping_neighbours_still_count() {
+        let overlay = OcrOverlay { on: true, ..Default::default() };
+        overlay.cache.borrow_mut().insert(
+            1,
+            vec![word(0.0, 100.0, 10.0, 110.0, "가"), word(9.5, 100.0, 20.0, 110.0, "나")],
+        );
+        overlay.select(Some((1, 0)));
+        assert!(overlay.move_selection(1.0, 0.0));
+        assert_eq!(overlay.selected(), Some((1, 1)));
     }
 
     /// F1로 끄거나 다시 재면 골라 둔 것을 놓는다 — 자리 번호가 그 쪽을 잰 결과에 매여 있다.

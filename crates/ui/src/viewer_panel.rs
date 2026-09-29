@@ -1482,13 +1482,19 @@ fn draw_ocr_overlay(ui: &egui::Ui, app: &PdfViewerApp, image_rect: egui::Rect, t
                 .map(|(index, _)| index)
         });
 
-        // 눌러서 고른 낱말은 마우스를 떼도 남는다. 빈 곳을 누르면 놓는다.
-        if ui.input(|i| i.pointer.primary_clicked()) && pointer.is_some() {
-            app.ocr_overlay.select(hovered.map(|index| (page_number, index)));
+        // **뗄 때가 아니라 눌린 순간에** 고른다. `primary_clicked()`는 손이 몇 픽셀만 움직여도
+        // egui가 끌기로 보아 참이 되지 않아, 클릭이 됐다 안 됐다 했다(2026-09-30 리포트).
+        if ui.input(|i| i.pointer.primary_pressed()) && pointer.is_some() {
+            let hit = hovered.map(|index| (page_number, index));
+            // 고른 것을 다시 누르면 놓는다. 빈 곳을 눌러도 놓는다.
+            let next = if hit.is_some() && hit == app.ocr_overlay.selected() { None } else { hit };
+            app.ocr_overlay.select(next);
         }
+        // 고른 것은 방금 바뀌었을 수 있으니 여기서 읽는다 — 누르기 전 값을 쓰면 놓은 상자가 한
+        // 프레임 더 도드라진다.
         let selected = app.ocr_overlay.selected().filter(|(p, _)| *p == page_number).map(|(_, i)| i);
         // 가리킨 것이 있으면 그쪽을, 없으면 골라 둔 것을 도드라지게 그린다.
-        let accent = hovered.or(selected);
+        let accent = selected.or(hovered);
 
         for (index, (rect, word)) in boxes.iter().enumerate() {
             if Some(index) == accent {
