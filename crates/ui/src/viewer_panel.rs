@@ -1511,7 +1511,7 @@ fn draw_word_box(ui: &egui::Ui, rect: egui::Rect, word: &crate::ocr_overlay::Wor
     let fill = if focused { color.gamma_multiply(0.92) } else { color.gamma_multiply(0.12) };
     let text_color = if focused { egui::Color32::WHITE } else { color };
     ui.painter().rect_filled(rect, 1.0, fill);
-    ui.painter().rect_stroke(rect, 1.0, egui::Stroke::new(if focused { 2.0 } else { 1.0 }, color));
+    ui.painter().rect_stroke(rect, 1.0, egui::Stroke::new(if focused { 2.0_f32 } else { 1.0 }, color));
     // 글자는 상자 높이에 맞춰 줄이되, 너무 작아지면 읽히지 않으므로 그리지 않는다. 가리킨
     // 상자는 작아도 읽을 수 있어야 하므로 최소 크기를 보장한다.
     let fitted = (rect.height() * 0.78).min(rect.width() * 1.6 / word.text.chars().count().max(1) as f32);
