@@ -19,6 +19,7 @@ mod fonts;
 mod macos_open_file;
 mod ocr_dialogs;
 mod ocr_import;
+mod ocr_overlay;
 mod ocr_worker;
 mod render_worker;
 mod search_panel;

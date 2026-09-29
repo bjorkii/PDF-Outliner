@@ -438,6 +438,7 @@ fn show_single_page(
         draw_selection_highlight(ui, app, image_rect, target_width, app.current_page);
         draw_search_highlight(ui, app, image_rect, target_width, page_number);
         draw_ocr_mark(ui, app, image_rect, target_width, page_number);
+        draw_ocr_overlay(ui, app, image_rect, target_width, page_number);
 
         app.image_rect = Some(image_rect);
 
@@ -863,6 +864,7 @@ fn show_continuous(
                 draw_selection_highlight(ui, app, page_rect, page_target, page_number);
                 draw_search_highlight(ui, app, page_rect, page_target, page_number);
                 draw_ocr_mark(ui, app, page_rect, page_target, page_number);
+                draw_ocr_overlay(ui, app, page_rect, page_target, page_number);
             }
             app.page_textures.note_painted(&painted_ids);
 
@@ -1431,6 +1433,61 @@ fn draw_ocr_mark(ui: &egui::Ui, app: &PdfViewerApp, image_rect: egui::Rect, targ
         }
     }
 }
+
+/// OCR 표시 모드(예약 6): 지면을 흐리게 덮고 그 위에 안 보이는 텍스트의 자리와 글자를 그린다.
+///
+/// 지면을 덮는 이유(2026-09-29 요청): 스캔 글자와 OCR 글자가 같은 자리에 겹쳐 있어, 그냥 얹으면
+/// 둘이 뒤섞여 어느 쪽이 OCR인지 읽을 수 없다. 원본이 "있다는 것만 알아볼 정도"로 흐려지면
+/// 대조는 되면서 OCR 글자가 또렷하게 떠오른다.
+fn draw_ocr_overlay(ui: &egui::Ui, app: &PdfViewerApp, image_rect: egui::Rect, target_width: i32, page_number: u32) {
+    if !app.ocr_overlay.mode.is_on() {
+        return;
+    }
+    let Some(document) = app.document.as_ref() else { return };
+    let Ok(page) = document.pages().get((page_number - 1) as PdfPageIndex) else { return };
+
+    // 원본을 덮는 흰 장막. 완전히 가리지 않는다 — 스캔 글자가 비쳐야 자리를 대조할 수 있다.
+    ui.painter().rect_filled(image_rect, 0.0, egui::Color32::from_white_alpha(OVERLAY_VEIL));
+
+    let config = PdfRenderConfig::new().set_target_width(target_width);
+    let scale = image_rect.width() / target_width as f32;
+    let to_screen = |x: f64, y: f64| -> Option<egui::Pos2> {
+        let (px, py) = page.points_to_pixels(PdfPoints::new(x as f32), PdfPoints::new(y as f32), &config).ok()?;
+        Some(egui::pos2(image_rect.left() + px as f32 * scale, image_rect.top() + py as f32 * scale))
+    };
+
+    app.ocr_overlay.with_words(&page, page_number, |words| {
+        for word in words {
+            let (Some(a), Some(b)) = (to_screen(word.bounds[0], word.bounds[3]), to_screen(word.bounds[2], word.bounds[1]))
+            else {
+                continue;
+            };
+            let rect = egui::Rect::from_two_pos(a, b);
+            // OCR 텍스트와 그 밖의 안 보이는 텍스트를 색으로 가른다. "전부 보기"에서만 둘이 섞인다.
+            let color = if word.is_ocr { OVERLAY_OCR } else { OVERLAY_OTHER };
+            ui.painter().rect_filled(rect, 1.0, color.gamma_multiply(0.12));
+            ui.painter().rect_stroke(rect, 1.0, egui::Stroke::new(1.0, color));
+            // 글자는 상자 높이에 맞춰 줄이되, 너무 작아지면 읽히지 않으므로 그리지 않는다.
+            let size = (rect.height() * 0.78).min(rect.width() * 1.6 / word.text.chars().count().max(1) as f32);
+            if size >= OVERLAY_MIN_TEXT {
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    &word.text,
+                    egui::FontId::proportional(size),
+                    color,
+                );
+            }
+        }
+    });
+}
+
+/// 원본을 덮는 흰 장막의 진하기(0~255). 스캔 글자가 비쳐 보일 만큼만 덮는다.
+const OVERLAY_VEIL: u8 = 175;
+/// 글자를 그릴 최소 크기(pt). 이보다 작으면 상자만 그린다.
+const OVERLAY_MIN_TEXT: f32 = 6.0;
+const OVERLAY_OCR: egui::Color32 = egui::Color32::from_rgb(0x1f, 0x6f, 0xd0);
+const OVERLAY_OTHER: egui::Color32 = egui::Color32::from_rgb(0xc0, 0x39, 0x2b);
 
 #[cfg(test)]
 mod edge_flip_tests {

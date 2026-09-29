@@ -317,6 +317,19 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 if menu_item(ui, "가져오기…", has_file, "hOCR 파일로부터 현재 열린 PDF로 OCR 텍스트를 가져옵니다.") {
                     crate::ocr_dialogs::request_import(ui.ctx(), app);
                 }
+                ui.separator();
+                // F1이 macOS에서 밝기 키로 먹히는 경우가 있어 메뉴에도 같은 항목을 둔다.
+                if menu_item(
+                    ui,
+                    &format!("{}  (F1)", app.ocr_overlay.mode.label()),
+                    has_file,
+                    "보이지 않는 텍스트의 자리와 글자를 지면 위에 보여 줍니다. 누를 때마다 \
+                     꺼짐 → OCR 텍스트만 → 보이지 않는 텍스트 전부로 돌아갑니다.",
+                ) {
+                    app.cycle_ocr_overlay();
+                }
+                ui.separator();
+
                 use crate::ocr_worker::ExportFormat;
                 if menu_item(ui, "hOCR로 내보내기…", has_file, "현재 열린 PDF의 OCR 정보를 hOCR 파일로 내보냅니다.") {
                     crate::ocr_dialogs::request_export(ui.ctx(), app, ExportFormat::Hocr);

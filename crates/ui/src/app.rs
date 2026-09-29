@@ -394,6 +394,8 @@ pub struct PdfViewerApp {
     pub ocr_export_probe: Option<crate::ocr_worker::WorkerHandle>,
     /// 실행 중이거나 결과를 보여 주는 OCR 작업(`ocr_dialogs`, `ocr_worker`).
     pub ocr_job: Option<crate::ocr_dialogs::OcrJob>,
+    /// OCR 표시/숨기기 모드(F1) — 보이지 않는 텍스트를 지면 위에 꺼내 보여 준다.
+    pub ocr_overlay: crate::ocr_overlay::OcrOverlay,
     /// 파일 하나를 만들고 끝나는 작업(북마크 내보내기)의 결과 알림 — "저장 위치 열기" 버튼 자리.
     pub saved_file_notice: Option<SavedFileNotice>,
     /// OCR 전체 삭제 확인 창(분석 결과, `ocr_dialogs`).
@@ -538,6 +540,7 @@ impl PdfViewerApp {
             ocr_export_dialog: None,
             ocr_export_probe: None,
             ocr_job: None,
+            ocr_overlay: crate::ocr_overlay::OcrOverlay::default(),
             saved_file_notice: None,
             ocr_removal_confirm: None,
             ocr_needs_save: None,
@@ -689,6 +692,12 @@ impl PdfViewerApp {
     /// 화면은 옮기지 않는다. 저장 안 한 북마크 편집이 있으면 파일의 북마크로 덮어쓰지 않는다.
     /// 열기에 실패하면(아직 쓰는 중이라 깨진 파일 등) 기존 문서를 그대로 두고 다음 변경을
     /// 기다린다 — SumatraPDF와 같이 복구·암호 입력은 시도하지 않는다.
+    /// OCR 표시 모드를 한 단계 돌리고 지금 무엇을 보고 있는지 알린다.
+    pub(crate) fn cycle_ocr_overlay(&mut self) {
+        let mode = self.ocr_overlay.cycle();
+        self.status_message = Some(mode.label().to_string());
+    }
+
     pub(crate) fn reload_current_document(&mut self) {
         let Some(path) = self.current_file.clone() else {
             return;
@@ -828,6 +837,8 @@ impl PdfViewerApp {
                 self.document = Some(document);
                 self.compute_page_sizes();
                 self.page_textures.clear();
+                // 다른 문서의 쪽을 잰 결과가 남아 있으면 안 된다.
+                self.ocr_overlay.invalidate();
                 self.notify_render_worker_document(&path);
                 self.scroll_to_page_once = None;
                 self.continuous_last_zoom = 0.0;
@@ -1980,6 +1991,13 @@ impl PdfViewerApp {
 
         if self.bookmarks_dirty && ctx.input(|i| i.modifiers.command && i.key_pressed(Key::S)) {
             self.save_bookmarks_to_pdf();
+        }
+
+        // F1 — OCR 표시 모드를 한 단계씩 돌린다(꺼짐 → OCR만 → 전부 → 꺼짐). 글자를 넣는 키가
+        // 아니므로 입력칸에 포커스가 있어도 받는다. macOS에서 F1이 밝기 키로 먹히는 경우를
+        // 대비해 OCR 메뉴에도 같은 항목을 둔다.
+        if ctx.input(|i| i.key_pressed(Key::F1)) {
+            self.cycle_ocr_overlay();
         }
 
         // "일치하는 결과가 없습니다" 알림이 떠 있는 동안의 Enter는 그 알림을 닫는 데 쓴다
