@@ -884,7 +884,18 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
             let (hocr_count, pdf_count) = (dialog.hocr_count(), dialog.pdf_count());
             {
                 let a = &dialog.analysis;
-                ui.label(format!("hOCR에 총 {}쪽의 OCR 텍스트 정보가 담겨 있습니다.", a.hocr_pages.len()));
+                // 쪽 수와 **텍스트가 있는 쪽 수**는 다르다. 빈 쪽이 섞인 hOCR에서 전체 쪽수만
+                // 적으면 그만큼 가져올 것이 있다고 읽힌다(2026-09-29 리포트: 22~24쪽에만 글이
+                // 있는 파일인데 "총 24쪽의 OCR 텍스트 정보"라고 나왔다).
+                let with_text = a.hocr_pages.iter().filter(|p| p.words > 0).count();
+                ui.label(if with_text == a.hocr_pages.len() {
+                    format!("hOCR에 총 {}쪽의 OCR 텍스트 정보가 담겨 있습니다.", a.hocr_pages.len())
+                } else {
+                    format!(
+                        "hOCR에 총 {}쪽이 담겨 있고, 그중 {with_text}쪽에 OCR 텍스트가 있습니다.",
+                        a.hocr_pages.len()
+                    )
+                });
                 if a.dropped_items + a.empty_words > 0 {
                     bullet(ui, format!(
                         "이 중 위치 정보가 없거나 비어 있는 {}개 항목은 제외합니다.",
@@ -1381,7 +1392,7 @@ pub(crate) fn indented_box(
     // 선이 둘이 된다(2026-09-29 리포트: "정신이 없다").
     let width = (ui.available_width() - indent - GAP).max(120.0);
     let inner = egui::Frame::none()
-        .outer_margin(egui::Margin { left: indent, top: 2.0, bottom: 2.0, right: 0.0 })
+        .outer_margin(egui::Margin { left: indent, top: 0.0, bottom: 0.0, right: 0.0 })
         .inner_margin(egui::Margin { left: GAP, right: 0.0, top: 2.0, bottom: 2.0 })
         .show(ui, |ui| {
             ui.set_width(width);
@@ -1399,12 +1410,16 @@ pub(crate) fn indented_box(
             }
         });
     // 테두리 대신 왼쪽에 두꺼운 세로선 하나만 둔다.
+    //
+    // **`response.rect`는 outer_margin까지 포함한 자리다**(egui frame.rs:313의
+    // `content_with_margin`). 그래서 `rect.left()`는 들여쓰기 **앞**이고, 거기에 그대로
+    // 그으면 아무리 들여써도 선이 불릿 아래에 남는다(2026-09-29 리포트). 들여쓴 만큼 더한다.
     let rect = inner.response.rect;
-    ui.painter().rect_filled(
-        egui::Rect::from_min_size(rect.left_top(), egui::vec2(BAR, rect.height())),
-        1.0,
-        note_color(ui).gamma_multiply(0.7),
+    let bar = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + indent, rect.top()),
+        egui::vec2(BAR, rect.height()),
     );
+    ui.painter().rect_filled(bar, 1.0, note_color(ui).gamma_multiply(0.7));
 }
 
 /// 결과 창 아래 버튼 줄. `copy`는 "복사"가 클립보드에 넣을 평문.
