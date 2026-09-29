@@ -688,13 +688,13 @@ enum SkipReason {
 
 fn skip_label(reason: SkipReason) -> &'static str {
     match reason {
-        SkipReason::Digital => "디지털 페이지",
+        SkipReason::Digital => "비OCR 페이지",
         SkipReason::Undetermined => "판단 불가",
         SkipReason::Existing => "이미 OCR이 있음",
     }
 }
 
-/// 이유별 건너뛸 쪽수를 한 줄로 — "디지털 페이지 3쪽 · 판단 불가 1쪽".
+/// 이유별 건너뛸 쪽수를 한 줄로 — "비OCR 페이지 3쪽 · 판단 불가 1쪽".
 fn describe_skips(skipped: &std::collections::BTreeMap<SkipReason, usize>) -> String {
     skipped.iter().map(|(reason, n)| format!("{} {n}쪽", skip_label(*reason))).collect::<Vec<_>>().join(" · ")
 }
