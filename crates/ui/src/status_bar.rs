@@ -65,7 +65,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             if let Some(info) = app.page_info {
                 for (index, part) in describe(&info).into_iter().enumerate() {
                     if index > 0 {
-                        ui.weak("·");
+                        ui.weak("/");
                     }
                     ui.label(part);
                 }

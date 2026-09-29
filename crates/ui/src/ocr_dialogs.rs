@@ -1513,7 +1513,7 @@ fn show_job_window(ctx: &egui::Context, app: &mut PdfViewerApp) {
         }));
     if let Some(path) = reveal {
         if let Err(err) = crate::app::reveal_in_file_manager(&path) {
-            app.status_message = Some(format!("위치를 열 수 없습니다({err}): {}", path.display()));
+            app.status_message = Some(format!("해당 위치를 열 수 없습니다({err}): {}", path.display()));
         }
     }
     if let Some(mark) = show_mark {

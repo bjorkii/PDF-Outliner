@@ -2183,7 +2183,7 @@ fn show_saved_file_notice(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 ui.horizontal(|ui| {
                     if ui.button("저장 위치 열기").clicked() {
                         if let Err(err) = reveal_in_file_manager(&path) {
-                            failed = Some(format!("저장 위치를 열 수 없습니다({err}): {}", path.display()));
+                            failed = Some(format!("해당 위치를 열 수 없습니다({err}): {}", path.display()));
                         }
                     }
                     if ui.button("닫기").clicked() {
