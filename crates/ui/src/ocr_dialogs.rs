@@ -1031,7 +1031,11 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
             bullet(ui, "원본PDF는 같은 위치에 백업됩니다.");
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                let allowed = !insert.is_empty() && (!dialog.analysis.signed || dialog.signature_ack);
+                // 가져올 글이 없으면 눌러도 "없습니다" 결과 창만 뜬다 — 아예 잠근다. 왜 못
+                // 누르는지는 바로 위 경고가 말해 준다(2026-09-29 요청).
+                let allowed = !insert.is_empty()
+                    && any_text_in_range
+                    && (!dialog.analysis.signed || dialog.signature_ack);
                 if ui.add_enabled(allowed, egui::Button::new("가져오기")).clicked() {
                     action = Some(true);
                 }

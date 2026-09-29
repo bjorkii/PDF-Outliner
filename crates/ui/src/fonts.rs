@@ -17,7 +17,12 @@ const CANDIDATES: &[&str] = &[
 
 /// 팝업창 안쪽 여백. egui 기본값(6)은 글이 창 테두리에 닿아 답답했다(2026-09-29 요청).
 /// 모든 `egui::Window`가 `style.spacing.window_margin`을 쓰므로 여기 한 번만 주면 된다.
+///
+/// **위쪽만 기본값(6)으로 둔다.** 이 여백은 창 테두리와 내용 사이가 아니라 제목 글자 **위**에도
+/// 그대로 붙어서, 20을 주면 제목 띠가 두껍게 부풀어 어색해진다(2026-09-29 리포트). 제목 아래
+/// 본문의 위쪽 간격은 egui가 제목줄과 구분선으로 이미 만들어 준다.
 const WINDOW_MARGIN: f32 = 20.0;
+const WINDOW_MARGIN_TOP: f32 = 6.0;
 
 /// 창 여백처럼 앱 전체에 한 번 정하는 모양새.
 ///
@@ -27,7 +32,12 @@ const WINDOW_MARGIN: f32 = 20.0;
 /// 여전히 조여 보였다(2026-09-29 리포트).
 pub fn install_style(ctx: &egui::Context) {
     ctx.all_styles_mut(|style| {
-        style.spacing.window_margin = egui::Margin::same(WINDOW_MARGIN);
+        style.spacing.window_margin = egui::Margin {
+            left: WINDOW_MARGIN,
+            right: WINDOW_MARGIN,
+            top: WINDOW_MARGIN_TOP,
+            bottom: WINDOW_MARGIN,
+        };
         // 창 안의 줄 사이도 조금 벌린다 — 기본값(4)은 문장이 여러 줄 이어질 때 답답하다.
         style.spacing.item_spacing.y = 6.0;
     });
