@@ -1482,13 +1482,21 @@ fn draw_ocr_overlay(ui: &egui::Ui, app: &PdfViewerApp, image_rect: egui::Rect, t
                 .map(|(index, _)| index)
         });
 
+        // 눌러서 고른 낱말은 마우스를 떼도 남는다. 빈 곳을 누르면 놓는다.
+        if ui.input(|i| i.pointer.primary_clicked()) && pointer.is_some() {
+            app.ocr_overlay.select(hovered.map(|index| (page_number, index)));
+        }
+        let selected = app.ocr_overlay.selected().filter(|(p, _)| *p == page_number).map(|(_, i)| i);
+        // 가리킨 것이 있으면 그쪽을, 없으면 골라 둔 것을 도드라지게 그린다.
+        let accent = hovered.or(selected);
+
         for (index, (rect, word)) in boxes.iter().enumerate() {
-            if Some(index) == hovered {
-                continue; // 맨 나중에 그린다
+            if Some(index) == accent {
+                continue; // 맨 나중에 그려 이웃 위로 올린다
             }
             draw_word_box(ui, *rect, word, false);
         }
-        if let Some(index) = hovered {
+        if let Some(index) = accent {
             let (rect, word) = boxes[index];
             draw_word_box(ui, rect, word, true);
         }

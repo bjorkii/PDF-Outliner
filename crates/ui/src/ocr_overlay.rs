@@ -34,9 +34,15 @@ pub struct OcrOverlay {
     pub on: bool,
     /// `7 Tr`·알파 0·크기 0까지 포함할지. 끄면 OCR 텍스트(이미지에 걸친 `3 Tr`)만 본다.
     pub include_all_hidden: bool,
-    /// 원본을 가리는 정도(0~100). 0이면 원본 그대로, 100이면 원본이 보이지 않는다.
+    /// 원본을 덮는 장막의 불투명도(0~100). 0이면 원본 그대로, 100이면 원본이 보이지 않는다.
     pub veil: u8,
     cache: std::cell::RefCell<std::collections::HashMap<u32, Vec<Word>>>,
+    /// 사용자가 눌러 고른 낱말 (쪽 번호, 그 쪽 낱말 목록에서의 자리).
+    ///
+    /// 마우스를 떼도 남는다. 빽빽한 줄을 훑을 때 마우스를 정확히 올려 두는 것보다 한 번 눌러
+    /// 두고 화살표로 옮기는 편이 낫기 때문이다(2026-09-30 요청, 2안). 그리는 쪽이 앱을 `&`로만
+    /// 받으므로 `Cell`에 둔다.
+    selected: std::cell::Cell<Option<(u32, usize)>>,
 }
 
 /// 캐시에 담아 둘 쪽 수. 연속 스크롤로 쭉 내려가도 무한정 쌓이지 않게 한다.
@@ -52,18 +58,78 @@ impl Default for OcrOverlay {
             include_all_hidden: false,
             veil: DEFAULT_VEIL,
             cache: Default::default(),
+            selected: Default::default(),
         }
     }
 }
 
 impl OcrOverlay {
-    /// F1: 켜고 끈다.
+    /// F1: 켜고 끈다. 끄면 골라 둔 낱말도 놓는다.
     pub fn toggle(&mut self) -> bool {
         self.on = !self.on;
+        if !self.on {
+            self.selected.set(None);
+        }
         self.on
     }
 
+    /// 지금 고른 낱말(쪽, 자리).
+    pub fn selected(&self) -> Option<(u32, usize)> {
+        self.selected.get()
+    }
+
+    /// 낱말을 고른다. `None`이면 고른 것을 놓는다.
+    pub fn select(&self, at: Option<(u32, usize)>) {
+        self.selected.set(at);
+    }
+
+    /// 고른 낱말이 있는가 — 화살표 키를 이 기능이 가져갈지 정하는 데 쓴다.
+    pub fn has_selection(&self) -> bool {
+        self.selected.get().is_some()
+    }
+
+    /// 고른 낱말에서 화살표 방향으로 가장 가까운 낱말로 옮긴다.
+    ///
+    /// **방향은 화면 기준으로 받는다** — `down`이 양수면 화면 아래쪽이다. 낱말 좌표는 PDF 사용자
+    /// 공간이라 y가 위로 커지므로 안에서 뒤집는다. 부르는 쪽이 이 차이를 신경 쓰지 않게 하려는
+    /// 것이다(처음에 그대로 넘겼다가 위아래가 뒤바뀌었다).
+    ///
+    /// 고르는 규칙: 그 방향으로 **실제로 넘어간** 낱말들 가운데, 방향 축의 거리를 우선하고 옆으로
+    /// 벗어난 정도에 벌점을 준다. 한 줄을 훑을 때 옆줄로 튀지 않게 하려는 것이다.
+    ///
+    /// `/Rotate`가 걸린 쪽에서는 화면 방향과 사용자 공간 축이 어긋난다. 그런 쪽에서는 화살표가
+    /// 돌아간 방향으로 움직이는데, 쓰기 어려울 정도는 아니라 지금은 그대로 둔다.
+    pub fn move_selection(&self, right: f64, down: f64) -> bool {
+        let (dx, dy) = (right, -down);
+        let Some((page, index)) = self.selected.get() else { return false };
+        let cache = self.cache.borrow();
+        let Some(words) = cache.get(&page) else { return false };
+        let Some(from) = words.get(index) else { return false };
+        let center = |w: &Word| ((w.bounds[0] + w.bounds[2]) / 2.0, (w.bounds[1] + w.bounds[3]) / 2.0);
+        let (fx, fy) = center(from);
+
+        let best = words
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != index)
+            .filter_map(|(i, w)| {
+                let (x, y) = center(w);
+                let (along, across) = if dx != 0.0 { ((x - fx) * dx, (y - fy).abs()) } else { ((y - fy) * dy, (x - fx).abs()) };
+                // 그 방향으로 넘어가지 않은 것은 후보가 아니다.
+                (along > 0.5).then_some((i, along + across * 3.0))
+            })
+            .min_by(|(_, a), (_, b)| a.total_cmp(b));
+        match best {
+            Some((i, _)) => {
+                self.selected.set(Some((page, i)));
+                true
+            }
+            None => false,
+        }
+    }
+
     /// 범위를 바꾼다. 대상이 달라지므로 재어 둔 것을 버린다.
+    #[allow(clippy::needless_pass_by_ref_mut)]
     pub fn set_include_all_hidden(&mut self, include: bool) {
         if self.include_all_hidden != include {
             self.include_all_hidden = include;
@@ -81,6 +147,8 @@ impl OcrOverlay {
     /// 문서가 바뀌었을 때. 모드는 그대로 두고 잰 것만 버린다.
     pub fn invalidate(&mut self) {
         self.cache.borrow_mut().clear();
+        // 자리 번호는 그 쪽을 잰 결과에 매인다 — 다시 재면 가리키던 것이 달라진다.
+        self.selected.set(None);
     }
 
     /// 이 쪽에 그릴 낱말들을 꺼내 `draw`에 넘긴다. 아직 재지 않았으면 여기서 잰다.
@@ -232,6 +300,59 @@ mod tests {
         overlay.cache.borrow_mut().insert(3, Vec::new());
         overlay.set_include_all_hidden(true);
         assert_eq!(overlay.cache.borrow().len(), 1);
+    }
+
+    fn word(x0: f64, y0: f64, x1: f64, y1: f64, text: &str) -> Word {
+        Word { bounds: [x0, y0, x1, y1], text: text.to_string(), is_ocr: true }
+    }
+
+    /// 화살표는 그 방향으로 **넘어간** 낱말만 후보로 보고, 옆으로 벗어난 정도에 벌점을 준다.
+    /// 한 줄을 훑을 때 옆줄로 튀지 않아야 한다.
+    #[test]
+    fn arrows_walk_along_the_line_before_jumping_rows() {
+        // 윗줄 "가 나 다", 아랫줄 "라"가 '나' 바로 밑에 있다(PDF 좌표는 y가 위로 커진다).
+        let overlay = OcrOverlay { on: true, ..Default::default() };
+        overlay.cache.borrow_mut().insert(
+            1,
+            vec![
+                word(0.0, 100.0, 10.0, 110.0, "가"),
+                word(20.0, 100.0, 30.0, 110.0, "나"),
+                word(40.0, 100.0, 50.0, 110.0, "다"),
+                word(20.0, 80.0, 30.0, 90.0, "라"),
+            ],
+        );
+        let text = |overlay: &OcrOverlay| {
+            let (page, index) = overlay.selected().unwrap();
+            overlay.cache.borrow()[&page][index].text.clone()
+        };
+
+        overlay.select(Some((1, 0))); // "가"
+        assert!(overlay.move_selection(1.0, 0.0));
+        assert_eq!(text(&overlay), "나", "오른쪽은 같은 줄의 다음 낱말");
+        assert!(overlay.move_selection(1.0, 0.0));
+        assert_eq!(text(&overlay), "다");
+        assert!(!overlay.move_selection(1.0, 0.0), "줄 끝에서는 더 갈 데가 없다");
+
+        // 방향은 화면 기준이다 — 아래 화살표는 +1이고, 그 자리 낱말은 PDF 좌표로 y가 작다.
+        overlay.select(Some((1, 1))); // "나"
+        assert!(overlay.move_selection(0.0, 1.0));
+        assert_eq!(text(&overlay), "라", "아래 화살표는 바로 밑 낱말로");
+        assert!(overlay.move_selection(0.0, -1.0));
+        assert_eq!(text(&overlay), "나", "위 화살표로 되돌아온다");
+    }
+
+    /// F1로 끄거나 다시 재면 골라 둔 것을 놓는다 — 자리 번호가 그 쪽을 잰 결과에 매여 있다.
+    #[test]
+    fn the_selection_is_dropped_when_it_could_go_stale() {
+        let mut overlay = OcrOverlay { on: true, ..Default::default() };
+        overlay.select(Some((1, 0)));
+        overlay.toggle();
+        assert!(!overlay.has_selection(), "끄면 놓는다");
+
+        overlay.toggle();
+        overlay.select(Some((1, 0)));
+        overlay.invalidate();
+        assert!(!overlay.has_selection(), "다시 재면 놓는다");
     }
 
     /// 실제 스캔 PDF에서 OCR 낱말을 집어내는지. 이 샘플은 22~24쪽에만 OCR이 있고, 내보내기가

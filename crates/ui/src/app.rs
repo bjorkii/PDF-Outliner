@@ -1867,6 +1867,27 @@ impl PdfViewerApp {
     }
 
     fn handle_page_navigation_keys(&mut self, ctx: &egui::Context) {
+        // OCR 표시 모드에서 낱말을 **골라 두었으면** 화살표는 그 사이를 옮겨 다니는 데 쓴다
+        // (2026-09-30 요청, 2안). 페이지 이동보다 **먼저** 보고 처리했으면 빠져나간다 — 뒤에
+        // 두면 한 번의 화살표가 페이지도 넘기고 선택도 옮겨 둘 다 일어난다. 고른 것이 없으면
+        // 예전처럼 페이지·사이드바가 쓰고, Esc로 놓으면 바로 돌아온다.
+        if self.ocr_overlay.on && self.ocr_overlay.has_selection() && !ctx.wants_keyboard_input() {
+            let (dx, dy) = ctx.input(|i| {
+                (
+                    i.key_pressed(Key::ArrowRight) as i32 - i.key_pressed(Key::ArrowLeft) as i32,
+                    i.key_pressed(Key::ArrowDown) as i32 - i.key_pressed(Key::ArrowUp) as i32,
+                )
+            });
+            if dx != 0 || dy != 0 {
+                self.ocr_overlay.move_selection(dx as f64, dy as f64);
+                return;
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+                self.ocr_overlay.select(None);
+                return;
+            }
+        }
+
         // Tab(사이드바<->뷰어 포커스 전환)은 여기가 아니라 raw_input_hook에서 처리한다 —
         // 여기서 key_pressed(Tab)를 봐도 egui가 같은 프레임 시작 시점에 이미 그 Tab으로
         // 위젯 포커스 순회를 시작해버려("파일 열기" 버튼 등으로 포커스가 끼어드는 실측

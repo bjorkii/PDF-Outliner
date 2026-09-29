@@ -193,11 +193,13 @@ fn hover_menu<R>(
 const OVERLAY_TOGGLE_TIP: &str =
     "보이지 않는 텍스트의 자리와 글자를 지면 위에 보여 줍니다. 원본은 흐려지고, 흐린 정도는 툴바의 투명도로 조절합니다.";
 const OVERLAY_SCOPE_TIP: &str =
-    "끄면 OCR 텍스트(스캔 이미지에 걸친 것)만 봅니다. 켜면 흰 글씨·완전 투명·0크기처럼 다른 방법으로 숨긴 텍스트까지 함께 봅니다.";
+    "배경색과 같거나, 투명하거나, 크기가 0으로 지정되어 보이지 않는 텍스트까지 보려면 선택하세요.";
 
 /// 켜고 끄는 메뉴 항목. 켜져 있으면 앞에 체크가 붙는다. 값이 바뀌면 `true`.
 fn check_item(ui: &mut egui::Ui, value: &mut bool, label: &str, tooltip: &str) -> bool {
-    let mark = if *value { "✓ " } else { "\u{2007}\u{2007}" };
+    // 빈자리를 U+2007(FIGURE SPACE)로 두었더니 한글 대체 폰트에 그 글리프가 없어 네모 두 개로
+    // 보였다(2026-09-30 리포트). 어느 폰트에나 있는 보통 빈칸을 쓴다.
+    let mark = if *value { "✓ " } else { "   " };
     let response = ui.add(egui::SelectableLabel::new(false, format!("{mark}{label}")));
     let response = if tooltip.is_empty() { response } else { response.on_hover_text(tooltip) };
     if response.clicked() {
@@ -207,34 +209,22 @@ fn check_item(ui: &mut egui::Ui, value: &mut bool, label: &str, tooltip: &str) -
     false
 }
 
-/// OCR 표시 모드의 "투명도" 묶음 — 원본을 얼마나 가릴지 정한다.
+/// OCR 표시 모드의 "불투명도" 묶음 — 원본을 덮는 장막이 얼마나 짙은지 정한다.
 ///
-/// 0%면 원본 그대로, 100%면 원본이 보이지 않는다. 조작 방법을 셋 다 받는다(2026-09-29 요청):
-/// 슬라이더 끌기, **슬라이더 위에서 휠**, 그리고 **입력칸에 포커스가 있을 때 좌우 화살표**.
-/// 휠과 화살표는 egui가 기본으로 주지 않아 직접 받는다.
+/// 0%면 장막이 완전히 투명해 원본이 그대로 보이고, 100%면 완전히 불투명해 원본이 보이지 않는다.
+/// 슬라이더를 끌거나 **슬라이더 위에서 휠**을 굴린다(휠은 egui가 기본으로 주지 않아 직접 받는다).
 fn veil_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
-    ui.label("투명도");
-    let veil = &mut app.ocr_overlay.veil;
-    let mut value = *veil as i32;
-
+    ui.label("불투명도");
+    let mut value = app.ocr_overlay.veil as i32;
     let slider = ui.add(egui::Slider::new(&mut value, 0..=100).show_value(false));
-    // 슬라이더 위에서 휠: 위로 올리면 커진다.
     if slider.hovered() {
         let wheel = ui.input(|i| i.raw_scroll_delta.y);
         if wheel.abs() > 0.5 {
             value += wheel.signum() as i32;
         }
     }
-
-    let number = ui.add(egui::DragValue::new(&mut value).range(0..=100).suffix("%"));
-    // 입력칸에 포커스가 있으면 좌우 화살표로 1씩. DragValue는 이 키를 쓰지 않으므로 겹치지 않는다.
-    if number.has_focus() {
-        let step = ui.input(|i| {
-            i.key_pressed(egui::Key::ArrowRight) as i32 - i.key_pressed(egui::Key::ArrowLeft) as i32
-        });
-        value += step;
-    }
-    *veil = value.clamp(0, 100) as u8;
+    ui.add(egui::DragValue::new(&mut value).range(0..=100).suffix("%"));
+    app.ocr_overlay.veil = value.clamp(0, 100) as u8;
 }
 
 fn menu_item(ui: &mut egui::Ui, label: &str, enabled: bool, tooltip: &str) -> bool {
