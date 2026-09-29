@@ -172,9 +172,7 @@ enum JobKind {
     /// 폴더 일괄 삭제. 취소하면 그때 처리 중이던 파일의 임시 파일이 폴더에 남으므로, 어느
     /// 폴더를 훑어 지울지 기억해 둔다(단일 파일 작업은 `temp_output` 하나로 끝난다).
     Batch { folder: PathBuf },
-    /// `skipped`는 넣을 대상에서 미리 빠진 페이지의 이유별 개수(작업 프로세스는 이유를 모른다 —
-    /// 창에서 정한 것이다). 결과 창에도 남겨야 실행 뒤에 확인할 수 있다.
-    Import { pdf: PathBuf, skipped: String },
+    Import { pdf: PathBuf },
 }
 
 /// 북마크를 먼저 저장해야 시작할 수 있는 OCR 작업.
@@ -322,8 +320,8 @@ fn poll_events(app: &mut PdfViewerApp) {
                 app.ocr_import_dialog = Some(dialog);
             }
             WorkerPoll::Event(Event::ImportDone(report)) => {
-                let JobKind::Import { pdf, skipped } = &job.kind else { return };
-                let (pdf, skipped) = (pdf.clone(), skipped.clone());
+                let JobKind::Import { pdf } = &job.kind else { return };
+                let pdf = pdf.clone();
                 let temp = job.temp_output.take();
                 job.worker = None;
                 let outcome = if report.nothing_to_do {
@@ -339,7 +337,7 @@ fn poll_events(app: &mut PdfViewerApp) {
                     match outcome {
                         Ok(backup) => {
                             job.reveal = backup.map(|path| ("백업 위치 열기", path));
-                            job.finish(describe_import(&report, &skipped));
+                            job.finish(describe_import(&report));
                             job.marks = report.marks;
                         }
                         Err(message) => job.fail(message),
@@ -370,7 +368,7 @@ pub fn request_removal(ctx: &egui::Context, app: &mut PdfViewerApp) {
         return;
     }
     let job = Job::AnalyzeRemoval { pdf: pdf.clone() };
-    app.ocr_job = Some(OcrJob::spawn(ctx, "OCR 전체 삭제 — 분석".to_string(), &job, JobKind::AnalyzeRemoval { pdf }, None));
+    app.ocr_job = Some(OcrJob::spawn(ctx, "OCR 전체 삭제(분석)".to_string(), &job, JobKind::AnalyzeRemoval { pdf }, None));
 }
 
 /// 폴더 일괄 삭제 결과 문장.
@@ -595,10 +593,7 @@ fn finish_removal(
     // **지워 봤는데 모두 되돌린** 경우다 — 실행해 봐야 알 수 있어 여기서 말해야 한다.
     if report.nothing_to_do {
         let mut text = describe_removal(report);
-        text.headline = format!(
-            "지울 수 있는 것이 없었습니다 — 지워 본 {}쪽 모두 화면이나 보이는 텍스트가 달라져 되돌렸습니다(파일을 바꾸지 않음).",
-            report.rolled_back.len()
-        );
+        text.headline = "검증 결과 삭제할 수 있는 페이지가 없어 원본을 그대로 유지합니다.".to_string();
         return Ok((text, None));
     }
     let backup = swap_in_result(app, pdf, temp, "OCR 텍스트를 지웠습니다.", "OCR을 삭제할 수 없습니다")?;
@@ -629,12 +624,12 @@ fn swap_in_result(
     if let Err(err) = std::fs::copy(pdf, &backup) {
         let _ = std::fs::remove_file(temp);
         return Err(write_blocked(&err)
-            .unwrap_or_else(|| format!("원본 백업 실패({err}) — 원본은 바뀌지 않았습니다.")));
+            .unwrap_or_else(|| format!("원본 백업 실패({err}). 원본은 바뀌지 않았습니다.")));
     }
     if let Err(err) = std::fs::rename(temp, pdf) {
         let _ = std::fs::remove_file(temp);
         return Err(write_blocked(&err)
-            .unwrap_or_else(|| format!("파일 교체 실패({err}) — 원본은 바뀌지 않았습니다.")));
+            .unwrap_or_else(|| format!("파일 교체 실패({err}). 원본은 바뀌지 않았습니다.")));
     }
     if app.current_file.as_deref() == Some(pdf) {
         app.reload_current_document();
@@ -669,7 +664,7 @@ pub fn request_import(ctx: &egui::Context, app: &mut PdfViewerApp) {
         pdf_ocr::hocr::parse::natural_cmp(&name(a), &name(b))
     });
     let job = Job::AnalyzeImport { pdf: pdf.clone(), hocr_files: files.clone() };
-    app.ocr_job = Some(OcrJob::spawn(ctx, "OCR 가져오기 — 분석".to_string(), &job, JobKind::AnalyzeImport { pdf, files }, None));
+    app.ocr_job = Some(OcrJob::spawn(ctx, "OCR 가져오기(분석)".to_string(), &job, JobKind::AnalyzeImport { pdf, files }, None));
 }
 
 /// 한 페이지를 어떻게 할지. 넣지 않는 페이지는 이유별 개수로만 알린다 — 페이지 목록과 모드
@@ -689,8 +684,6 @@ enum SkipReason {
     Undetermined,
     /// 이미 OCR이 있는데 덮어쓰기를 껐다.
     Existing,
-    /// hOCR과 가로세로 비율이 맞지 않는다(회전된 스캔이거나 다른 파일의 hOCR).
-    Aspect,
 }
 
 fn skip_label(reason: SkipReason) -> &'static str {
@@ -698,20 +691,12 @@ fn skip_label(reason: SkipReason) -> &'static str {
         SkipReason::Digital => "디지털 페이지",
         SkipReason::Undetermined => "판단 불가",
         SkipReason::Existing => "이미 OCR이 있음",
-        SkipReason::Aspect => "가로세로 비율 불일치",
     }
 }
 
 /// 이유별 건너뛸 쪽수를 한 줄로 — "디지털 페이지 3쪽 · 판단 불가 1쪽".
-///
-/// 종횡비 불일치는 뺀다 — 그것은 쪽 번호까지 따로 알리는 경고가 있어 두 번 말하게 된다.
 fn describe_skips(skipped: &std::collections::BTreeMap<SkipReason, usize>) -> String {
-    skipped
-        .iter()
-        .filter(|(reason, _)| **reason != SkipReason::Aspect)
-        .map(|(reason, n)| format!("{} {n}쪽", skip_label(*reason)))
-        .collect::<Vec<_>>()
-        .join(" · ")
+    skipped.iter().map(|(reason, n)| format!("{} {n}쪽", skip_label(*reason))).collect::<Vec<_>>().join(" · ")
 }
 
 /// 방금 만진 칸 — 네 칸을 서로 맞출 때 기준을 정한다(→ [`ImportDialog::sync`]).
@@ -829,10 +814,10 @@ impl ImportDialog {
     }
 
     /// 페이지 하나의 결정.
-    fn plan(&self, index: usize, k: usize) -> PagePlan {
-        if !self.aspect_ok(index, k) {
-            return PagePlan::Skip(SkipReason::Aspect);
-        }
+    fn plan(&self, index: usize, _k: usize) -> PagePlan {
+        // 종횡비 불일치는 여기서 빼지 않는다 — 넣어 보고 안 되면 결과 창이 페이지마다 이유를
+        // 적는다(2026-09-29 md 지정: 우리 판정이 틀릴 수 있으므로 사용자가 밀어붙일 수 있어야
+        // 한다). 어느 페이지가 어긋났는지는 창 위쪽 경고가 이미 쪽 번호까지 알린다.
         let info = &self.analysis.pdf_pages[index];
         match info.kind {
             // 스캔이 없는 페이지에 OCR을 넣을 자리는 없다.
@@ -1026,15 +1011,20 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 let any_text_in_range =
                     with_text.iter().any(|page| *page >= dialog.hocr_first && *page <= dialog.hocr_last);
                 if !any_text_in_range {
-                    ui.colored_label(ui.visuals().warn_fg_color, "• 현재 범위에서는 가져올 OCR 텍스트가 없습니다");
+                    ui.colored_label(ui.visuals().error_fg_color, "• hOCR에 해당 범위로 가져올 정보가 없습니다.");
                 }
                 bullet(ui, "원본PDF는 같은 위치에 백업됩니다.");
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    // 가져올 글이 없으면 눌러도 "없습니다" 결과 창만 뜬다 — 아예 잠근다. 왜 못
-                    // 누르는지는 바로 위 경고가 말해 준다(2026-09-29 요청).
+                    // 잠그는 경우는 둘뿐이다(2026-09-29 md 지정): 고른 범위에 가져올 글이
+                    // 없거나, 여러 hOCR이 같은 페이지를 가리켜 대응이 밀릴 것이 뻔할 때.
+                    //
+                    // **종횡비가 맞지 않는 것으로는 잠그지 않는다.** 그 판정은 우리 쪽 추정이라
+                    // 틀릴 수 있어, "이 PDF의 hOCR이 아닌 것 같다"는 경우에도 사용자가 눌러 볼
+                    // 수 있어야 한다. 실제로 맞지 않으면 페이지마다 이유가 결과에 남는다.
                     let allowed = !insert.is_empty()
                         && any_text_in_range
+                        && dialog.analysis.duplicate_page_numbers.is_empty()
                         && (!dialog.analysis.signed || dialog.signature_ack);
                     if ui.add_enabled(allowed, egui::Button::new("가져오기")).clicked() {
                         action = Some(true);
@@ -1048,7 +1038,7 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
     match action {
         Some(true) => {
             let Some(dialog) = app.ocr_import_dialog.take() else { return };
-            let (insert_pages, overwrite_pages, skipped) = dialog.selection();
+            let (insert_pages, overwrite_pages, _) = dialog.selection();
             let temp = dialog.pdf.with_extension("ocr_tmp.pdf");
             let job = ImportJob {
                 pdf: dialog.pdf.clone(),
@@ -1064,7 +1054,7 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 ctx,
                 "OCR 가져오기".to_string(),
                 &Job::Import(job),
-                JobKind::Import { pdf: dialog.pdf, skipped: describe_skips(&skipped) },
+                JobKind::Import { pdf: dialog.pdf },
                 Some(temp),
             ));
         }
@@ -1090,40 +1080,23 @@ fn summarize_pages(pages: &[usize]) -> String {
     parts.join(", ")
 }
 
-fn describe_import(r: &ImportReport, skipped_by_plan: &str) -> Report {
+fn describe_import(r: &ImportReport) -> Report {
     let mut report = if r.nothing_to_do {
         Report::new("가져올 OCR 텍스트가 있는 페이지가 없습니다")
     } else {
         Report::new(format!("pp.{}에 OCR 텍스트를 가져왔습니다.", summarize_pages(&r.inserted)))
     };
-    if !skipped_by_plan.is_empty() {
-        report.line(format!("대상에서 뺀 페이지: {skipped_by_plan}"));
-    }
     if !r.nothing_to_do {
-        if r.pages_overwritten > 0 {
-            report.line(format!("원래 있던 OCR을 덮어씌운 페이지: {}쪽", r.pages_overwritten));
-        }
         report.line(format!("파일 크기: {} → {}", human_size(r.size_before), human_size(r.size_after)));
     }
     if !r.skipped.is_empty() {
         report.line(format!("OCR을 가져오지 못한 페이지: {}쪽", r.skipped.len()));
-        for (page, why) in r.skipped.iter().take(200) {
-            report.detail(format!("p.{page}: {why}"));
-        }
-    }
-    if !r.rolled_back.is_empty() {
-        report.line(format!("검증에서 원본과 달라 되돌린 페이지: {}쪽", r.rolled_back.len()));
-        for (page, why) in r.rolled_back.iter().take(200) {
+        for (page, why) in &r.skipped {
             report.detail(format!("p.{page}: {why}"));
         }
     }
     // "확인 권장 N쪽" 줄은 없앴다 — 바로 아래 문제지점 목록이 같은 말을 하고 있다(2026-09-29 요청).
-    if !r.also_reverted.is_empty() {
-        report.line(format!(
-            "같은 Form을 써서 함께 원래대로 둔 페이지: {}",
-            r.also_reverted.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
-        ));
-    }
+    untouched(&mut report, &r.rolled_back, &r.also_reverted, &[]);
     report
 }
 
@@ -1133,34 +1106,32 @@ fn describe_removal(r: &RemovalReport) -> Report {
     // 값은 사용자가 관심 가질 정보가 아니다. 규모는 쪽 단위로만 말한다.
     let mut report = Report::new("처리를 완료했습니다.");
     report.line(format!("파일 크기: {} → {}", human_size(r.size_before), human_size(r.size_after)));
-    if r.pruned_layers > 0 {
-        report.line(format!("빈 레이어 정리: {}개", r.pruned_layers));
-    }
-    if !r.rolled_back.is_empty() {
-        report.line(format!("검증에서 원본과 달라 되돌린 페이지: {}쪽", r.rolled_back.len()));
-        for (page, why) in r.rolled_back.iter().take(200) {
-            report.detail(format!("p.{page}: {why}"));
-        }
-    }
-    if !r.also_reverted.is_empty() {
-        report.line(format!(
-            "같은 Form을 써서 함께 원래대로 둔 페이지: {}",
-            r.also_reverted.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
-        ));
-    }
-    if !a.skipped.is_empty() {
-        report.line(format!("처리할 수 없어 그대로 둔 페이지: {}쪽", a.skipped.len()));
-        for (page, why) in a.skipped.iter().take(200) {
-            report.detail(format!("p.{page}: {why}"));
-        }
-    }
-    if !a.notes.is_empty() {
-        report.line("참고".to_string());
-        for (page, note) in a.notes.iter().take(50) {
-            report.detail(format!("p.{page}: {note}"));
-        }
-    }
+    // 되돌린 페이지·함께 되돌린 페이지·처음부터 손대지 못한 페이지는 사용자에게 같은 뜻이다
+    // ("이 쪽은 그대로 남았다"). 한 항목으로 합쳐 적는다(2026-09-29 md 지정).
+    untouched(&mut report, &r.rolled_back, &r.also_reverted, &a.skipped);
     report
+}
+
+/// "그대로 남은 페이지" 항목 하나. 세 갈래(검증에서 되돌림, 같은 Form이라 함께 되돌림, 처음부터
+/// 처리 못 함)를 쪽 번호 순으로 모은다.
+fn untouched(
+    report: &mut Report,
+    rolled_back: &[(usize, String)],
+    also_reverted: &[usize],
+    skipped: &[(usize, String)],
+) {
+    let mut rows: Vec<(usize, String)> = Vec::new();
+    rows.extend(rolled_back.iter().cloned());
+    rows.extend(also_reverted.iter().map(|page| (*page, "같은 Form을 써서 함께 되돌림".to_string())));
+    rows.extend(skipped.iter().cloned());
+    if rows.is_empty() {
+        return;
+    }
+    rows.sort_by_key(|(page, _)| *page);
+    report.line(format!("검증 결과 원본 변형이 발생하거나 처리할 수 없어 건너뛴 페이지: {}쪽", rows.len()));
+    for (page, why) in &rows {
+        report.detail(format!("p.{page}: {why}"));
+    }
 }
 
 fn human_size(bytes: u64) -> String {
@@ -1325,8 +1296,7 @@ fn start_export(ctx: &egui::Context, app: &mut PdfViewerApp, output: PathBuf) {
         ExportFormat::Hocr => "hOCR",
         ExportFormat::Txt => "txt",
     };
-    let invisible_only = dialog.invisible_only;
-    let describe = move |r: &ExportReport| describe_export(r, invisible_only);
+    let describe = move |r: &ExportReport| describe_export(r);
 
     app.ocr_job = Some(OcrJob::spawn(
         ctx,
@@ -1344,21 +1314,20 @@ fn partial_path(output: &Path) -> PathBuf {
     output.with_file_name(name)
 }
 
-fn describe_export(r: &ExportReport, invisible_only: bool) -> Report {
+fn describe_export(r: &ExportReport) -> Report {
     // 형식과 고른 범위는 창 제목·옵션에 이미 있고, 쪽·단어 수는 사용자가 관심 가질 값이
     // 아니다(2026-09-28 결정). 끝났다는 사실만 머리글로 적고, 이상이 있을 때만 줄을 더한다.
     let mut report = Report::new("내보내기를 완료했습니다.");
     if r.clamped_chars > 0 {
         report.line(format!("글자 높이가 비정상적으로 커서 보정한 글자: {}개", r.clamped_chars));
     }
+    // 페이지를 아예 열지 못한 경우다(CropBox를 못 읽거나 텍스트 페이지를 못 엶). 그 쪽은
+    // 건너뛰지 않고 **빈 쪽으로 기록**해 뒤쪽 쪽 번호가 밀리지 않게 한다.
     if !r.failed_pages.is_empty() {
-        report.line(format!("읽지 못해 빈 페이지로 기록한 페이지: {}쪽", r.failed_pages.len()));
-        for (page, reason) in r.failed_pages.iter().take(200) {
+        report.line(format!("분석하지 못한 페이지 {}쪽은 내용 없이 쪽 번호만 기록했습니다.", r.failed_pages.len()));
+        for (page, reason) in &r.failed_pages {
             report.detail(format!("p.{page}: {reason}"));
         }
-    }
-    if r.pages_with_text == 0 && invisible_only {
-        report.line("OCR 텍스트가 없습니다. '모든 텍스트'로 다시 내보내 보세요.");
     }
     report
 }
@@ -1720,6 +1689,24 @@ mod import_range_tests {
         assert_eq!(insert, vec![1]);
         assert!(overwrite.is_empty());
         assert_eq!(skipped.get(&SkipReason::Existing), Some(&1));
+    }
+
+    /// 종횡비가 맞지 않아도 대상에서 빼지 않는다 — 우리 판정이 틀릴 수 있으므로 사용자가
+    /// 밀어붙일 수 있어야 한다(2026-09-29 md 지정). 맞지 않으면 작업 프로세스가 페이지마다
+    /// 이유를 결과에 남긴다.
+    #[test]
+    fn pages_with_a_mismatched_aspect_are_still_offered() {
+        let analysis = ImportAnalysis {
+            pdf_pages: scans(2),
+            // PDF는 600×800(0.75), hOCR은 1600×1200(1.33) — 대응되는 모든 쪽이 어긋난다.
+            hocr_pages: (0..2).map(|_| HocrPageInfo { size: (1600.0, 1200.0), words: 3 }).collect(),
+            ..Default::default()
+        };
+        let d = ImportDialog::new(PathBuf::from("a.pdf"), vec![PathBuf::from("a.hocr")], analysis);
+        assert!(!d.aspect_ok(0, 0), "이 짝은 종횡비가 맞지 않아야 시험이 성립한다");
+        let (insert, _, skipped) = d.selection();
+        assert_eq!(insert, vec![0, 1], "종횡비를 이유로 빼면 안 된다");
+        assert!(skipped.is_empty(), "{skipped:?}");
     }
 
     /// 창이 정한 범위와 작업 프로세스의 대응이 같은 뜻이어야 한다.

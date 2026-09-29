@@ -736,14 +736,14 @@ fn run_folder_removal(
             Ok(result) => {
                 if let Err(err) = std::fs::copy(file, &backup) {
                     let _ = std::fs::remove_file(&temp);
-                    let reason = format!("백업 실패({err}) — 원본 그대로");
+                    let reason = format!("백업 실패({err}). 원본 그대로");
                     record!(entry.finish("실패", Some(true), reason.clone()));
                     report.failed.push((name, reason));
                     continue;
                 }
                 if let Err(err) = std::fs::rename(&temp, file) {
                     let _ = std::fs::remove_file(&temp);
-                    let reason = format!("교체 실패({err}) — 원본 그대로");
+                    let reason = format!("교체 실패({err}). 원본 그대로");
                     record!(entry.finish("실패", Some(true), reason.clone()));
                     report.failed.push((name, reason));
                     continue;

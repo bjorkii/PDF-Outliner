@@ -237,9 +237,9 @@ fn check_layers(
             rects: word_ids.iter().map(|&w| to_user(&words[w].0.rect)).collect(),
             words: word_ids.iter().map(|&w| words[w].0.text.clone()).collect(),
             note: if explained {
-                format!("같은 글자가 겹친 자리 {}곳 — 뷰어에서 하나로 합쳐 추출됨(\"{missing_text}\")", missing.len())
+                format!("같은 글자가 겹친 자리 {}곳, 뷰어에서 하나로 합쳐 추출됨(\"{missing_text}\")", missing.len())
             } else {
-                format!("넣은 글자 {}자가 추출되지 않음(\"{missing_text}\") — 페이지를 원래대로 되돌림", missing.len())
+                format!("넣은 글자 {}자가 추출되지 않음(\"{missing_text}\"), 페이지를 원래대로 되돌림", missing.len())
             },
             rolled_back: !explained,
         });
@@ -373,7 +373,7 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
             }
         };
         if lines.is_empty() {
-            report.skipped.push((index + 1, "가져올 OCR 텍스트가 없음".to_string()));
+            report.skipped.push((index + 1, "가져올 텍스트가 없음".to_string()));
             continue;
         }
         targets.push((index, page_ids[index], frame, lines));

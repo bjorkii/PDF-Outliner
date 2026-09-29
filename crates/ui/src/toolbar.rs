@@ -284,7 +284,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     ui,
                     "폴더 일괄 적용…",
                     !batch_running,
-                    "폴더 안 모든 PDF에 북마크 파일(CSV/Excel)을 적용 — 원본은 .backup으로 보존",
+                    "폴더 안 모든 PDF에 북마크 파일(CSV/Excel)을 적용합니다. 원본은 .backup으로 보존됩니다.",
                 ) {
                     if let Some(folder) =
                         crate::file_dialog::Dialog::new("북마크를 넣을 PDF가 담긴 폴더 선택").prompt("선택").pick_folder()
@@ -499,13 +499,13 @@ fn zoom_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     // 더는 같은 뜻이 아니다. 수동 줌 상태에서는 쪽 맞춤으로 돌아가는 길을 권한다.
     if app.viewport.fit == FitMode::Page {
         if icon_button(ui, draw_fit_width_icon)
-            .on_hover_text("폭 맞춤 — 페이지 폭을 뷰어 폭에")
+            .on_hover_text("폭 맞춤: 페이지 폭을 뷰어 폭에")
             .clicked()
         {
             app.viewport.fit = FitMode::Width;
         }
     } else if icon_button(ui, draw_fit_page_icon)
-        .on_hover_text("쪽 맞춤 — 페이지 전체가 보이게")
+        .on_hover_text("쪽 맞춤: 페이지 전체가 보이게")
         .clicked()
     {
         app.viewport.fit = FitMode::Page;
@@ -515,9 +515,9 @@ fn zoom_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     // 위와 달리 "현재 모드"를 아이콘으로 보여준다(사용자 명세: 연속 모드에서는
     // 연속 스크롤 아이콘, 다시 누르거나 C를 누르면 쪽 단위 아이콘으로 변경).
     let mode_response = if app.continuous_scroll {
-        icon_button(ui, draw_continuous_icon).on_hover_text("연속 스크롤 보기 중 — 누르면 쪽 단위 (C)")
+        icon_button(ui, draw_continuous_icon).on_hover_text("연속 스크롤 보기 중. 누르면 쪽 단위 (C)")
     } else {
-        icon_button(ui, draw_single_page_icon).on_hover_text("쪽 단위 보기 중 — 누르면 연속 스크롤 (C)")
+        icon_button(ui, draw_single_page_icon).on_hover_text("쪽 단위 보기 중. 누르면 연속 스크롤 (C)")
     };
     if mode_response.clicked() {
         app.toggle_continuous_scroll();

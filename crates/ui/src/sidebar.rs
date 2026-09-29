@@ -99,7 +99,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
 
                 if ui
                     .button("+")
-                    .on_hover_text("추가 (선택된 항목의 하위, 없으면 최상위) — Cmd+B")
+                    .on_hover_text("추가 (선택된 항목의 하위, 없으면 최상위) · Cmd+B")
                     .clicked()
                 {
                     add_new_bookmark(app, &mut drag_state);

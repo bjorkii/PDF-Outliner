@@ -158,7 +158,7 @@ pub fn prepare_job(folder: PathBuf) -> Result<BatchImportJob, String> {
                 // 스키마가 다른 무관한 엑셀/CSV가 섞여 있을 수 있다 — 전체를 중단하지
                 // 않고 그 파일만 건너뛰며 알린다.
                 setup_notes.push(format!(
-                    "[경고] 북마크 파일 '{}' 읽기 실패 — 무시함: {err}",
+                    "[경고] 북마크 파일 '{}'을(를) 읽지 못해 무시합니다: {err}",
                     rel_display(sheet, &folder)
                 ));
                 continue;
@@ -191,7 +191,7 @@ pub fn prepare_job(folder: PathBuf) -> Result<BatchImportJob, String> {
                 // 예전 문구("'A'의 'X.pdf' 행 4개 건너뜀")는 그 점이 드러나지 않아 읽히지
                 // 않았다(2026-09-28 사용자 지적).
                 setup_notes.push(format!(
-                    "[중복] '{name}'에 넣을 북마크가 두 파일에 있습니다 — 먼저 읽은 '{}'의 행을 적용하고 '{}'의 행 {}개는 건너뜁니다.",
+                    "[중복] '{name}'에 넣을 북마크가 두 파일에 있습니다. 먼저 읽은 '{}'의 행을 적용하고 '{}'의 행 {}개는 건너뜁니다.",
                     rel_display(first_source, &folder),
                     rel_display(sheet, &folder),
                     group.len()
@@ -375,7 +375,7 @@ fn finish(job: &mut BatchImportJob) {
 
     let stats = job.stats();
     let mut text = String::new();
-    text.push_str("PDF Outliner — 폴더 일괄 북마크 적용 로그\n");
+    text.push_str("PDF Outliner 폴더 일괄 북마크 적용 로그\n");
     text.push_str(&format!("실행 시각: {}\n", job.started_at.format("%Y-%m-%d %H:%M:%S")));
     text.push_str(&format!("대상 폴더: {}\n", job.folder.to_string_lossy().nfc().collect::<String>()));
     for sheet in &job.sheet_files {
@@ -387,7 +387,7 @@ fn finish(job: &mut BatchImportJob) {
     }
     text.push_str("----\n");
     for entry in &job.log {
-        text.push_str(&format!("[{}] {} — {}\n", entry.outcome.label(), entry.rel_path, entry.outcome.detail()));
+        text.push_str(&format!("[{}] {}: {}\n", entry.outcome.label(), entry.rel_path, entry.outcome.detail()));
     }
     text.push_str("----\n");
     text.push_str(&stats_line(&stats));
@@ -459,7 +459,7 @@ pub fn show_panel(ui: &mut egui::Ui, app: &mut crate::app::PdfViewerApp) {
         // "파일명이 일치하는 행" 한마디로는 무엇과 무엇이 맞는다는 것인지 읽히지 않았다
         // (2026-09-29 지적). 북마크 파일의 '파일명' 열과 폴더의 PDF 이름이 맞는 것을 말한다.
         ui.label(format!(
-            "폴더에서 찾은 PDF {}개 — 이 중 북마크 파일의 '파일명' 열과 이름이 맞는 {}개에 북마크를 넣습니다.",
+            "폴더에서 찾은 PDF {}개 중, 북마크 파일의 '파일명' 열과 이름이 맞는 {}개에 북마크를 넣습니다.",
             job.files.len(),
             job.matched_count
         ));
@@ -468,7 +468,7 @@ pub fn show_panel(ui: &mut egui::Ui, app: &mut crate::app::PdfViewerApp) {
             if job.matched_count == 0 {
                 ui.colored_label(
                     ui.visuals().warn_fg_color,
-                    "일치하는 파일명이 하나도 없습니다 — 시작하면 전부 건너뜁니다.",
+                    "일치하는 파일명이 하나도 없습니다. 시작하면 전부 건너뜁니다.",
                 );
             }
         }
@@ -497,7 +497,7 @@ pub fn show_panel(ui: &mut egui::Ui, app: &mut crate::app::PdfViewerApp) {
 
         if matches!(job.phase, JobPhase::Finished) {
             ui.add_space(8.0);
-            ui.strong(format!("완료 — {}", stats_line(&job.stats())));
+            ui.strong(format!("완료: {}", stats_line(&job.stats())));
             if let Some(note) = &job.log_file_note {
                 ui.label(note.clone());
             }
@@ -521,7 +521,7 @@ pub fn show_panel(ui: &mut egui::Ui, app: &mut crate::app::PdfViewerApp) {
                         };
                         ui.colored_label(
                             color,
-                            format!("[{}] {} — {}", entry.outcome.label(), entry.rel_path, entry.outcome.detail()),
+                            format!("[{}] {}: {}", entry.outcome.label(), entry.rel_path, entry.outcome.detail()),
                         );
                     }
                 });

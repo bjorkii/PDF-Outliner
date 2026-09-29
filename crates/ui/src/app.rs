@@ -701,7 +701,7 @@ impl PdfViewerApp {
             Err(err) => {
                 crate::trace::record(format_args!("파일 다시 열기 실패(다음 변경 때 재시도): {err}"));
                 self.status_message =
-                    Some("파일이 바뀌었지만 아직 열 수 없습니다 — 저장이 끝나면 다시 불러옵니다.".to_string());
+                    Some("파일이 바뀌었지만 아직 열 수 없습니다. 저장이 끝나면 다시 불러옵니다.".to_string());
                 return;
             }
         };
@@ -751,10 +751,10 @@ impl PdfViewerApp {
         ));
         let mut message = "파일이 바뀌어 다시 불러왔습니다".to_string();
         if page_gone {
-            message.push_str(" — 보던 페이지가 없어져 첫 페이지로 이동");
+            message.push_str(", 보던 페이지가 없어져 첫 페이지로 이동");
         }
         if keep_bookmark_edits {
-            message.push_str(" — 저장 안 한 북마크 편집은 그대로 유지");
+            message.push_str(", 저장 안 한 북마크 편집은 그대로 유지");
         }
         self.status_message = Some(message);
     }
@@ -940,7 +940,7 @@ impl PdfViewerApp {
             // "다른 이름으로 저장" 플로우로 유도한다(save_as_requested를 세우면
             // toolbar.rs가 저장 대화상자를 띄우고 `save_bookmarks_as`를 부른다).
             self.status_message = Some(
-                "원본 파일을 찾을 수 없습니다(이름이 바뀌었거나 이동/삭제됨) — 다른 이름으로 저장해주세요."
+                "원본 파일을 찾을 수 없습니다(이름이 바뀌었거나 이동/삭제됨). 다른 이름으로 저장해주세요."
                     .to_string(),
             );
             self.save_as_requested = true;
@@ -984,13 +984,13 @@ impl PdfViewerApp {
             Ok(_) => {
                 let _ = std::fs::remove_file(&temp_path);
                 self.status_message =
-                    Some("북마크 저장 검증 실패(페이지 수 불일치) — 원본은 보존됐습니다.".to_string());
+                    Some("북마크 저장 검증 실패(페이지 수 불일치). 원본은 보존됐습니다.".to_string());
                 false
             }
             Err(err) => {
                 let _ = std::fs::remove_file(&temp_path);
                 self.status_message =
-                    Some(format!("북마크 저장 검증 실패({err}) — 원본은 보존됐습니다."));
+                    Some(format!("북마크 저장 검증 실패({err}). 원본은 보존됐습니다."));
                 false
             }
         }
@@ -1206,7 +1206,7 @@ impl PdfViewerApp {
         self.selection_is_explicit = false;
         self.bookmarks_dirty = true;
         self.status_message =
-            Some(format!("북마크 {count}개를 지웠습니다 — 되돌리려면 Undo, PDF에 반영하려면 저장하세요."));
+            Some(format!("북마크 {count}개를 지웠습니다. 되돌리려면 Undo, PDF에 반영하려면 저장하세요."));
     }
 
     pub fn push_bookmark_undo_snapshot(&mut self) {
