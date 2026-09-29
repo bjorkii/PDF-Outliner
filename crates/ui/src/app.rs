@@ -2175,20 +2175,20 @@ fn show_saved_file_notice(ctx: &egui::Context, app: &mut PdfViewerApp) {
         .resizable(false)
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.screen_rect().center())
-        .show(ctx, |ui| {
-            ui.label(message);
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("저장 위치 열기").clicked() {
-                    if let Err(err) = reveal_in_file_manager(&path) {
-                        failed = Some(format!("저장 위치를 열 수 없습니다({err}): {}", path.display()));
+        .show(ctx, |ui| window_body(ui, |ui| {
+                ui.label(message);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("저장 위치 열기").clicked() {
+                        if let Err(err) = reveal_in_file_manager(&path) {
+                            failed = Some(format!("저장 위치를 열 수 없습니다({err}): {}", path.display()));
+                        }
                     }
-                }
-                if ui.button("닫기").clicked() {
-                    close = true;
-                }
-            });
-        });
+                    if ui.button("닫기").clicked() {
+                        close = true;
+                    }
+                });
+        }));
     if let Some(message) = failed {
         app.status_message = Some(message);
     }
@@ -2261,6 +2261,21 @@ pub(crate) fn modal_open(app: &PdfViewerApp) -> bool {
         || app.search_no_results
 }
 
+/// 팝업창 본문에 안쪽 여백을 준다.
+///
+/// **`style.spacing.window_margin`으로는 할 수 없다.** egui는 그 값을 제목 띠 높이 계산에도 쓴다
+/// — `title_bar_height = 제목 글자 높이 + (margin.top + margin.bottom)`이고 제목과 본문 사이
+/// 간격도 같은 값이다(egui `window.rs:470`). 그래서 창 여백을 키우면 제목 띠가 같이 부풀고,
+/// 위쪽만 줄이면 이번엔 제목 글자가 띠 위에 붙는다(2026-09-29 리포트, 두 번 다 확인).
+///
+/// 그래서 창 여백은 egui 기본값으로 두어 제목 띠를 그대로 두고, **본문만** 이 프레임으로 감싼다.
+pub(crate) fn window_body<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::none().inner_margin(egui::Margin::same(BODY_PADDING)).show(ui, add).inner
+}
+
+/// 본문 여백. 창 자체 여백(egui 기본 6)에 더해진다.
+const BODY_PADDING: f32 = 14.0;
+
 /// 팝업창을 Esc로 닫는다 — 눌렸으면 **소비**해서 다음 창이 같은 Esc로 함께 닫히지 않게 한다
 /// (창은 위에서 아래로 검사하므로 먼저 검사한 창이 받는다). 사용자 요청 2026-09-27.
 ///
@@ -2290,22 +2305,22 @@ fn show_unsaved_changes_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
         // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.screen_rect().center())
-        .show(ctx, |ui| {
-            ui.label("새 문서를 열면 기존 북마크 변경사항이 유실됩니다.");
-            ui.label("기존 내용을 저장하시겠습니까?");
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("저장").clicked() {
-                    app.confirm_save_then_open_pending();
-                }
-                if ui.button("저장하지 않음").clicked() {
-                    app.discard_and_open_pending();
-                }
-                if ui.button("취소").clicked() {
-                    app.cancel_pending_open();
-                }
-            });
-        });
+        .show(ctx, |ui| window_body(ui, |ui| {
+                ui.label("새 문서를 열면 기존 북마크 변경사항이 유실됩니다.");
+                ui.label("기존 내용을 저장하시겠습니까?");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("저장").clicked() {
+                        app.confirm_save_then_open_pending();
+                    }
+                    if ui.button("저장하지 않음").clicked() {
+                        app.discard_and_open_pending();
+                    }
+                    if ui.button("취소").clicked() {
+                        app.cancel_pending_open();
+                    }
+                });
+        }));
 }
 
 /// "이전 세션이 비정상 종료된 것으로 보입니다" 복구 확인창. 시작 시
@@ -2330,21 +2345,21 @@ fn show_crash_recovery_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
         // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.screen_rect().center())
-        .show(ctx, |ui| {
-            ui.label("이전 실행이 비정상 종료된 것으로 보입니다.");
-            ui.label(format!("문서: {file_name}"));
-            ui.label(format!("마지막 자동저장: {saved_at}"));
-            ui.label("저장되지 않았던 북마크 편집을 복구하시겠습니까?");
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("복구").clicked() {
-                    app.accept_recovery();
-                }
-                if ui.button("무시").clicked() {
-                    app.dismiss_recovery();
-                }
-            });
-        });
+        .show(ctx, |ui| window_body(ui, |ui| {
+                ui.label("이전 실행이 비정상 종료된 것으로 보입니다.");
+                ui.label(format!("문서: {file_name}"));
+                ui.label(format!("마지막 자동저장: {saved_at}"));
+                ui.label("저장되지 않았던 북마크 편집을 복구하시겠습니까?");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("복구").clicked() {
+                        app.accept_recovery();
+                    }
+                    if ui.button("무시").clicked() {
+                        app.dismiss_recovery();
+                    }
+                });
+        }));
 }
 
 /// "저장하시겠습니까?" 종료 확인창. 저장 안 된 북마크 변경사항이 있는 채로 앱을
@@ -2367,22 +2382,22 @@ fn show_quit_confirmation_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
         // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.screen_rect().center())
-        .show(ctx, |ui| {
-            ui.label("앱을 종료하면 기존 북마크 변경사항이 유실됩니다.");
-            ui.label("기존 내용을 저장하시겠습니까?");
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("저장").clicked() {
-                    app.confirm_save_then_quit(ctx);
-                }
-                if ui.button("저장하지 않음").clicked() {
-                    app.discard_and_quit(ctx);
-                }
-                if ui.button("취소").clicked() {
-                    app.cancel_quit();
-                }
-            });
-        });
+        .show(ctx, |ui| window_body(ui, |ui| {
+                ui.label("앱을 종료하면 기존 북마크 변경사항이 유실됩니다.");
+                ui.label("기존 내용을 저장하시겠습니까?");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("저장").clicked() {
+                        app.confirm_save_then_quit(ctx);
+                    }
+                    if ui.button("저장하지 않음").clicked() {
+                        app.discard_and_quit(ctx);
+                    }
+                    if ui.button("취소").clicked() {
+                        app.cancel_quit();
+                    }
+                });
+        }));
 }
 
 /// "일치하는 결과가 없습니다" 검색 결과 없음 알림. Enter(app.rs 전역 처리) 또는 이 창의
@@ -2404,13 +2419,13 @@ fn show_search_no_results_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
         // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.screen_rect().center())
-        .show(ctx, |ui| {
-            ui.label("일치하는 결과가 없습니다.");
-            ui.add_space(8.0);
-            if ui.button("확인").clicked() {
-                app.dismiss_search_no_results();
-            }
-        });
+        .show(ctx, |ui| window_body(ui, |ui| {
+                ui.label("일치하는 결과가 없습니다.");
+                ui.add_space(8.0);
+                if ui.button("확인").clicked() {
+                    app.dismiss_search_no_results();
+                }
+        }));
 }
 
 /// "파일명 변경" 창(파일 메뉴 또는 F2). 확장자(.pdf)는 빼고 보여 주고, 입력에 없으면
@@ -2436,33 +2451,33 @@ fn show_rename_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
         .resizable(false)
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.screen_rect().center())
-        .show(ctx, |ui| {
-            ui.set_min_width(360.0);
-            if let Some(path) = app.current_file.as_deref().and_then(|p| p.parent()) {
-                ui.weak(format!("폴더: {}", display_filename(path)));
-            }
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut name).id(field_id).desired_width(f32::INFINITY),
-            );
-            // 창이 떠 있는 동안 입력칸이 포커스를 쥔다. "포커스가 빈 경우에만 요청"으로
-            // 했더니 툴바 검색창 같은 다른 위젯이 포커스를 들고 있을 때 타이핑도 Enter도
-            // 이 창에 오지 않았다(2026-09-27 리포트). Enter로 포커스를 놓는 순간에도
-            // 곧바로 되찾아야 하므로 매 프레임 확인한다.
-            if ui.memory(|m| m.focused()) != Some(field_id) {
-                response.request_focus();
-            }
-            if response.changed() {
-                error = None;
-            }
-            if let Some(message) = &error {
-                ui.colored_label(ui.visuals().error_fg_color, message);
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                confirm = ui.button("변경").clicked() || enter;
-                cancel = ui.button("취소").clicked() || escape;
-            });
-        });
+        .show(ctx, |ui| window_body(ui, |ui| {
+                ui.set_min_width(360.0);
+                if let Some(path) = app.current_file.as_deref().and_then(|p| p.parent()) {
+                    ui.weak(format!("폴더: {}", display_filename(path)));
+                }
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut name).id(field_id).desired_width(f32::INFINITY),
+                );
+                // 창이 떠 있는 동안 입력칸이 포커스를 쥔다. "포커스가 빈 경우에만 요청"으로
+                // 했더니 툴바 검색창 같은 다른 위젯이 포커스를 들고 있을 때 타이핑도 Enter도
+                // 이 창에 오지 않았다(2026-09-27 리포트). Enter로 포커스를 놓는 순간에도
+                // 곧바로 되찾아야 하므로 매 프레임 확인한다.
+                if ui.memory(|m| m.focused()) != Some(field_id) {
+                    response.request_focus();
+                }
+                if response.changed() {
+                    error = None;
+                }
+                if let Some(message) = &error {
+                    ui.colored_label(ui.visuals().error_fg_color, message);
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    confirm = ui.button("변경").clicked() || enter;
+                    cancel = ui.button("취소").clicked() || escape;
+                });
+        }));
 
     if cancel {
         return; // take()로 이미 비웠으니 창이 닫힌다
@@ -2496,20 +2511,20 @@ fn show_clear_bookmarks_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
         // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.screen_rect().center())
-        .show(ctx, |ui| {
-            ui.label(format!("이 문서의 북마크 {count}개를 모두 지웁니다."));
-            ui.weak("되돌리기(Undo)로 복구할 수 있고, PDF에 반영하려면 저장해야 합니다.");
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("전체 삭제").clicked() {
-                    app.clear_bookmarks();
-                    app.clear_bookmarks_pending = false;
-                }
-                if ui.button("취소").clicked() {
-                    app.clear_bookmarks_pending = false;
-                }
-            });
-        });
+        .show(ctx, |ui| window_body(ui, |ui| {
+                ui.label(format!("이 문서의 북마크 {count}개를 모두 지웁니다."));
+                ui.weak("되돌리기(Undo)로 복구할 수 있고, PDF에 반영하려면 저장해야 합니다.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("전체 삭제").clicked() {
+                        app.clear_bookmarks();
+                        app.clear_bookmarks_pending = false;
+                    }
+                    if ui.button("취소").clicked() {
+                        app.clear_bookmarks_pending = false;
+                    }
+                });
+        }));
 }
 
 impl eframe::App for PdfViewerApp {

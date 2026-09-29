@@ -15,30 +15,16 @@ const CANDIDATES: &[&str] = &[
     "/usr/share/fonts/truetype/noto/NotoSansCJKkr-Regular.otf",
 ];
 
-/// 팝업창 안쪽 여백. egui 기본값(6)은 글이 창 테두리에 닿아 답답했다(2026-09-29 요청).
-/// 모든 `egui::Window`가 `style.spacing.window_margin`을 쓰므로 여기 한 번만 주면 된다.
+/// 앱 전체에 한 번 정하는 모양새.
 ///
-/// **위쪽만 기본값(6)으로 둔다.** 이 여백은 창 테두리와 내용 사이가 아니라 제목 글자 **위**에도
-/// 그대로 붙어서, 20을 주면 제목 띠가 두껍게 부풀어 어색해진다(2026-09-29 리포트). 제목 아래
-/// 본문의 위쪽 간격은 egui가 제목줄과 구분선으로 이미 만들어 준다.
-const WINDOW_MARGIN: f32 = 20.0;
-const WINDOW_MARGIN_TOP: f32 = 6.0;
-
-/// 창 여백처럼 앱 전체에 한 번 정하는 모양새.
-///
-/// **`style_mut`이 아니라 `all_styles_mut`을 쓴다.** egui 0.29는 밝은 테마와 어두운 테마의
-/// `Style`을 따로 들고 있어서(`context.rs:1790`), `style_mut`은 **지금 테마 하나에만** 닿는다.
-/// 시작할 때 한 번 주고 마는 값은 두 테마 모두에 넣어야 한다 — 그래서 여백을 줬는데도 창이
-/// 여전히 조여 보였다(2026-09-29 리포트).
+/// **창 여백(`window_margin`)은 건드리지 않는다.** egui는 그 값으로 제목 띠 높이까지 계산해서
+/// (`window.rs:470`), 키우면 제목 띠가 부풀고 위쪽만 줄이면 제목 글자가 띠 위에 붙는다
+/// (2026-09-29, 두 번 다 화면에서 확인). 본문 여백은 창마다 `app::window_body`로 준다.
 pub fn install_style(ctx: &egui::Context) {
+    // egui 0.29는 밝은 테마와 어두운 테마의 `Style`을 따로 들고 있어서(`context.rs:1790`)
+    // `style_mut`은 지금 테마 하나에만 닿는다. 시작할 때 한 번 주는 값은 둘 다 채운다.
     ctx.all_styles_mut(|style| {
-        style.spacing.window_margin = egui::Margin {
-            left: WINDOW_MARGIN,
-            right: WINDOW_MARGIN,
-            top: WINDOW_MARGIN_TOP,
-            bottom: WINDOW_MARGIN,
-        };
-        // 창 안의 줄 사이도 조금 벌린다 — 기본값(4)은 문장이 여러 줄 이어질 때 답답하다.
+        // 창 안의 줄 사이를 조금 벌린다 — 기본값(4)은 문장이 여러 줄 이어질 때 답답하다.
         style.spacing.item_spacing.y = 6.0;
     });
 }

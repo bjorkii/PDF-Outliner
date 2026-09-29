@@ -423,19 +423,19 @@ fn show_needs_save_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
         // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.screen_rect().center())
-        .show(ctx, |ui| {
-            ui.label("저장하지 않은 북마크 변경사항이 있습니다.");
-            ui.label(format!("{what}는 파일을 새로 쓰므로 북마크를 먼저 PDF에 저장해야 합니다."));
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("저장 후 계속").clicked() {
-                    action = Some(true);
-                }
-                if ui.button("취소").clicked() {
-                    action = Some(false);
-                }
-            });
-        });
+        .show(ctx, |ui| crate::app::window_body(ui, |ui| {
+                ui.label("저장하지 않은 북마크 변경사항이 있습니다.");
+                ui.label(format!("{what}는 파일을 새로 쓰므로 북마크를 먼저 PDF에 저장해야 합니다."));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("저장 후 계속").clicked() {
+                        action = Some(true);
+                    }
+                    if ui.button("취소").clicked() {
+                        action = Some(false);
+                    }
+                });
+        }));
     match action {
         Some(true) => {
             app.ocr_needs_save = None;
@@ -497,73 +497,73 @@ fn show_removal_confirm(ctx: &egui::Context, app: &mut PdfViewerApp) {
         // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.screen_rect().center())
-        .show(ctx, |ui| {
-            ui.set_max_width(460.0);
-            let removed = a.counts.removed() + a.own_layer_pages;
-            if removed == 0 {
-                ui.label("삭제할 OCR 텍스트 정보가 없습니다.");
-            } else {
-                headline(ui, format!(
-                    "{}쪽 중 OCR 텍스트가 있는 것으로 판정된 {}쪽의 텍스트 정보를 지웁니다.",
-                    a.pages, a.pages_with_hidden_text
-                ));
-                headline(ui, "원본파일은 같은 위치에 백업됩니다.");
-                // 형태별 개수는 적지 않는다(2026-09-28 결정) — 지울 대상이 OCR 텍스트 하나뿐이라
-                // 형태를 나눠 셀 것이 없고, 글자 수는 사용자가 관심 가질 정보가 아니다.
-                ui.add_space(10.0);
-                bullet(ui, "각 페이지마다 OCR 텍스트를 지운 뒤 원본과 외관을 비교해 차이가 발생할 경우 해당 부분만 원상복구합니다.");
-            }
-            if !a.skipped.is_empty() {
-                ui.add_space(6.0);
-                bullet(ui, format!("처리할 수 없어 원본 그대로 유지해야 하는 페이지가 {}쪽 있습니다.", a.skipped.len()));
-                for (page, reason) in a.skipped.iter().take(5) {
-                    bullet(ui, format!("  p.{page}: {reason}"));
+        .show(ctx, |ui| crate::app::window_body(ui, |ui| {
+                ui.set_max_width(460.0);
+                let removed = a.counts.removed() + a.own_layer_pages;
+                if removed == 0 {
+                    ui.label("삭제할 OCR 텍스트 정보가 없습니다.");
+                } else {
+                    headline(ui, format!(
+                        "{}쪽 중 OCR 텍스트가 있는 것으로 판정된 {}쪽의 텍스트 정보를 지웁니다.",
+                        a.pages, a.pages_with_hidden_text
+                    ));
+                    headline(ui, "원본파일은 같은 위치에 백업됩니다.");
+                    // 형태별 개수는 적지 않는다(2026-09-28 결정) — 지울 대상이 OCR 텍스트 하나뿐이라
+                    // 형태를 나눠 셀 것이 없고, 글자 수는 사용자가 관심 가질 정보가 아니다.
+                    ui.add_space(10.0);
+                    bullet(ui, "각 페이지마다 OCR 텍스트를 지운 뒤 원본과 외관을 비교해 차이가 발생할 경우 해당 부분만 원상복구합니다.");
                 }
-                if a.skipped.len() > 5 {
-                    bullet(ui, "  …");
-                }
-            }
-            // OCR 텍스트 기준이 "이미지 영역 안이거나 걸친 3 Tr"이라, 같은 자리에 그렇게 넣은
-            // 다른 텍스트(워터마크 자리표시자, 접근성용 텍스트 레이어)는 OCR이 만든 것과 구분할
-            // 방법이 없다. 함께 지워진다는 사실을 알려 준다(2026-09-28 요청).
-            if removed > 0 {
-                ui.add_space(6.0);
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    "• 이 앱에서 추가하지 않은 대체텍스트, 워터마크가 있을 경우 함께 삭제될 수 있습니다.",
-                );
-            }
-
-            ui.add_space(6.0);
-            if a.signed {
-                ui.colored_label(ui.visuals().warn_fg_color, "• 디지털 서명된 PDF입니다. 파일을 새로 쓰면 서명이 무효가 됩니다.");
-                ui.checkbox(&mut confirm.signature_ack, "그래도 진행합니다.");
-            }
-            if a.tagged {
-                bullet(ui, "스크린 리더용 태그가 있는 PDF입니다. 처리 후에는 읽기 기능이 작동하지 않습니다.");
-            }
-            if let Some(pdfa) = &a.pdfa {
-                bullet(ui, pdfa_note(pdfa));
-            }
-            if a.linearized {
-                bullet(ui, "빠른 웹 보기(선형화)가 해제됩니다.");
-            }
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if removed > 0 {
-                    let allowed = !a.signed || confirm.signature_ack;
-                    if ui.add_enabled(allowed, egui::Button::new("삭제")).clicked() {
-                        action = Some(true);
+                if !a.skipped.is_empty() {
+                    ui.add_space(6.0);
+                    bullet(ui, format!("처리할 수 없어 원본 그대로 유지해야 하는 페이지가 {}쪽 있습니다.", a.skipped.len()));
+                    for (page, reason) in a.skipped.iter().take(5) {
+                        bullet(ui, format!("  p.{page}: {reason}"));
                     }
-                    if ui.button("취소").clicked() {
+                    if a.skipped.len() > 5 {
+                        bullet(ui, "  …");
+                    }
+                }
+                // OCR 텍스트 기준이 "이미지 영역 안이거나 걸친 3 Tr"이라, 같은 자리에 그렇게 넣은
+                // 다른 텍스트(워터마크 자리표시자, 접근성용 텍스트 레이어)는 OCR이 만든 것과 구분할
+                // 방법이 없다. 함께 지워진다는 사실을 알려 준다(2026-09-28 요청).
+                if removed > 0 {
+                    ui.add_space(6.0);
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "• 이 앱에서 추가하지 않은 대체텍스트, 워터마크가 있을 경우 함께 삭제될 수 있습니다.",
+                    );
+                }
+
+                ui.add_space(6.0);
+                if a.signed {
+                    ui.colored_label(ui.visuals().warn_fg_color, "• 디지털 서명된 PDF입니다. 파일을 새로 쓰면 서명이 무효가 됩니다.");
+                    ui.checkbox(&mut confirm.signature_ack, "그래도 진행합니다.");
+                }
+                if a.tagged {
+                    bullet(ui, "스크린 리더용 태그가 있는 PDF입니다. 처리 후에는 읽기 기능이 작동하지 않습니다.");
+                }
+                if let Some(pdfa) = &a.pdfa {
+                    bullet(ui, pdfa_note(pdfa));
+                }
+                if a.linearized {
+                    bullet(ui, "빠른 웹 보기(선형화)가 해제됩니다.");
+                }
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if removed > 0 {
+                        let allowed = !a.signed || confirm.signature_ack;
+                        if ui.add_enabled(allowed, egui::Button::new("삭제")).clicked() {
+                            action = Some(true);
+                        }
+                        if ui.button("취소").clicked() {
+                            action = Some(false);
+                        }
+                    } else if ui.button("닫기").clicked() {
                         action = Some(false);
                     }
-                } else if ui.button("닫기").clicked() {
-                    action = Some(false);
-                }
-            });
-        });
+                });
+        }));
 
     match action {
         Some(true) => {
@@ -885,165 +885,165 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
         // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.screen_rect().center())
-        .show(ctx, |ui| {
-            ui.set_max_width(520.0);
-            let (hocr_count, pdf_count) = (dialog.hocr_count(), dialog.pdf_count());
-            // 글이 들어 있는 hOCR 쪽 번호(1부터) — 머리말과 아래 "현재 범위" 안내가 함께 쓴다.
-            let with_text: Vec<usize> = dialog
-                .analysis
-                .hocr_pages
-                .iter()
-                .enumerate()
-                .filter(|(_, page)| page.words > 0)
-                .map(|(index, _)| index + 1)
-                .collect();
-            {
-                let a = &dialog.analysis;
-                // 쪽 수와 **텍스트가 있는 쪽 수**는 다르다. 빈 쪽이 섞인 hOCR에서 전체 쪽수만
-                // 적으면 그만큼 가져올 것이 있다고 읽힌다(2026-09-29 리포트: 22~24쪽에만 글이
-                // 있는 파일인데 "총 24쪽의 OCR 텍스트 정보"라고 나왔다).
-                // 개수만으로는 아래 범위 칸을 어디로 맞춰야 할지 알 수 없다 — **쪽 번호**를
-                // 적는다(2026-09-29 요청).
-                ui.label(if with_text.len() == a.hocr_pages.len() {
-                    format!("hOCR에 총 {}쪽의 OCR 텍스트 정보가 담겨 있습니다.", a.hocr_pages.len())
-                } else {
-                    format!(
-                        "hOCR에 총 {}쪽이 담겨 있고, 그중 pp.{}에 OCR 텍스트가 있습니다.",
-                        a.hocr_pages.len(),
-                        summarize_pages(&with_text)
-                    )
+        .show(ctx, |ui| crate::app::window_body(ui, |ui| {
+                ui.set_max_width(520.0);
+                let (hocr_count, pdf_count) = (dialog.hocr_count(), dialog.pdf_count());
+                // 글이 들어 있는 hOCR 쪽 번호(1부터) — 머리말과 아래 "현재 범위" 안내가 함께 쓴다.
+                let with_text: Vec<usize> = dialog
+                    .analysis
+                    .hocr_pages
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, page)| page.words > 0)
+                    .map(|(index, _)| index + 1)
+                    .collect();
+                {
+                    let a = &dialog.analysis;
+                    // 쪽 수와 **텍스트가 있는 쪽 수**는 다르다. 빈 쪽이 섞인 hOCR에서 전체 쪽수만
+                    // 적으면 그만큼 가져올 것이 있다고 읽힌다(2026-09-29 리포트: 22~24쪽에만 글이
+                    // 있는 파일인데 "총 24쪽의 OCR 텍스트 정보"라고 나왔다).
+                    // 개수만으로는 아래 범위 칸을 어디로 맞춰야 할지 알 수 없다 — **쪽 번호**를
+                    // 적는다(2026-09-29 요청).
+                    ui.label(if with_text.len() == a.hocr_pages.len() {
+                        format!("hOCR에 총 {}쪽의 OCR 텍스트 정보가 담겨 있습니다.", a.hocr_pages.len())
+                    } else {
+                        format!(
+                            "hOCR에 총 {}쪽이 담겨 있고, 그중 pp.{}에 OCR 텍스트가 있습니다.",
+                            a.hocr_pages.len(),
+                            summarize_pages(&with_text)
+                        )
+                    });
+                    if a.dropped_items + a.empty_words > 0 {
+                        bullet(ui, format!(
+                            "이 중 위치 정보가 없거나 비어 있는 {}개 항목은 제외합니다.",
+                            a.dropped_items + a.empty_words
+                        ));
+                    }
+                    // 같은 페이지의 hOCR을 여러 개 골랐을 때 — 중복이 페이지 하나씩 차지해 뒤의 대응이
+                    // 통째로 밀리므로, 조용히 넘기지 않고 짚어 준다(2026-09-27 요청).
+                    if !a.duplicate_page_numbers.is_empty() {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            format!(
+                                "• 여러 개의 hOCR 파일이 같은 페이지(p.{})를 가리키고 있습니다.",
+                                summarize_pages(&a.duplicate_page_numbers)
+                            ),
+                        );
+                    }
+                }
+
+                // 페이지 범위: hOCR 어디부터 어디까지를 PDF 어디부터 어디까지에 넣을지. 네 칸은 서로
+                // 묶여 있어(쪽수가 같아야 한다) 한 칸을 고치면 나머지가 따라온다(→ `ImportDialog::sync`).
+                ui.add_space(6.0);
+                let count_before = dialog.count();
+                let mut edited = None;
+                ui.horizontal(|ui| {
+                    // 이 창에서 제일 큰 글씨 — 사용자가 손댈 곳이 여기뿐이다(2026-09-28 요청).
+                    // DragValue의 글씨는 Button 텍스트 스타일을 따르므로 그쪽도 함께 키운다.
+                    ui.style_mut()
+                        .text_styles
+                        .insert(egui::TextStyle::Button, egui::FontId::proportional(RANGE_SIZE));
+                    // "pp."와 입력칸이 벌어져 보였다 — 이 행만 기본 간격을 좁힌다.
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    let big = |text: &str| egui::RichText::new(text).size(RANGE_SIZE);
+                    ui.label(big("hOCR pp."));
+                    if ui.add(egui::DragValue::new(&mut dialog.hocr_first).range(1..=hocr_count)).changed() {
+                        edited = Some(Field::HocrFirst);
+                    }
+                    ui.label(big("-"));
+                    if ui.add(egui::DragValue::new(&mut dialog.hocr_last).range(1..=hocr_count)).changed() {
+                        edited = Some(Field::HocrLast);
+                    }
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("➜").size(RANGE_SIZE + 3.0).strong());
+                    ui.add_space(8.0);
+                    ui.label(big("PDF pp."));
+                    if ui.add(egui::DragValue::new(&mut dialog.pdf_first).range(1..=pdf_count)).changed() {
+                        edited = Some(Field::PdfFirst);
+                    }
+                    ui.label(big("-"));
+                    if ui.add(egui::DragValue::new(&mut dialog.pdf_last).range(1..=pdf_count)).changed() {
+                        edited = Some(Field::PdfLast);
+                    }
                 });
-                if a.dropped_items + a.empty_words > 0 {
-                    bullet(ui, format!(
-                        "이 중 위치 정보가 없거나 비어 있는 {}개 항목은 제외합니다.",
-                        a.dropped_items + a.empty_words
-                    ));
+                if let Some(field) = edited {
+                    dialog.sync(field, count_before);
                 }
-                // 같은 페이지의 hOCR을 여러 개 골랐을 때 — 중복이 페이지 하나씩 차지해 뒤의 대응이
-                // 통째로 밀리므로, 조용히 넘기지 않고 짚어 준다(2026-09-27 요청).
-                if !a.duplicate_page_numbers.is_empty() {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        format!(
-                            "• 여러 개의 hOCR 파일이 같은 페이지(p.{})를 가리키고 있습니다.",
-                            summarize_pages(&a.duplicate_page_numbers)
-                        ),
-                    );
-                }
-            }
 
-            // 페이지 범위: hOCR 어디부터 어디까지를 PDF 어디부터 어디까지에 넣을지. 네 칸은 서로
-            // 묶여 있어(쪽수가 같아야 한다) 한 칸을 고치면 나머지가 따라온다(→ `ImportDialog::sync`).
-            ui.add_space(6.0);
-            let count_before = dialog.count();
-            let mut edited = None;
-            ui.horizontal(|ui| {
-                // 이 창에서 제일 큰 글씨 — 사용자가 손댈 곳이 여기뿐이다(2026-09-28 요청).
-                // DragValue의 글씨는 Button 텍스트 스타일을 따르므로 그쪽도 함께 키운다.
-                ui.style_mut()
-                    .text_styles
-                    .insert(egui::TextStyle::Button, egui::FontId::proportional(RANGE_SIZE));
-                // "pp."와 입력칸이 벌어져 보였다 — 이 행만 기본 간격을 좁힌다.
-                ui.spacing_mut().item_spacing.x = 3.0;
-                let big = |text: &str| egui::RichText::new(text).size(RANGE_SIZE);
-                ui.label(big("hOCR pp."));
-                if ui.add(egui::DragValue::new(&mut dialog.hocr_first).range(1..=hocr_count)).changed() {
-                    edited = Some(Field::HocrFirst);
+                let mapped = dialog.mapped();
+                let bad_aspect: Vec<usize> = mapped.iter().filter(|(i, k)| !dialog.aspect_ok(*i, *k)).map(|(i, _)| i + 1).collect();
+                if !bad_aspect.is_empty() {
+                    ui.add_space(8.0); // 입력 폼에 붙어 읽히지 않게(2026-09-28 요청)
+                    // 대응되는 **모든** 페이지가 어긋나면 회전이나 한두 쪽의 문제가 아니라 아예 다른
+                    // PDF의 hOCR일 가능성이 크다 — 그때는 다른 문장으로 말한다(2026-09-27 요청).
+                    if bad_aspect.len() == mapped.len() {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            "• 이 PDF의 hOCR이 아닌 것 같습니다. 대응되는 모든 페이지의 종횡비가 맞지 않습니다.",
+                        );
+                    } else {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            format!(
+                                "• 다음 페이지는 페이지가 회전됐거나 종횡비가 맞지 않아 건너뜁니다: p.{}",
+                                summarize_pages(&bad_aspect)
+                            ),
+                        );
+                    }
                 }
-                ui.label(big("-"));
-                if ui.add(egui::DragValue::new(&mut dialog.hocr_last).range(1..=hocr_count)).changed() {
-                    edited = Some(Field::HocrLast);
+
+                // 페이지 분류별 개수는 적지 않는다(2026-09-28 결정) — 분류 이름을 알아도 사용자가
+                // 할 일이 없다. 대신 아래에 "빠지는 페이지"만 이유별로 센다.
+                ui.add_space(6.0);
+                ui.checkbox(&mut dialog.overwrite_existing, "원래 OCR이 있는 페이지는 덮어씌움");
+
+                {
+                    let a = &dialog.analysis;
+                    if a.signed {
+                        ui.colored_label(ui.visuals().warn_fg_color, "• 디지털 서명된 PDF입니다. 파일을 새로 쓰면 서명이 무효가 됩니다.");
+                        ui.checkbox(&mut dialog.signature_ack, "그래도 진행합니다.");
+                    }
+                    if a.tagged {
+                        bullet(ui, "스크린 리더용 태그가 있는 PDF입니다. 가져온 OCR 텍스트는 태그에 영향을 미치지 않습니다.");
+                    }
+                    if let Some(pdfa) = &a.pdfa {
+                        bullet(ui, pdfa_note(pdfa));
+                    }
                 }
+
+                // 덮어쓸 쪽수는 창에 적지 않는다(2026-09-28 요청) — 체크박스로 이미 말했다.
+                let (insert, _, skipped) = dialog.selection();
+                ui.add_space(6.0);
+                // 페이지 목록이 없으니(2026-09-28 개편) 빠지는 페이지는 이유별 개수로 알린다 —
+                // 조용히 빠지면 사용자가 알 길이 없다. 종횡비 불일치는 위에서 이미 쪽 번호까지
+                // 알렸으므로 여기서 또 세지 않는다(2026-09-28 요청).
+                let notable = describe_skips(&skipped);
+                if !notable.is_empty() {
+                    bullet(ui, format!("건너뛰는 페이지: {notable}"));
+                }
+                // 범위를 글이 없는 쪽으로만 맞춰 두면 눌러 봐야 아무 일도 일어나지 않는다 —
+                // 누르기 전에 말해 준다(2026-09-29 요청).
+                let any_text_in_range =
+                    with_text.iter().any(|page| *page >= dialog.hocr_first && *page <= dialog.hocr_last);
+                if !any_text_in_range {
+                    ui.colored_label(ui.visuals().warn_fg_color, "• 현재 범위에서는 가져올 OCR 텍스트가 없습니다");
+                }
+                bullet(ui, "원본PDF는 같은 위치에 백업됩니다.");
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("➜").size(RANGE_SIZE + 3.0).strong());
-                ui.add_space(8.0);
-                ui.label(big("PDF pp."));
-                if ui.add(egui::DragValue::new(&mut dialog.pdf_first).range(1..=pdf_count)).changed() {
-                    edited = Some(Field::PdfFirst);
-                }
-                ui.label(big("-"));
-                if ui.add(egui::DragValue::new(&mut dialog.pdf_last).range(1..=pdf_count)).changed() {
-                    edited = Some(Field::PdfLast);
-                }
-            });
-            if let Some(field) = edited {
-                dialog.sync(field, count_before);
-            }
-
-            let mapped = dialog.mapped();
-            let bad_aspect: Vec<usize> = mapped.iter().filter(|(i, k)| !dialog.aspect_ok(*i, *k)).map(|(i, _)| i + 1).collect();
-            if !bad_aspect.is_empty() {
-                ui.add_space(8.0); // 입력 폼에 붙어 읽히지 않게(2026-09-28 요청)
-                // 대응되는 **모든** 페이지가 어긋나면 회전이나 한두 쪽의 문제가 아니라 아예 다른
-                // PDF의 hOCR일 가능성이 크다 — 그때는 다른 문장으로 말한다(2026-09-27 요청).
-                if bad_aspect.len() == mapped.len() {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        "• 이 PDF의 hOCR이 아닌 것 같습니다. 대응되는 모든 페이지의 종횡비가 맞지 않습니다.",
-                    );
-                } else {
-                    ui.colored_label(
-                        ui.visuals().warn_fg_color,
-                        format!(
-                            "• 다음 페이지는 페이지가 회전됐거나 종횡비가 맞지 않아 건너뜁니다: p.{}",
-                            summarize_pages(&bad_aspect)
-                        ),
-                    );
-                }
-            }
-
-            // 페이지 분류별 개수는 적지 않는다(2026-09-28 결정) — 분류 이름을 알아도 사용자가
-            // 할 일이 없다. 대신 아래에 "빠지는 페이지"만 이유별로 센다.
-            ui.add_space(6.0);
-            ui.checkbox(&mut dialog.overwrite_existing, "원래 OCR이 있는 페이지는 덮어씌움");
-
-            {
-                let a = &dialog.analysis;
-                if a.signed {
-                    ui.colored_label(ui.visuals().warn_fg_color, "• 디지털 서명된 PDF입니다. 파일을 새로 쓰면 서명이 무효가 됩니다.");
-                    ui.checkbox(&mut dialog.signature_ack, "그래도 진행합니다.");
-                }
-                if a.tagged {
-                    bullet(ui, "스크린 리더용 태그가 있는 PDF입니다. 가져온 OCR 텍스트는 태그에 영향을 미치지 않습니다.");
-                }
-                if let Some(pdfa) = &a.pdfa {
-                    bullet(ui, pdfa_note(pdfa));
-                }
-            }
-
-            // 덮어쓸 쪽수는 창에 적지 않는다(2026-09-28 요청) — 체크박스로 이미 말했다.
-            let (insert, _, skipped) = dialog.selection();
-            ui.add_space(6.0);
-            // 페이지 목록이 없으니(2026-09-28 개편) 빠지는 페이지는 이유별 개수로 알린다 —
-            // 조용히 빠지면 사용자가 알 길이 없다. 종횡비 불일치는 위에서 이미 쪽 번호까지
-            // 알렸으므로 여기서 또 세지 않는다(2026-09-28 요청).
-            let notable = describe_skips(&skipped);
-            if !notable.is_empty() {
-                bullet(ui, format!("건너뛰는 페이지: {notable}"));
-            }
-            // 범위를 글이 없는 쪽으로만 맞춰 두면 눌러 봐야 아무 일도 일어나지 않는다 —
-            // 누르기 전에 말해 준다(2026-09-29 요청).
-            let any_text_in_range =
-                with_text.iter().any(|page| *page >= dialog.hocr_first && *page <= dialog.hocr_last);
-            if !any_text_in_range {
-                ui.colored_label(ui.visuals().warn_fg_color, "• 현재 범위에서는 가져올 OCR 텍스트가 없습니다");
-            }
-            bullet(ui, "원본PDF는 같은 위치에 백업됩니다.");
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                // 가져올 글이 없으면 눌러도 "없습니다" 결과 창만 뜬다 — 아예 잠근다. 왜 못
-                // 누르는지는 바로 위 경고가 말해 준다(2026-09-29 요청).
-                let allowed = !insert.is_empty()
-                    && any_text_in_range
-                    && (!dialog.analysis.signed || dialog.signature_ack);
-                if ui.add_enabled(allowed, egui::Button::new("가져오기")).clicked() {
-                    action = Some(true);
-                }
-                if ui.button("취소").clicked() {
-                    action = Some(false);
-                }
-            });
-        });
+                ui.horizontal(|ui| {
+                    // 가져올 글이 없으면 눌러도 "없습니다" 결과 창만 뜬다 — 아예 잠근다. 왜 못
+                    // 누르는지는 바로 위 경고가 말해 준다(2026-09-29 요청).
+                    let allowed = !insert.is_empty()
+                        && any_text_in_range
+                        && (!dialog.analysis.signed || dialog.signature_ack);
+                    if ui.add_enabled(allowed, egui::Button::new("가져오기")).clicked() {
+                        action = Some(true);
+                    }
+                    if ui.button("취소").clicked() {
+                        action = Some(false);
+                    }
+                });
+        }));
 
     match action {
         Some(true) => {
@@ -1199,75 +1199,75 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
         // 처음 뜰 때만 화면 가운데에 놓고, 그 뒤 위치는 egui가 창 id로 기억한다.
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.screen_rect().center())
-        .show(ctx, |ui| {
-            // 내보낼 텍스트가 아예 없으면 **선택지를 모두 감춘다**(2026-09-27 요청) — 고를 것이
-            // 없는 화면에 잠긴 위젯만 늘어놓아 봐야 읽을 거리만 늘어난다.
-            let kinds = dialog.text_kinds;
-            let nothing_to_export = kinds.is_some_and(|k| !k.visible && !k.invisible);
-            if nothing_to_export {
-                ui.colored_label(ui.visuals().warn_fg_color, "이 문서에는 내보낼 텍스트가 없습니다.");
-            } else {
-                ui.label("내보낼 텍스트");
-                // 의미 없는 선택지는 잠근다. 확인이 끝나기 전(`None`)에는 둘 다 열어 둔다 —
-                // 그동안 사용자가 골라 진행해도 결과는 달라지지 않는다.
-                //
-                //          보이는 텍스트   보이지 않는 텍스트   →  선택지
-                //  섞여 있음      O              O             둘 다 열림
-                //  순수 스캔+OCR  ×              O             둘 다 잠금(결과가 같다)
-                //  순수 디지털    O              ×             "보이지 않는 텍스트만" 잠금(빈 파일)
-                //  텍스트 없음    ×              ×             위에서 이미 감췄다
-                let allow = |wanted: bool| kinds.is_none_or(|k| if wanted { k.invisible } else { k.visible });
-                let same_either_way = kinds.is_some_and(|k| !k.visible);
-                // 어느 쪽을 골라도 결과가 같을 때 "OCR 텍스트만"은 잠그지 않는다 — 실제로 내보낼
-                // 것이 그것이므로 고를 수 있어야 하고, 진한 글씨로 그렇다고 알린다(2026-09-28 요청).
-                ui.add_enabled_ui(allow(true), |ui| {
-                    ui.radio_value(&mut dialog.invisible_only, true, "OCR 텍스트만");
-                });
-                ui.add_enabled_ui(!same_either_way && allow(false), |ui| {
-                    ui.radio_value(&mut dialog.invisible_only, false, "모든 텍스트");
-                });
-                if same_either_way {
-                    bullet(ui, "이 문서에는 보이는 텍스트가 없어 어느 쪽을 골라도 결과가 같습니다.");
-                } else if kinds.is_some_and(|k| !k.invisible) {
-                    bullet(ui, "이 문서에는 보이지 않는 텍스트(OCR 레이어)가 없습니다.");
-                }
-                if dialog.format == ExportFormat::Txt {
-                    // 위(내보낼 텍스트 고르기)와 아래(txt 형식 다루기)는 성격이 다른 묶음이라
-                    // 눈에 보이게 띄운다(2026-09-29 요청).
-                    ui.add_space(12.0);
-                    ui.checkbox(&mut dialog.txt_page_labels, "페이지 번호 함께 표기")
-                        .on_hover_text("PDF의 페이지 레이블이 물리 번호와 다르면 === [p. 12 | xii] === 처럼 함께 적습니다.");
-                    ui.checkbox(&mut dialog.txt_crlf, "줄바꿈을 CRLF로 처리(Windows 호환)");
-                    // 폼피드는 pdftotext만 쓰는 표식이 아니다(사용자 확인, 2026-09-28).
-                    ui.checkbox(&mut dialog.txt_form_feed, "페이지 사이에 경계 표식 삽입(다른 PDF툴 호환)");
-                    ui.add_space(2.0);
-                    bullet(ui, "txt에는 위치 정보가 없어 OCR 가져오기에 쓸 수 없습니다.");
-                }
-            }
-            ui.add_space(8.0);
-            // 확인이 끝나기 전에 눌렀으면 **누른 것을 기억해 두고 답을 기다린다**(2026-09-27 요청).
-            // 그냥 진행시키면 안 된다 — 기본값이 "보이지 않는 텍스트만"이라, 순수 디지털 문서에서
-            // 빨리 누르면 빈 파일이 나온다. 버튼을 처음부터 잠그는 쪽은 택하지 않았다(창을 바로
-            // 띄운 취지가 없어진다) — 기다리는 동안 txt 옵션은 계속 만질 수 있다.
-            ui.horizontal(|ui| {
-                if dialog.start_pending {
-                    ui.spinner();
-                    ui.label("텍스트 종류 확인 중… 끝나면 이어서 진행합니다");
-                } else if ui
-                    .add_enabled(!nothing_to_export, egui::Button::new("내보내기…"))
-                    .clicked()
-                {
-                    if dialog.text_kinds.is_some() {
-                        start = true;
-                    } else {
-                        dialog.start_pending = true;
+        .show(ctx, |ui| crate::app::window_body(ui, |ui| {
+                // 내보낼 텍스트가 아예 없으면 **선택지를 모두 감춘다**(2026-09-27 요청) — 고를 것이
+                // 없는 화면에 잠긴 위젯만 늘어놓아 봐야 읽을 거리만 늘어난다.
+                let kinds = dialog.text_kinds;
+                let nothing_to_export = kinds.is_some_and(|k| !k.visible && !k.invisible);
+                if nothing_to_export {
+                    ui.colored_label(ui.visuals().warn_fg_color, "이 문서에는 내보낼 텍스트가 없습니다.");
+                } else {
+                    ui.label("내보낼 텍스트");
+                    // 의미 없는 선택지는 잠근다. 확인이 끝나기 전(`None`)에는 둘 다 열어 둔다 —
+                    // 그동안 사용자가 골라 진행해도 결과는 달라지지 않는다.
+                    //
+                    //          보이는 텍스트   보이지 않는 텍스트   →  선택지
+                    //  섞여 있음      O              O             둘 다 열림
+                    //  순수 스캔+OCR  ×              O             둘 다 잠금(결과가 같다)
+                    //  순수 디지털    O              ×             "보이지 않는 텍스트만" 잠금(빈 파일)
+                    //  텍스트 없음    ×              ×             위에서 이미 감췄다
+                    let allow = |wanted: bool| kinds.is_none_or(|k| if wanted { k.invisible } else { k.visible });
+                    let same_either_way = kinds.is_some_and(|k| !k.visible);
+                    // 어느 쪽을 골라도 결과가 같을 때 "OCR 텍스트만"은 잠그지 않는다 — 실제로 내보낼
+                    // 것이 그것이므로 고를 수 있어야 하고, 진한 글씨로 그렇다고 알린다(2026-09-28 요청).
+                    ui.add_enabled_ui(allow(true), |ui| {
+                        ui.radio_value(&mut dialog.invisible_only, true, "OCR 텍스트만");
+                    });
+                    ui.add_enabled_ui(!same_either_way && allow(false), |ui| {
+                        ui.radio_value(&mut dialog.invisible_only, false, "모든 텍스트");
+                    });
+                    if same_either_way {
+                        bullet(ui, "이 문서에는 보이는 텍스트가 없어 어느 쪽을 골라도 결과가 같습니다.");
+                    } else if kinds.is_some_and(|k| !k.invisible) {
+                        bullet(ui, "이 문서에는 보이지 않는 텍스트(OCR 레이어)가 없습니다.");
+                    }
+                    if dialog.format == ExportFormat::Txt {
+                        // 위(내보낼 텍스트 고르기)와 아래(txt 형식 다루기)는 성격이 다른 묶음이라
+                        // 눈에 보이게 띄운다(2026-09-29 요청).
+                        ui.add_space(12.0);
+                        ui.checkbox(&mut dialog.txt_page_labels, "페이지 번호 함께 표기")
+                            .on_hover_text("PDF의 페이지 레이블이 물리 번호와 다르면 === [p. 12 | xii] === 처럼 함께 적습니다.");
+                        ui.checkbox(&mut dialog.txt_crlf, "줄바꿈을 CRLF로 처리(Windows 호환)");
+                        // 폼피드는 pdftotext만 쓰는 표식이 아니다(사용자 확인, 2026-09-28).
+                        ui.checkbox(&mut dialog.txt_form_feed, "페이지 사이에 경계 표식 삽입(다른 PDF툴 호환)");
+                        ui.add_space(2.0);
+                        bullet(ui, "txt에는 위치 정보가 없어 OCR 가져오기에 쓸 수 없습니다.");
                     }
                 }
-                if ui.button("취소").clicked() {
-                    close = true;
-                }
-            });
-        });
+                ui.add_space(8.0);
+                // 확인이 끝나기 전에 눌렀으면 **누른 것을 기억해 두고 답을 기다린다**(2026-09-27 요청).
+                // 그냥 진행시키면 안 된다 — 기본값이 "보이지 않는 텍스트만"이라, 순수 디지털 문서에서
+                // 빨리 누르면 빈 파일이 나온다. 버튼을 처음부터 잠그는 쪽은 택하지 않았다(창을 바로
+                // 띄운 취지가 없어진다) — 기다리는 동안 txt 옵션은 계속 만질 수 있다.
+                ui.horizontal(|ui| {
+                    if dialog.start_pending {
+                        ui.spinner();
+                        ui.label("텍스트 종류 확인 중… 끝나면 이어서 진행합니다");
+                    } else if ui
+                        .add_enabled(!nothing_to_export, egui::Button::new("내보내기…"))
+                        .clicked()
+                    {
+                        if dialog.text_kinds.is_some() {
+                            start = true;
+                        } else {
+                            dialog.start_pending = true;
+                        }
+                    }
+                    if ui.button("취소").clicked() {
+                        close = true;
+                    }
+                });
+        }));
 
     // 기다리던 클릭 — 확인이 끝났으니 이제 시작한다. 그 사이 선택지가 잠기면서 선택이 바뀌었을 수
     // 있는데, 그게 바로 이 가드가 막으려던 것이다(빈 파일).
@@ -1480,68 +1480,68 @@ fn show_job_window(ctx: &egui::Context, app: &mut PdfViewerApp) {
         .resizable(false)
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.screen_rect().center())
-        .show(ctx, |ui| {
-            ui.set_max_width(520.0);
-            match &job.phase {
-            JobPhase::Running { done, total } => {
-                if let Some(stage) = &job.stage {
-                    ui.label(stage);
+        .show(ctx, |ui| crate::app::window_body(ui, |ui| {
+                ui.set_max_width(520.0);
+                match &job.phase {
+                JobPhase::Running { done, total } => {
+                    if let Some(stage) = &job.stage {
+                        ui.label(stage);
+                    }
+                    let fraction = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
+                    let text = if *total > 0 { format!("{done} / {total}쪽") } else { "시작하는 중…".to_string() };
+                    ui.add(egui::ProgressBar::new(fraction).text(text).desired_width(320.0));
+                    ui.add_space(8.0);
+                    if ui.button("취소").clicked() {
+                        job.cancel();
+                        close = true;
+                    }
                 }
-                let fraction = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
-                let text = if *total > 0 { format!("{done} / {total}쪽") } else { "시작하는 중…".to_string() };
-                ui.add(egui::ProgressBar::new(fraction).text(text).desired_width(320.0));
-                ui.add_space(8.0);
-                if ui.button("취소").clicked() {
-                    job.cancel();
-                    close = true;
+                JobPhase::Failed(message) => {
+                    ui.colored_label(ui.visuals().error_fg_color, "실패했습니다. 원본 PDF는 바뀌지 않았습니다.");
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                        ui.add(egui::Label::new(message.as_str()).selectable(true));
+                    });
+                    ui.add_space(8.0);
+                    buttons(ui, job, &mut reveal, &mut close, message.clone());
                 }
-            }
-            JobPhase::Failed(message) => {
-                ui.colored_label(ui.visuals().error_fg_color, "실패했습니다. 원본 PDF는 바뀌지 않았습니다.");
-                ui.add_space(4.0);
-                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    ui.add(egui::Label::new(message.as_str()).selectable(true));
-                });
-                ui.add_space(8.0);
-                buttons(ui, job, &mut reveal, &mut close, message.clone());
-            }
-            JobPhase::Finished(report) => {
-                headline(ui, report.headline.clone());
-                for (index, item) in report.items.iter().enumerate() {
-                    ui.add_space(8.0); // 항목끼리 붙어 읽히지 않게(2026-09-29 요청)
-                    bullet(ui, item.line.clone());
-                    if !item.details.is_empty() {
-                        detail_box(ui, &format!("detail_{}_{index}", job.salt), item.details.len(), |ui| {
-                            for line in &item.details {
-                                ui.label(line);
+                JobPhase::Finished(report) => {
+                    headline(ui, report.headline.clone());
+                    for (index, item) in report.items.iter().enumerate() {
+                        ui.add_space(8.0); // 항목끼리 붙어 읽히지 않게(2026-09-29 요청)
+                        bullet(ui, item.line.clone());
+                        if !item.details.is_empty() {
+                            detail_box(ui, &format!("detail_{}_{index}", job.salt), item.details.len(), |ui| {
+                                for line in &item.details {
+                                    ui.label(line);
+                                }
+                            });
+                        }
+                    }
+                    if !job.marks.is_empty() {
+                        ui.add_space(8.0);
+                        bullet(ui, "아래 지점에서 빨간 테두리로 표시된 부분은 확인을 권장합니다.");
+                        let marks = job.marks.clone();
+                        detail_box(ui, &format!("marks_{}", job.salt), marks.len(), |ui| {
+                            for mark in &marks {
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("보기").clicked() {
+                                        show_mark = Some(mark.clone());
+                                    }
+                                    let color =
+                                        if mark.rolled_back { ui.visuals().error_fg_color } else { ui.visuals().warn_fg_color };
+                                    ui.colored_label(color, format!("p.{}", mark.page));
+                                    ui.label(&mark.note);
+                                });
                             }
                         });
                     }
-                }
-                if !job.marks.is_empty() {
                     ui.add_space(8.0);
-                    bullet(ui, "아래 지점에서 빨간 테두리로 표시된 부분은 확인을 권장합니다.");
-                    let marks = job.marks.clone();
-                    detail_box(ui, &format!("marks_{}", job.salt), marks.len(), |ui| {
-                        for mark in &marks {
-                            ui.horizontal(|ui| {
-                                if ui.small_button("보기").clicked() {
-                                    show_mark = Some(mark.clone());
-                                }
-                                let color =
-                                    if mark.rolled_back { ui.visuals().error_fg_color } else { ui.visuals().warn_fg_color };
-                                ui.colored_label(color, format!("p.{}", mark.page));
-                                ui.label(&mark.note);
-                            });
-                        }
-                    });
+                    let text = report.to_text();
+                    buttons(ui, job, &mut reveal, &mut close, text);
                 }
-                ui.add_space(8.0);
-                let text = report.to_text();
-                buttons(ui, job, &mut reveal, &mut close, text);
-            }
-            }
-        });
+                }
+        }));
     if let Some(path) = reveal {
         if let Err(err) = crate::app::reveal_in_file_manager(&path) {
             app.status_message = Some(format!("위치를 열 수 없습니다({err}): {}", path.display()));
