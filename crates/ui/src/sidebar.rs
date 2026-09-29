@@ -4,10 +4,6 @@ use egui::{Id, Sense};
 use std::collections::HashSet;
 use uuid::Uuid;
 
-/// 사이드바 강조색 — 선택된 북마크 하이라이트(배경, 글자는 흰색)와 사이드바 포커스
-/// 테두리에 공통 사용(2026-07-17 사용자 확정: #69178A, egui 기본 cyan 대신).
-const SIDEBAR_ACCENT: egui::Color32 = egui::Color32::from_rgb(0x69, 0x17, 0x8A);
-
 /// 드래그 중인 노드 id와, 현재 hover 중인 대상 위에서의 드롭 위치.
 #[derive(Default, Clone)]
 pub struct DragState {
@@ -188,6 +184,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     current_selected,
                     app.selection_is_explicit,
                     scroll_to_active_once,
+                    app.colors.bookmark_selection.stroke(),
                     &mut outcome,
                 );
                 // 트리가 패널을 꽉 채우면 새로 추가된 항목(항상 형제 중 맨 끝 근처에 생김)이
@@ -340,7 +337,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
     // 폭만큼 안쪽으로 줄인다.
     if app.focus_area == crate::app::FocusArea::Sidebar {
         let panel_rect = panel_response.response.rect;
-        let stroke = egui::Stroke::new(2.0_f32, SIDEBAR_ACCENT);
+        let stroke = egui::Stroke::new(2.0_f32, app.colors.focus_border.stroke());
         ctx.layer_painter(egui::LayerId::new(
             egui::Order::PanelResizeLine,
             Id::new("sidebar_focus_border"),
@@ -399,6 +396,7 @@ fn render_nodes(
     current_selected: Option<Uuid>,
     selection_is_explicit: bool,
     scroll_to_active_once: bool,
+    selection_color: egui::Color32,
     outcome: &mut RenderOutcome,
 ) {
     let mut delete_id: Option<Uuid> = None;
@@ -515,7 +513,7 @@ fn render_nodes(
                 };
                 let label_response = egui::Frame::none()
                     .fill(if is_selected {
-                        SIDEBAR_ACCENT
+                        selection_color
                     } else {
                         egui::Color32::TRANSPARENT
                     })
@@ -655,6 +653,7 @@ fn render_nodes(
                     current_selected,
                     selection_is_explicit,
                     scroll_to_active_once,
+                    selection_color,
                     outcome,
                 );
             });

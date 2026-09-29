@@ -426,6 +426,10 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     overflow_menu(ui, app, plan);
                     ui.separator();
                 }
+                if ui.button("설정").on_hover_text("색과 로그 파일 위치를 정합니다.").clicked() {
+                    app.settings_open = true;
+                }
+                ui.separator();
                 // 단축키 안내 — 툴바 맨 오른쪽(2026-09-15 요청). on_hover_ui는 egui 기본 지연
                 // (tooltip_delay 0.5초 + 마우스가 멈출 때까지 대기)이 있어 1~2초 뒤에야 떴으므로,
                 // 마우스가 올라와 있는 동안 show_tooltip_ui를 직접 불러 즉시 띄운다. 앱 전체
@@ -470,8 +474,9 @@ impl Plan {
 fn fit_groups(ui: &egui::Ui, app: &PdfViewerApp) -> Plan {
     let separator = separator_width(ui);
     let (zoom, pages, search) = (zoom_width(ui) + separator, page_width(ui, app), search_width(ui));
-    // 단축키 라벨과 그 왼쪽 구분선은 항상 남긴다(작고, 접을 곳도 마땅치 않다).
-    let mut budget = ui.available_width() - label_width(ui, "단축키") - separator;
+    // 단축키 라벨·설정 버튼과 그 구분선들은 항상 남긴다(작고, 접을 곳도 마땅치 않다).
+    let mut budget =
+        ui.available_width() - label_width(ui, "단축키") - button_width(ui, "설정") - separator * 2.0;
     if budget >= zoom + pages + search {
         return Plan { zoom: true, pages: true, search: true };
     }

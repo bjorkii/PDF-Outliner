@@ -22,6 +22,7 @@ mod ocr_import;
 mod ocr_overlay;
 mod ocr_worker;
 mod render_worker;
+mod settings;
 mod search_panel;
 mod status_bar;
 mod texture_cache;

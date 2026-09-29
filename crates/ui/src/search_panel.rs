@@ -19,8 +19,7 @@ const HEADER_HEIGHT: f32 = 22.0;
 /// 결과 컬럼에서 일치 문자열 앞에 보여줄 문맥 글자 수 — 길면 컬럼 폭 안에서 일치 문자열이
 /// 오른쪽으로 밀려나 안 보이게 된다.
 const BEFORE_CONTEXT_SHOWN: usize = 12;
-/// 북마크 사이드바와 같은 강조색(sidebar.rs `SIDEBAR_ACCENT`, 2026-07-17 사용자 확정).
-const ACCENT: Color32 = Color32::from_rgb(0x69, 0x17, 0x8A);
+/// 북마크 사이드바와 같은 강조색을 쓴다(2026-07-17 사용자 확정). 값은 설정에서 온다.
 /// 결과 목록 안 일치 문자열 배경 — 뷰어의 검색 하이라이트(노란색)와 같은 계열.
 const MATCH_BACKGROUND: Color32 = Color32::from_rgb(255, 213, 79);
 const MIN_PAGE_COLUMN_WIDTH: f32 = 32.0;
@@ -48,7 +47,7 @@ pub fn show_docked(ctx: &egui::Context, app: &mut PdfViewerApp) {
         .rect_stroke(
             panel.response.rect.shrink(1.0),
             2.0_f32,
-            egui::Stroke::new(2.0_f32, ACCENT),
+            egui::Stroke::new(2.0_f32, app.colors.focus_border.stroke()),
         );
     }
 }
@@ -235,7 +234,9 @@ fn contents(ui: &mut egui::Ui, app: &mut PdfViewerApp, detached: bool) {
     scroll.show_rows(ui, ROW_HEIGHT, app.search_matches.len(), |ui, rows| {
         for index in rows {
             let selected = index == app.search_current_index;
-            let response = result_row(ui, &app.search_matches[index], selected, focused, page_width, &font);
+            let accent = app.colors.bookmark_selection.stroke();
+            let response =
+                result_row(ui, &app.search_matches[index], selected, focused, page_width, &font, accent);
             if response.clicked() {
                 clicked = Some(index);
             }
@@ -254,6 +255,7 @@ fn result_row(
     focused: bool,
     page_width: f32,
     font: &FontId,
+    accent: Color32,
 ) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
@@ -263,9 +265,9 @@ fn result_row(
     let visuals = ui.visuals();
     // 선택 행: 목록에 포커스가 있으면 북마크 사이드바와 같은 강조색 + 흰 글자, 없으면 옅게.
     let (background, text_color) = if selected && focused {
-        (Some(ACCENT), Color32::WHITE)
+        (Some(accent), Color32::WHITE)
     } else if selected {
-        (Some(ACCENT.gamma_multiply(0.3)), visuals.strong_text_color())
+        (Some(accent.gamma_multiply(0.3)), visuals.strong_text_color())
     } else if response.hovered() {
         (Some(visuals.widgets.hovered.weak_bg_fill), visuals.text_color())
     } else {

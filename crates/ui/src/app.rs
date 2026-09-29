@@ -396,6 +396,10 @@ pub struct PdfViewerApp {
     pub ocr_job: Option<crate::ocr_dialogs::OcrJob>,
     /// OCR 표시/숨기기 모드(F1) — 보이지 않는 텍스트를 지면 위에 꺼내 보여 준다.
     pub ocr_overlay: crate::ocr_overlay::OcrOverlay,
+    /// 사용자가 고른 색. 다음 실행에도 남는다(`COLORS_KEY`).
+    pub colors: crate::settings::Colors,
+    /// 설정 창이 떠 있는가.
+    pub settings_open: bool,
     /// 파일 하나를 만들고 끝나는 작업(북마크 내보내기)의 결과 알림 — "저장 위치 열기" 버튼 자리.
     pub saved_file_notice: Option<SavedFileNotice>,
     /// OCR 전체 삭제 확인 창(분석 결과, `ocr_dialogs`).
@@ -423,6 +427,7 @@ pub struct PdfViewerApp {
 const LAST_OPENED_FILE_KEY: &str = "last_opened_file";
 const LAST_OPENED_PAGE_KEY: &str = "last_opened_page";
 const RECENT_FILES_KEY: &str = "recent_files";
+const COLORS_KEY: &str = "colors";
 const RECENT_FILES_MAX: usize = 10;
 
 impl PdfViewerApp {
@@ -447,6 +452,12 @@ impl PdfViewerApp {
             .and_then(|s| s.get_string(RECENT_FILES_KEY))
             .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
             .map(|paths| paths.into_iter().map(PathBuf::from).collect())
+            .unwrap_or_default();
+        // 설정이 없거나 형식이 바뀌었으면 기본값으로 시작한다 — 색 때문에 앱이 안 뜨면 안 된다.
+        let colors = cc
+            .storage
+            .and_then(|s| s.get_string(COLORS_KEY))
+            .and_then(|s| serde_json::from_str::<crate::settings::Colors>(&s).ok())
             .unwrap_or_default();
 
         // 이번 세션이 자동저장 파일을 건드리기 전에 먼저 확인해야 이전 세션의 흔적을
@@ -541,6 +552,8 @@ impl PdfViewerApp {
             ocr_export_probe: None,
             ocr_job: None,
             ocr_overlay: crate::ocr_overlay::OcrOverlay::default(),
+            colors,
+            settings_open: false,
             saved_file_notice: None,
             ocr_removal_confirm: None,
             ocr_needs_save: None,
@@ -2299,6 +2312,7 @@ pub(crate) fn modal_open(app: &PdfViewerApp) -> bool {
         || app.pending_recovery.is_some()
         || app.quit_confirmation_pending
         || app.clear_bookmarks_pending
+        || app.settings_open
         || app.rename_input.is_some()
         || app.search_no_results
 }
@@ -2670,6 +2684,7 @@ impl eframe::App for PdfViewerApp {
         show_rename_dialog(ctx, self);
         show_clear_bookmarks_dialog(ctx, self);
         show_saved_file_notice(ctx, self);
+        crate::settings::show(ctx, self);
         crate::ocr_dialogs::show(ctx, self);
         crate::viewer_panel::show(ctx, self);
         // 분리된 검색 결과 창(항상 위) — 별도 OS 창이라 메인 창 레이아웃과 무관.
@@ -2695,6 +2710,9 @@ impl eframe::App for PdfViewerApp {
             .collect();
         if let Ok(json) = serde_json::to_string(&recent_as_strings) {
             storage.set_string(RECENT_FILES_KEY, json);
+        }
+        if let Ok(json) = serde_json::to_string(&self.colors) {
+            storage.set_string(COLORS_KEY, json);
         }
         crate::autosave::record(self.current_file.as_deref(), &self.bookmarks, self.bookmarks_dirty);
     }

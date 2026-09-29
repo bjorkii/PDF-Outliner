@@ -1500,11 +1500,11 @@ fn draw_ocr_overlay(ui: &egui::Ui, app: &PdfViewerApp, image_rect: egui::Rect, t
             if Some(index) == accent {
                 continue; // 맨 나중에 그려 이웃 위로 올린다
             }
-            draw_word_box(ui, *rect, word, false);
+            draw_word_box(ui, &app.colors, *rect, word, false);
         }
         if let Some(index) = accent {
             let (rect, word) = boxes[index];
-            draw_word_box(ui, rect, word, true);
+            draw_word_box(ui, &app.colors, rect, word, true);
         }
     });
 }
@@ -1513,17 +1513,24 @@ fn draw_ocr_overlay(ui: &egui::Ui, app: &PdfViewerApp, image_rect: egui::Rect, t
 ///
 /// 빽빽한 줄에서는 상자와 글자가 서로 겹쳐 무엇이 무엇인지 알 수 없다. 가리킨 하나만 불투명하게
 /// 띄워 그 문제를 푼다(2026-09-29 요청, 1안).
-fn draw_word_box(ui: &egui::Ui, rect: egui::Rect, word: &crate::ocr_overlay::Word, focused: bool) {
+fn draw_word_box(
+    ui: &egui::Ui,
+    colors: &crate::settings::Colors,
+    rect: egui::Rect,
+    word: &crate::ocr_overlay::Word,
+    focused: bool,
+) {
     // OCR 텍스트와 그 밖의 안 보이는 텍스트를 색으로 가른다. "모두 포함"에서만 둘이 섞인다.
-    let color = if focused {
-        OVERLAY_FOCUS
+    let palette = if focused {
+        colors.focus_box
     } else if word.is_ocr {
-        OVERLAY_OCR
+        colors.ocr_box
     } else {
-        OVERLAY_OTHER
+        colors.other_box
     };
-    let fill = if focused { color.gamma_multiply(0.92) } else { color.gamma_multiply(0.12) };
-    let text_color = if focused { egui::Color32::WHITE } else { color };
+    let color = palette.stroke();
+    let fill = if focused { color.gamma_multiply(0.92) } else { palette.fill() };
+    let text_color = if focused { palette.on_stroke() } else { color };
     ui.painter().rect_filled(rect, 1.0, fill);
     ui.painter().rect_stroke(rect, 1.0, egui::Stroke::new(if focused { 2.0_f32 } else { 1.0 }, color));
     // 글자는 상자 높이에 맞춰 줄이되, 너무 작아지면 읽히지 않으므로 그리지 않는다. 가리킨
@@ -1543,10 +1550,6 @@ fn draw_word_box(ui: &egui::Ui, rect: egui::Rect, word: &crate::ocr_overlay::Wor
 
 /// 글자를 그릴 최소 크기(pt). 이보다 작으면 상자만 그린다.
 const OVERLAY_MIN_TEXT: f32 = 6.0;
-const OVERLAY_OCR: egui::Color32 = egui::Color32::from_rgb(0x1f, 0x6f, 0xd0);
-const OVERLAY_OTHER: egui::Color32 = egui::Color32::from_rgb(0xc0, 0x39, 0x2b);
-/// 지금 마우스가 올라간 상자.
-const OVERLAY_FOCUS: egui::Color32 = egui::Color32::from_rgb(0x1b, 0x9e, 0x5f);
 
 #[cfg(test)]
 mod edge_flip_tests {
