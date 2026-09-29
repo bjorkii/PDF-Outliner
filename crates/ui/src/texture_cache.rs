@@ -243,6 +243,8 @@ mod tests {
         let _guard = trace::TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // 다른 테스트가 잠금 없이 남긴 기록이 쌓여 있으면 링 버퍼가 넘쳐 우리 줄이 밀릴 수 있다.
+        trace::clear();
         let ctx = egui::Context::default();
         let mut cache = PageTextureCache::default();
         let tex = texture(&ctx);
