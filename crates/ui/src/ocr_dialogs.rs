@@ -186,6 +186,10 @@ pub enum PendingOcr {
 
 /// 실행 중이거나 끝난 OCR 작업(창을 닫을 때까지 유지).
 pub struct OcrJob {
+    /// 이 작업 창만의 번호. 스크롤 위치는 egui가 **id로 기억**하므로, 창마다 다른 id를 주지
+    /// 않으면 지난 실행에서 내려 둔 자리 그대로 열린다(2026-09-29 리포트: 목록이 마지막 줄부터
+    /// 보였다).
+    salt: u64,
     title: String,
     worker: Option<WorkerHandle>,
     /// 취소·실패 시 지울 임시 파일.
@@ -229,7 +233,9 @@ impl OcrJob {
             Ok(worker) => (Some(worker), JobPhase::Running { done: 0, total: 0 }),
             Err(err) => (None, JobPhase::Failed(format!("작업 프로세스를 시작하지 못했습니다: {err}"))),
         };
-        Self { title, worker, temp_output, phase, stage: None, kind, marks: Vec::new(), reveal: None }
+        static NEXT_SALT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let salt = NEXT_SALT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self { salt, title, worker, temp_output, phase, stage: None, kind, marks: Vec::new(), reveal: None }
     }
 
     fn finish(&mut self, report: Report) {
@@ -882,18 +888,29 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
         .show(ctx, |ui| {
             ui.set_max_width(520.0);
             let (hocr_count, pdf_count) = (dialog.hocr_count(), dialog.pdf_count());
+            // 글이 들어 있는 hOCR 쪽 번호(1부터) — 머리말과 아래 "현재 범위" 안내가 함께 쓴다.
+            let with_text: Vec<usize> = dialog
+                .analysis
+                .hocr_pages
+                .iter()
+                .enumerate()
+                .filter(|(_, page)| page.words > 0)
+                .map(|(index, _)| index + 1)
+                .collect();
             {
                 let a = &dialog.analysis;
                 // 쪽 수와 **텍스트가 있는 쪽 수**는 다르다. 빈 쪽이 섞인 hOCR에서 전체 쪽수만
                 // 적으면 그만큼 가져올 것이 있다고 읽힌다(2026-09-29 리포트: 22~24쪽에만 글이
                 // 있는 파일인데 "총 24쪽의 OCR 텍스트 정보"라고 나왔다).
-                let with_text = a.hocr_pages.iter().filter(|p| p.words > 0).count();
-                ui.label(if with_text == a.hocr_pages.len() {
+                // 개수만으로는 아래 범위 칸을 어디로 맞춰야 할지 알 수 없다 — **쪽 번호**를
+                // 적는다(2026-09-29 요청).
+                ui.label(if with_text.len() == a.hocr_pages.len() {
                     format!("hOCR에 총 {}쪽의 OCR 텍스트 정보가 담겨 있습니다.", a.hocr_pages.len())
                 } else {
                     format!(
-                        "hOCR에 총 {}쪽이 담겨 있고, 그중 {with_text}쪽에 OCR 텍스트가 있습니다.",
-                        a.hocr_pages.len()
+                        "hOCR에 총 {}쪽이 담겨 있고, 그중 pp.{}에 OCR 텍스트가 있습니다.",
+                        a.hocr_pages.len(),
+                        summarize_pages(&with_text)
                     )
                 });
                 if a.dropped_items + a.empty_words > 0 {
@@ -1003,6 +1020,13 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
             let notable = describe_skips(&skipped);
             if !notable.is_empty() {
                 bullet(ui, format!("건너뛰는 페이지: {notable}"));
+            }
+            // 범위를 글이 없는 쪽으로만 맞춰 두면 눌러 봐야 아무 일도 일어나지 않는다 —
+            // 누르기 전에 말해 준다(2026-09-29 요청).
+            let any_text_in_range =
+                with_text.iter().any(|page| *page >= dialog.hocr_first && *page <= dialog.hocr_last);
+            if !any_text_in_range {
+                ui.colored_label(ui.visuals().warn_fg_color, "• 현재 범위에서는 가져올 OCR 텍스트가 없습니다");
             }
             bullet(ui, "원본PDF는 같은 위치에 백업됩니다.");
             ui.add_space(8.0);
@@ -1479,11 +1503,11 @@ fn show_job_window(ctx: &egui::Context, app: &mut PdfViewerApp) {
             }
             JobPhase::Finished(report) => {
                 headline(ui, report.headline.clone());
-                for item in &report.items {
+                for (index, item) in report.items.iter().enumerate() {
                     ui.add_space(8.0); // 항목끼리 붙어 읽히지 않게(2026-09-29 요청)
                     bullet(ui, item.line.clone());
                     if !item.details.is_empty() {
-                        detail_box(ui, "ocr_detail", item.details.len(), |ui| {
+                        detail_box(ui, &format!("detail_{}_{index}", job.salt), item.details.len(), |ui| {
                             for line in &item.details {
                                 ui.label(line);
                             }
@@ -1494,7 +1518,7 @@ fn show_job_window(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     ui.add_space(8.0);
                     bullet(ui, "아래 지점에서 빨간 테두리로 표시된 부분은 확인을 권장합니다.");
                     let marks = job.marks.clone();
-                    detail_box(ui, "ocr_marks", marks.len(), |ui| {
+                    detail_box(ui, &format!("marks_{}", job.salt), marks.len(), |ui| {
                         for mark in &marks {
                             ui.horizontal(|ui| {
                                 if ui.small_button("보기").clicked() {
