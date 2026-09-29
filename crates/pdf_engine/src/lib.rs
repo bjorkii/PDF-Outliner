@@ -45,6 +45,6 @@ impl PdfEngine {
     pub fn open_document(&self, path: &Path) -> Result<PdfDocument<'static>> {
         self.pdfium
             .load_pdf_from_file(path, None)
-            .with_context(|| format!("PDF 열기 실패: {:?}", path))
+            .with_context(|| format!("PDF 열기 실패: {}", path.display()))
     }
 }

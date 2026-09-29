@@ -849,7 +849,9 @@ impl PdfViewerApp {
                 self.go_to_page(1);
             }
             Err(err) => {
-                self.status_message = Some(format!("PDF 열기 실패: {err}"));
+                // 엔진이 이미 "PDF 열기 실패: {경로}"를 붙여 준다. 여기서 또 붙이면 같은 말이
+                // 두 번 나온다(2026-09-29 리포트). `{:#}`로 원인까지 한 줄에 펼친다.
+                self.status_message = Some(format!("{err:#}"));
             }
         }
     }
