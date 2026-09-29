@@ -118,9 +118,11 @@ mod mac {
     pub fn set_labels(panel: &NSSavePanel, title: &str, prompt: Option<&str>, file_name: Option<&str>) {
         // 창 제목(NSSavePanel은 NSWindow를 물려받는다). rfd는 이것을 건드리지 않아 "Save"가
         // 그대로 남았다.
+        //
+        // `setMessage`는 쓰지 않는다. rfd가 제목 대신 쓰던 자리인데, 제목과 같은 말을 넣었더니
+        // 창에 같은 문장이 두 번 나왔다(2026-09-29 화면 확인). 앱 모달(`runModal`)로 띄우는 한
+        // 제목 줄이 늘 있으므로 제목 하나로 충분하다.
         panel.setTitle(Some(&NSString::from_str(title)));
-        // 제목이 안 보이는 표시 형태(시트 등)에서도 읽히도록 안내 줄에도 같은 말을 둔다.
-        panel.setMessage(Some(&NSString::from_str(title)));
         if let Some(prompt) = prompt {
             panel.setPrompt(Some(&NSString::from_str(prompt)));
         }
