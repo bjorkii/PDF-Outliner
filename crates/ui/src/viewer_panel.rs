@@ -1440,14 +1440,15 @@ fn draw_ocr_mark(ui: &egui::Ui, app: &PdfViewerApp, image_rect: egui::Rect, targ
 /// 둘이 뒤섞여 어느 쪽이 OCR인지 읽을 수 없다. 원본이 "있다는 것만 알아볼 정도"로 흐려지면
 /// 대조는 되면서 OCR 글자가 또렷하게 떠오른다.
 fn draw_ocr_overlay(ui: &egui::Ui, app: &PdfViewerApp, image_rect: egui::Rect, target_width: i32, page_number: u32) {
-    if !app.ocr_overlay.mode.is_on() {
+    if !app.ocr_overlay.on {
         return;
     }
     let Some(document) = app.document.as_ref() else { return };
     let Ok(page) = document.pages().get((page_number - 1) as PdfPageIndex) else { return };
 
     // 원본을 덮는 흰 장막. 완전히 가리지 않는다 — 스캔 글자가 비쳐야 자리를 대조할 수 있다.
-    ui.painter().rect_filled(image_rect, 0.0, egui::Color32::from_white_alpha(OVERLAY_VEIL));
+    let veil = (app.ocr_overlay.veil as f32 / 100.0 * 255.0).round() as u8;
+    ui.painter().rect_filled(image_rect, 0.0, egui::Color32::from_white_alpha(veil));
 
     let config = PdfRenderConfig::new().set_target_width(target_width);
     let scale = image_rect.width() / target_width as f32;
@@ -1456,38 +1457,82 @@ fn draw_ocr_overlay(ui: &egui::Ui, app: &PdfViewerApp, image_rect: egui::Rect, t
         Some(egui::pos2(image_rect.left() + px as f32 * scale, image_rect.top() + py as f32 * scale))
     };
 
+    let pointer = ui.ctx().pointer_latest_pos().filter(|p| image_rect.contains(*p));
+
     app.ocr_overlay.with_words(&page, page_number, |words| {
-        for word in words {
-            let (Some(a), Some(b)) = (to_screen(word.bounds[0], word.bounds[3]), to_screen(word.bounds[2], word.bounds[1]))
-            else {
-                continue;
-            };
-            let rect = egui::Rect::from_two_pos(a, b);
-            // OCR 텍스트와 그 밖의 안 보이는 텍스트를 색으로 가른다. "전부 보기"에서만 둘이 섞인다.
-            let color = if word.is_ocr { OVERLAY_OCR } else { OVERLAY_OTHER };
-            ui.painter().rect_filled(rect, 1.0, color.gamma_multiply(0.12));
-            ui.painter().rect_stroke(rect, 1.0, egui::Stroke::new(1.0, color));
-            // 글자는 상자 높이에 맞춰 줄이되, 너무 작아지면 읽히지 않으므로 그리지 않는다.
-            let size = (rect.height() * 0.78).min(rect.width() * 1.6 / word.text.chars().count().max(1) as f32);
-            if size >= OVERLAY_MIN_TEXT {
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    &word.text,
-                    egui::FontId::proportional(size),
-                    color,
+        // 화면 좌표를 먼저 다 구해 둔다. 마우스가 올라간 상자를 **가장 나중에 한 번 더** 그려
+        // 이웃 상자 위로 올리기 위해서다(빽빽한 줄에서는 옆 상자가 덮어 버린다).
+        let boxes: Vec<(egui::Rect, &crate::ocr_overlay::Word)> = words
+            .iter()
+            .filter_map(|word| {
+                let (a, b) = (
+                    to_screen(word.bounds[0], word.bounds[3])?,
+                    to_screen(word.bounds[2], word.bounds[1])?,
                 );
+                Some((egui::Rect::from_two_pos(a, b), word))
+            })
+            .collect();
+        // 겹친 상자 중에서는 작은 것을 고른다 — 큰 상자 안에 든 낱말을 집을 수 있어야 한다.
+        let hovered = pointer.and_then(|p| {
+            boxes
+                .iter()
+                .enumerate()
+                .filter(|(_, (rect, _))| rect.contains(p))
+                .min_by(|(_, (a, _)), (_, (b, _))| (a.area()).total_cmp(&b.area()))
+                .map(|(index, _)| index)
+        });
+
+        for (index, (rect, word)) in boxes.iter().enumerate() {
+            if Some(index) == hovered {
+                continue; // 맨 나중에 그린다
             }
+            draw_word_box(ui, *rect, word, false);
+        }
+        if let Some(index) = hovered {
+            let (rect, word) = boxes[index];
+            draw_word_box(ui, rect, word, true);
         }
     });
 }
 
-/// 원본을 덮는 흰 장막의 진하기(0~255). 스캔 글자가 비쳐 보일 만큼만 덮는다.
-const OVERLAY_VEIL: u8 = 175;
+/// 낱말 상자 하나. `focused`면 마우스가 올라간 것이라, 색을 바꾸고 배경을 덮어 또렷하게 한다.
+///
+/// 빽빽한 줄에서는 상자와 글자가 서로 겹쳐 무엇이 무엇인지 알 수 없다. 가리킨 하나만 불투명하게
+/// 띄워 그 문제를 푼다(2026-09-29 요청, 1안).
+fn draw_word_box(ui: &egui::Ui, rect: egui::Rect, word: &crate::ocr_overlay::Word, focused: bool) {
+    // OCR 텍스트와 그 밖의 안 보이는 텍스트를 색으로 가른다. "모두 포함"에서만 둘이 섞인다.
+    let color = if focused {
+        OVERLAY_FOCUS
+    } else if word.is_ocr {
+        OVERLAY_OCR
+    } else {
+        OVERLAY_OTHER
+    };
+    let fill = if focused { color.gamma_multiply(0.92) } else { color.gamma_multiply(0.12) };
+    let text_color = if focused { egui::Color32::WHITE } else { color };
+    ui.painter().rect_filled(rect, 1.0, fill);
+    ui.painter().rect_stroke(rect, 1.0, egui::Stroke::new(if focused { 2.0 } else { 1.0 }, color));
+    // 글자는 상자 높이에 맞춰 줄이되, 너무 작아지면 읽히지 않으므로 그리지 않는다. 가리킨
+    // 상자는 작아도 읽을 수 있어야 하므로 최소 크기를 보장한다.
+    let fitted = (rect.height() * 0.78).min(rect.width() * 1.6 / word.text.chars().count().max(1) as f32);
+    let size = if focused { fitted.max(OVERLAY_MIN_TEXT) } else { fitted };
+    if size >= OVERLAY_MIN_TEXT {
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            &word.text,
+            egui::FontId::proportional(size),
+            text_color,
+        );
+    }
+}
+
 /// 글자를 그릴 최소 크기(pt). 이보다 작으면 상자만 그린다.
 const OVERLAY_MIN_TEXT: f32 = 6.0;
 const OVERLAY_OCR: egui::Color32 = egui::Color32::from_rgb(0x1f, 0x6f, 0xd0);
 const OVERLAY_OTHER: egui::Color32 = egui::Color32::from_rgb(0xc0, 0x39, 0x2b);
+/// 지금 마우스가 올라간 상자.
+const OVERLAY_FOCUS: egui::Color32 = egui::Color32::from_rgb(0x1b, 0x9e, 0x5f);
 
 #[cfg(test)]
 mod edge_flip_tests {

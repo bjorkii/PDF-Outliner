@@ -692,10 +692,11 @@ impl PdfViewerApp {
     /// 화면은 옮기지 않는다. 저장 안 한 북마크 편집이 있으면 파일의 북마크로 덮어쓰지 않는다.
     /// 열기에 실패하면(아직 쓰는 중이라 깨진 파일 등) 기존 문서를 그대로 두고 다음 변경을
     /// 기다린다 — SumatraPDF와 같이 복구·암호 입력은 시도하지 않는다.
-    /// OCR 표시 모드를 한 단계 돌리고 지금 무엇을 보고 있는지 알린다.
-    pub(crate) fn cycle_ocr_overlay(&mut self) {
-        let mode = self.ocr_overlay.cycle();
-        self.status_message = Some(mode.label().to_string());
+    /// OCR 표시 모드를 켜고 끈다(F1). 지금 무엇을 보고 있는지 상태표시줄에 남긴다.
+    pub(crate) fn toggle_ocr_overlay(&mut self) {
+        let on = self.ocr_overlay.toggle();
+        let what = if self.ocr_overlay.include_all_hidden { "보이지 않는 텍스트" } else { "OCR 텍스트" };
+        self.status_message = Some(if on { format!("{what} 표시") } else { format!("{what} 숨김") });
     }
 
     pub(crate) fn reload_current_document(&mut self) {
@@ -1997,7 +1998,7 @@ impl PdfViewerApp {
         // 아니므로 입력칸에 포커스가 있어도 받는다. macOS에서 F1이 밝기 키로 먹히는 경우를
         // 대비해 OCR 메뉴에도 같은 항목을 둔다.
         if ctx.input(|i| i.key_pressed(Key::F1)) {
-            self.cycle_ocr_overlay();
+            self.toggle_ocr_overlay();
         }
 
         // "일치하는 결과가 없습니다" 알림이 떠 있는 동안의 Enter는 그 알림을 닫는 데 쓴다
