@@ -107,6 +107,8 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
     handle_scroll_zoom(ctx, &mut app.viewport);
 
     egui::CentralPanel::default().show(ctx, |ui| {
+        // 다음 프레임의 사이드바가 "지금 누른 곳이 뷰어인가"를 묻는다(예약 10, `app::viewer_rect`).
+        app.viewer_rect = Some(ui.max_rect());
         // 폴더 일괄 북마크 적용이 진행 중(확인 대기/처리/완료)이면 뷰어 대신 그 화면을
         // 그린다 — 실시간 로그를 뷰어 영역으로 전환해 보여주는 스펙 1순위안.
         if app.batch_import.is_some() {
@@ -291,8 +293,29 @@ fn show_single_page(
         let overflow = before_clamp - app.viewport.pan_offset.y;
         // 사이드바·검색 패널에서 스크롤할 때는 넘기지 않는다(스크롤 입력은 창 전체에서 들어온다).
         let pointer_in_view = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| rect.contains(p));
-        let pushed = if pointer_in_view { overflow } else { 0.0 };
-        flip_page_at_edge(ctx, app, pushed, page_size, available);
+        let mut pushed = if pointer_in_view { overflow } else { 0.0 };
+
+        // 예약 9: 지면이 뷰포트 안에 다 들어와 있으면 **휠이 곧 쪽 넘김**이다. 넘쳐 있으면 예전대로
+        // 휠은 상하 이동이고, 경계에 닿았을 때만 넘김으로 이어진다.
+        //
+        // 세로만 본다. 가로로 넘쳐도 세로 휠로는 움직일 데가 없으므로, 그 상황에서 휠을 굴리면
+        // 아무 일도 일어나지 않는 것보다 쪽이 넘어가는 편이 낫다.
+        let mode = if page_size.y <= available.y + 1.0 { EdgeMode::Whole } else { EdgeMode::Overflow };
+        if mode == EdgeMode::Whole && pointer_in_view {
+            // 마우스 휠은 관성이 없어 한 칸이 곧 한 번의 뜻이다 — 칸 수만큼 바로 넘긴다. 트랙패드는
+            // 관성 꼬리가 길어 같은 셈을 쓸 수 없으므로 아래 누적 판정에 맡긴다. 둘은 이벤트
+            // 단위로 구분된다(`MouseWheelUnit::Line`이 휠, `Point`가 트랙패드).
+            let steps = wheel_page_steps(ctx, &mut app.edge, now);
+            if steps != 0 {
+                // 같은 입력을 누적으로 또 세지 않는다.
+                pushed = 0.0;
+                app.edge.push = 0.0;
+                app.go_to_page_delta(steps);
+                app.viewport.pan_offset.y = if steps > 0 { f32::MAX } else { f32::MIN };
+                app.viewport.clamp_pan(page_size, available);
+            }
+        }
+        flip_page_at_edge(ctx, app, pushed, page_size, available, mode);
 
         // 경계 탄성 — 밀린 만큼 페이지가 따라 움직였다가 돌아온다.
         let image_rect = egui::Rect::from_center_size(
@@ -1157,6 +1180,22 @@ pub struct EdgeState {
     pub cooldown_until: f64,
     /// 페이지가 경계 밖으로 따라 나간 거리(pt, 감쇠 적용).
     pub overscroll: f32,
+    /// 아직 한 장을 채우지 못한 마우스 휠 칸(→ [`wheel_page_steps`]). 고해상도 휠은 한 칸을
+    /// 쪼개 보내므로 소수로 남겨 두었다가 1이 차면 넘긴다.
+    pub wheel: f32,
+}
+
+/// 쪽 단위 보기에서 휠·스와이프를 어떻게 읽을지(예약 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeMode {
+    /// 지면이 뷰포트보다 커서 넘쳐 있다 — 휠은 상하 이동이고, 경계까지 밀어야 넘어간다.
+    Overflow,
+    /// 지면이 뷰포트 안에 다 들어와 있다 — 움직일 데가 없으므로 휠이 곧 쪽 넘김이다.
+    ///
+    /// 이때는 **탄성을 쓰지 않는다.** 다 보이는 지면이 손짓을 따라 미끄러지면 "아직 더 볼 것이
+    /// 남았다"는 잘못된 신호가 된다. 대신 문턱을 낮춰([`WHOLE_FLIP_THRESHOLD`]) 손짓이 덜
+    /// 무겁게 먹히도록 한다.
+    Whole,
 }
 
 /// 경계에서 이만큼(pt) 더 밀어야 한 장 넘어간다.
@@ -1212,6 +1251,15 @@ const FLIP_COOLDOWN: f64 = 0.32;
 /// 임계값보다 크므로 이 상한만으로는 "이상값 한 프레임이 페이지를 넘기는 것"을 막지 못한다.
 /// 그쪽은 [`FLIP_COOLDOWN`]이 막는다 — 표식이 잡히는 프레임은 넘긴 직후, 즉 쿨다운 안이다.
 const MAX_FRAME_PUSH: f32 = 600.0;
+/// 지면이 다 보일 때([`EdgeMode::Whole`]) 한 장을 넘기는 데 필요한 양(pt).
+///
+/// [`FLIP_THRESHOLD`]보다 낮다. 그쪽은 "지면을 끝까지 본 뒤 **더** 미는" 몸짓이라 무게가 있어야
+/// 하지만, 여기서는 밀 지면 자체가 없어 처음부터 넘기려는 뜻이고 탄성 되먹임도 없다. 트랙패드
+/// 스와이프 한 번이 판정에 보태는 양이 400pt 남짓이므로(FLIP_THRESHOLD 주석의 실측), 이 값이면
+/// 한 번 쓸어 한 장이면서 스치는 정도로는 넘어가지 않는다.
+const WHOLE_FLIP_THRESHOLD: f32 = 240.0;
+/// 한 프레임에 휠로 넘길 수 있는 최대 쪽 수 — 이상값이 문서를 통째로 건너뛰는 것을 막는다.
+const MAX_WHEEL_PAGES_PER_FRAME: i32 = 5;
 /// 탄성이 점근하는 거리(pt) — 스프링이 늘어날 수 있는 한계처럼 작동한다.
 const RUBBER_LIMIT: f32 = 200.0;
 /// 처음 미는 힘이 얼마나 그대로 전달되는지(0~1). 스프링 상수에 해당한다 — 작을수록 묵직하다.
@@ -1284,7 +1332,11 @@ const ENVELOPE_DECAY: f32 = 0.8;
 ///
 /// 화면 위치(`overscroll`)는 목표로 곧장 뛰지 않고 `FOLLOW_RATE`로 수렴한다 — 입력이 있는
 /// 프레임과 없는 프레임이 번갈아 오는 관성 구간에서 떨리지 않게.
-pub fn edge_step(state: &mut EdgeState, overflow: f32, now: f64, dt: f32) -> Option<i32> {
+pub fn edge_step_in(state: &mut EdgeState, overflow: f32, now: f64, dt: f32, mode: EdgeMode) -> Option<i32> {
+    let threshold = match mode {
+        EdgeMode::Overflow => FLIP_THRESHOLD,
+        EdgeMode::Whole => WHOLE_FLIP_THRESHOLD,
+    };
     let idle = now - state.push_at;
     if idle > FORGET_AFTER {
         state.push = 0.0;
@@ -1308,7 +1360,7 @@ pub fn edge_step(state: &mut EdgeState, overflow: f32, now: f64, dt: f32) -> Opt
     state.rate_envelope -= state.rate_envelope * approach(ENVELOPE_DECAY, dt);
     // 탄성은 넘김·쿨다운과 무관하게 지금 자리에서 이어서 늘어난다. 반대로 밀면 그만큼
     // 되돌아간다(부호가 자연히 상쇄되므로 방향 전환을 따로 다루지 않는다).
-    if pushing {
+    if pushing && mode == EdgeMode::Overflow {
         state.spring = (state.spring + step).clamp(-SPRING_LIMIT, SPRING_LIMIT);
     }
     if overflow != 0.0 {
@@ -1338,7 +1390,7 @@ pub fn edge_step(state: &mut EdgeState, overflow: f32, now: f64, dt: f32) -> Opt
         state.spring = 0.0;
     }
     let mut flip = None;
-    if !cooling && state.push.abs() >= FLIP_THRESHOLD {
+    if !cooling && state.push.abs() >= threshold {
         // 위로 밀면(손가락을 위로) 화면이 올라가며 pan_offset.y가 줄어 overflow가 음수다.
         flip = Some(if state.push < 0.0 { 1 } else { -1 });
         state.push = 0.0;
@@ -1348,12 +1400,52 @@ pub fn edge_step(state: &mut EdgeState, overflow: f32, now: f64, dt: f32) -> Opt
         state.spring = 0.0;
     }
 
+    // 지면이 다 보이면 탄성을 아예 쓰지 않는다. 모드가 바뀌기 직전에 늘어나 있던 것은 여기서
+    // 곧바로 접힌다(아래 `approach`가 0으로 데려간다).
+    if mode == EdgeMode::Whole {
+        state.spring = 0.0;
+    }
     let target = rubber_band(state.spring);
     state.overscroll += (target - state.overscroll) * approach(FOLLOW_RATE, dt);
     if (state.overscroll - target).abs() < 0.3 {
         state.overscroll = target;
     }
     flip
+}
+
+/// 이번 프레임의 **마우스 휠**(트랙패드가 아닌) 입력으로 몇 쪽을 넘길지. 양수가 다음 쪽이다.
+///
+/// 휠과 트랙패드를 가르는 이유: 휠은 관성이 없어 한 칸이 그대로 한 번의 뜻이지만, 트랙패드는 한 번
+/// 쓸어도 이벤트가 1초 가까이 이어진다(→ [`ENVELOPE_DECAY`]). 같은 셈으로 다루면 한 번 쓸어 수십
+/// 장이 넘어간다. winit이 둘을 다른 단위로 보내 주므로(`LineDelta` / `PixelDelta`) egui의
+/// `MouseWheelUnit`으로 그대로 가려낼 수 있다.
+fn wheel_page_steps(ctx: &egui::Context, edge: &mut EdgeState, now: f64) -> i32 {
+    let lines: f32 = ctx.input(|i| {
+        i.events
+            .iter()
+            .filter_map(|event| match event {
+                egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta, .. } => Some(delta.y),
+                _ => None,
+            })
+            .sum()
+    });
+    if lines == 0.0 {
+        // 한참 쉬었으면 채우다 만 칸은 잊는다 — 몇 분 전 반 칸이 다음 한 칸에 얹히면 안 된다.
+        if now - edge.push_at > FORGET_AFTER {
+            edge.wheel = 0.0;
+        }
+        return 0;
+    }
+    // 방향을 바꾸면 남은 소수 칸을 버린다.
+    if edge.wheel != 0.0 && edge.wheel.signum() != lines.signum() {
+        edge.wheel = 0.0;
+    }
+    edge.wheel += lines;
+    let whole = edge.wheel.trunc();
+    edge.wheel -= whole;
+    edge.push_at = now;
+    // 휠을 아래로 굴리면 delta.y가 음수다 — 누적 판정과 같은 부호 규칙(그쪽 주석 참고).
+    (-whole as i32).clamp(-MAX_WHEEL_PAGES_PER_FRAME, MAX_WHEEL_PAGES_PER_FRAME)
 }
 
 /// 민 양(pt) → 페이지가 따라 나가는 거리(pt).
@@ -1380,9 +1472,10 @@ fn flip_page_at_edge(
     overflow: f32,
     page_size: egui::Vec2,
     available: egui::Vec2,
+    mode: EdgeMode,
 ) {
     let (now, dt) = ctx.input(|i| (i.time, i.stable_dt));
-    let direction = edge_step(&mut app.edge, overflow, now, dt);
+    let direction = edge_step_in(&mut app.edge, overflow, now, dt, mode);
     // 모아 둔 양이 남아 있거나 페이지가 밀려 나가 있는 동안은 계속 그린다. egui는 입력이
     // 없으면 리페인트를 하지 않으므로, 마지막 스크롤 이벤트 뒤로 프레임이 아예 돌지 않으면
     // 스프링이 돌아오지도, 모아 둔 양이 풀리지도 않는다.
@@ -1563,7 +1656,12 @@ const OVERLAY_MIN_TEXT: f32 = 6.0;
 
 #[cfg(test)]
 mod edge_flip_tests {
-    use super::{edge_step, EdgeState, FLIP_THRESHOLD};
+    use super::{edge_step_in, EdgeMode, EdgeState, FLIP_THRESHOLD};
+
+    /// 넘쳐 있을 때(예전 동작)의 한 걸음. 이 모드를 다루는 시험이 대부분이라 이름을 줄여 둔다.
+    fn edge_step(state: &mut EdgeState, overflow: f32, now: f64, dt: f32) -> Option<i32> {
+        edge_step_in(state, overflow, now, dt, EdgeMode::Overflow)
+    }
 
     /// 트랙패드 스와이프 한 번의 프레임별 밀림(pt). 손가락을 대고 있는 동안은 일정하고,
     /// 떼면 관성이 지수로 잦아든다 — 이 두 단계를 구별하는 것이 판정의 전제이므로(→
@@ -1597,6 +1695,72 @@ mod edge_flip_tests {
             trail.push(state.overscroll);
         }
         (turns, trail)
+    }
+
+    /// `play`와 같되 모드를 골라 흘려 넣는다.
+    fn play_in(state: &mut EdgeState, frames: &[f32], mode: EdgeMode) -> (i32, Vec<f32>) {
+        let mut turns = 0;
+        let mut trail = Vec::new();
+        for (index, overflow) in frames.iter().enumerate() {
+            let now = index as f64 / 60.0;
+            if edge_step_in(state, *overflow, now, 1.0 / 60.0, mode).is_some() {
+                turns += 1;
+                state.overscroll = 0.0;
+            }
+            trail.push(state.overscroll);
+        }
+        (turns, trail)
+    }
+
+    /// 예약 9: 지면이 다 보일 때도 트랙패드 한 번 쓸기는 **한 장**이다. 문턱만 낮췄지 관성 꼬리를
+    /// 거르는 판정은 그대로라, 여러 장이 우수수 넘어가면 안 된다.
+    #[test]
+    fn one_swipe_turns_one_page_when_the_whole_page_is_visible() {
+        let frames = swipe(3000.0, 9, 0.96);
+        let mut state = EdgeState::default();
+        let (turns, _) = play_in(&mut state, &frames, EdgeMode::Whole);
+        assert_eq!(turns, 1, "한 번 쓸었는데 {turns}장이 넘어갔다");
+    }
+
+    /// 다 보이는 지면은 손짓을 따라 미끄러지지 않는다 — 움직일 데가 없는데 흔들리면 "아직 더 볼
+    /// 것이 남았다"는 잘못된 신호가 된다.
+    #[test]
+    fn a_fully_visible_page_does_not_stretch() {
+        let frames = swipe(3000.0, 9, 0.96);
+        let mut state = EdgeState::default();
+        let (_, trail) = play_in(&mut state, &frames, EdgeMode::Whole);
+        let worst = trail.iter().fold(0.0_f32, |acc, v| acc.max(v.abs()));
+        assert!(worst < 0.5, "다 보이는데 {worst}pt 밀려 나갔다");
+
+        // 넘쳐 있을 때는 예전대로 늘어난다 — 두 모드를 견주어 확인한다.
+        let mut state = EdgeState::default();
+        let (_, trail) = play_in(&mut state, &frames, EdgeMode::Overflow);
+        assert!(trail.iter().any(|v| v.abs() > 20.0), "넘칠 때의 탄성까지 없어졌다");
+    }
+
+    /// 늘어나 있던 상태에서 배율을 줄여 지면이 다 보이게 되면, 늘어난 것은 곧바로 접힌다.
+    #[test]
+    fn switching_to_the_whole_page_mode_collapses_the_stretch() {
+        let mut state = EdgeState::default();
+        play_in(&mut state, &swipe(1200.0, 6, 0.96)[..6], EdgeMode::Overflow);
+        assert!(state.overscroll.abs() > 5.0, "먼저 늘어나 있어야 한다: {}", state.overscroll);
+
+        for frame in 0..30 {
+            edge_step_in(&mut state, 0.0, 10.0 + frame as f64 / 60.0, 1.0 / 60.0, EdgeMode::Whole);
+        }
+        assert_eq!(state.overscroll, 0.0, "모드가 바뀌었는데 늘어난 채로 남았다");
+        assert_eq!(state.spring, 0.0);
+    }
+
+    /// 다 보일 때의 문턱이 더 낮다 — 밀 지면이 없으니 같은 무게를 요구할 이유가 없다.
+    #[test]
+    fn the_whole_page_mode_asks_for_less_push() {
+        // 두 문턱 사이의 힘으로 밀면 다 보일 때만 넘어간다.
+        let frames = swipe(1100.0, 8, 0.96);
+        let mut whole = EdgeState::default();
+        let mut overflow = EdgeState::default();
+        assert_eq!(play_in(&mut whole, &frames, EdgeMode::Whole).0, 1);
+        assert_eq!(play_in(&mut overflow, &frames, EdgeMode::Overflow).0, 0);
     }
 
     /// 한 번 쓸면(관성이 감쇠하며 이어지면) 딱 한 장만 넘어간다.

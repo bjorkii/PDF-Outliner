@@ -21,6 +21,10 @@ pub struct DragState {
     /// 밖(위/아래)이면 부드럽게 중앙으로 스크롤해 달라는 1회성 요청(2026-07-17 요청).
     /// 클릭 선택에는 세우지 않는다 — 클릭된 행은 정의상 이미 화면 안에 있다.
     pub scroll_selected_into_view: bool,
+    /// 이번 프레임에 **뷰어를 눌렀는가**(예약 10). 제목 편집 중에 뷰어를 눌러 포커스를 잃은
+    /// 경우와 그 밖의 경우를 가르는 데 쓴다. 매 프레임 새로 계산해 넣으므로 기억된 값이 남아도
+    /// 곧바로 덮인다 — 다른 필드와 달리 프레임을 넘겨 이어지는 상태가 아니다.
+    pub pressed_in_viewer: bool,
     /// `scroll_to_me` 호출 직후 이 시각까지는 매 프레임 강제로 다시 그리게 한다. egui는
     /// 기본적으로 입력 이벤트가 있을 때만 다시 그리는 즉시모드라(§7 문서 검색 폴링과 같은
     /// 사정), scroll_to_me가 세운 애니메이션 목표가 있어도 사용자가 마우스를 안 움직이면
@@ -133,6 +137,19 @@ fn tab_bar(ui: &mut egui::Ui, current: &mut crate::app::SidebarTab) {
     }
 }
 
+/// 지금 누르고 있는(또는 방금 뗀) 곳이 뷰어 안인가.
+///
+/// 사이드바는 뷰어보다 먼저 그려지므로 지난 프레임에 재어 둔 자리를 쓴다(`app::viewer_rect`).
+/// **누르는 동작만 본다** — Tab처럼 키로 포커스를 옮긴 것은 예전대로 편집을 끝내야 한다.
+fn pressed_in_viewer(ctx: &egui::Context, viewer: Option<egui::Rect>) -> bool {
+    let Some(rect) = viewer else { return false };
+    ctx.input(|i| {
+        let pressing = i.pointer.any_down() || i.pointer.any_released();
+        let at = i.pointer.press_origin().or_else(|| i.pointer.latest_pos());
+        pressing && at.is_some_and(|pos| rect.contains(pos))
+    })
+}
+
 pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
     let panel_response = egui::SidePanel::left("bookmarks_sidebar")
         .resizable(true)
@@ -154,6 +171,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             let mut drag_state = ctx
                 .data_mut(|d| d.get_temp::<DragState>(drag_id))
                 .unwrap_or_default();
+            drag_state.pressed_in_viewer = pressed_in_viewer(ctx, app.viewer_rect);
 
             // Cmd+B 등 외부(app.rs 전역 단축키)에서 걸어둔 "추가해줘" 요청 처리.
             // DragState(편집 포커스 상태)는 이 파일 안에서만 관리되므로, app.rs는 플래그만
@@ -583,6 +601,12 @@ fn render_nodes(
                     // 편집 취소 — 입력한 내용을 버리고 원래 제목 유지
                     drag_state.editing = None;
                 } else if enter_pressed || edit_response.lost_focus() {
+                    // **뷰어를 눌러서 포커스가 옮겨 간 것이라면 끝내지 않는다**(예약 10). 다른
+                    // 쪽을 확인해 가며 제목을 적는 경우에 대응한다. Enter·Esc, 그리고 뷰어 밖을
+                    // 누른 경우에는 예전대로 끝난다.
+                    if !enter_pressed && drag_state.pressed_in_viewer {
+                        ui.memory_mut(|m| m.request_focus(edit_id));
+                    } else {
                     // Enter뿐 아니라 다른 곳을 클릭해 포커스를 잃어도 커밋한다(Finder식 관례).
                     //
                     // **제목이 그대로면 아무것도 하지 않는다.** 전에는 내용이 같아도 변경으로
@@ -596,6 +620,7 @@ fn render_nodes(
                         outcome.rename = Some((node.id, new_title));
                     }
                     drag_state.editing = None;
+                    }
                 }
             } else {
                 // .selectable(false) 핵심: 기본값(true)이면 egui가 Label을 "선택 가능한
@@ -881,5 +906,61 @@ mod clipboard_title_tests {
     fn long_text_is_truncated_by_chars() {
         let title = bookmark_title_from_clipboard(&"가".repeat(500)).unwrap();
         assert_eq!(title.chars().count(), MAX_CLIPBOARD_TITLE_CHARS);
+    }
+}
+
+/// 북마크 제목 편집 중 뷰어를 눌러도 편집이 끝나지 않아야 한다(예약 10, 2026-10-01).
+#[cfg(test)]
+mod viewer_press_tests {
+    use super::pressed_in_viewer;
+
+    fn viewer() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(200.0, 50.0), egui::vec2(600.0, 800.0))
+    }
+
+    /// 한 프레임을 흘려 넣고 판정 결과를 돌려준다.
+    fn judge(events: Vec<egui::Event>, rect: Option<egui::Rect>) -> bool {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput { events, ..Default::default() };
+        let mut verdict = false;
+        ctx.run(input, |ctx| verdict = pressed_in_viewer(ctx, rect));
+        verdict
+    }
+
+    fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// 뷰어 안을 누르면 참 — 이때는 편집을 이어 간다.
+    #[test]
+    fn a_press_inside_the_viewer_counts() {
+        let inside = viewer().center();
+        assert!(judge(vec![egui::Event::PointerMoved(inside), press(inside, true)], Some(viewer())));
+    }
+
+    /// 사이드바·툴바 쪽을 누르면 거짓 — 예전대로 편집이 끝난다.
+    #[test]
+    fn a_press_outside_the_viewer_does_not_count() {
+        let outside = egui::pos2(60.0, 300.0);
+        assert!(!judge(vec![egui::Event::PointerMoved(outside), press(outside, true)], Some(viewer())));
+    }
+
+    /// 누르지 않고 마우스만 뷰어 위에 있으면 거짓 — Tab처럼 키로 포커스를 옮긴 경우를 가른다.
+    #[test]
+    fn merely_hovering_the_viewer_does_not_count() {
+        let inside = viewer().center();
+        assert!(!judge(vec![egui::Event::PointerMoved(inside)], Some(viewer())));
+    }
+
+    /// 아직 뷰어를 한 번도 그리지 않았으면(자리를 모르면) 거짓 — 모르는 것을 참으로 보지 않는다.
+    #[test]
+    fn an_unknown_viewer_rect_is_not_a_press() {
+        let inside = viewer().center();
+        assert!(!judge(vec![egui::Event::PointerMoved(inside), press(inside, true)], None));
     }
 }

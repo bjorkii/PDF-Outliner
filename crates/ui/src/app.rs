@@ -415,6 +415,10 @@ pub struct PdfViewerApp {
     /// OCR 결과 창의 "보기"로 뷰어에 표시 중인 자리(`viewer_panel::draw_ocr_mark`).
     pub ocr_mark: Option<crate::ocr_import::ProblemMark>,
 
+    /// 지난 프레임에 뷰어가 차지한 자리. 사이드바(먼저 그려진다)가 "지금 누른 곳이 뷰어인가"를
+    /// 판단하는 데 쓴다 — 북마크 제목을 고치는 중에 뷰어를 눌러도 편집을 끝내지 않기 위해서다
+    /// (예약 10). 창 크기가 바뀌는 프레임에도 한 프레임 차이라 문제가 되지 않는다.
+    pub viewer_rect: Option<egui::Rect>,
     /// 쪽 단위 보기에서 페이지 경계를 넘겨 밀 때의 상태(탄성·페이지 넘김, `viewer_panel::edge_step`).
     pub edge: crate::viewer_panel::EdgeState,
 
@@ -559,6 +563,7 @@ impl PdfViewerApp {
             colors,
             sidebar_tab: SidebarTab::default(),
             thumbnails: crate::thumbnails::Thumbnails::default(),
+            viewer_rect: None,
             settings_open: false,
             saved_file_notice: None,
             ocr_removal_confirm: None,
