@@ -10,6 +10,12 @@
 //!
 //! 뷰어 텍스처와 **캐시를 나눠 둔다**. `page_textures`는 쪽마다 배율 하나만 들고 있어서, 썸네일을
 //! 거기 넣으면 보고 있던 큰 텍스처를 밀어낸다.
+//!
+//! **줄 높이는 문서의 중위 비율로 한 번만 정하고, 그림은 쪽마다 제 비율로 그 안에 맞춰 넣는다**
+//! (2026-09-30 리포트). 처음에는 *현재 쪽*의 비율로 모든 줄의 높이를 잡았는데, DTFA00006.pdf
+//! 2쪽처럼 책등(216 × 3663 pt, 17:1)이 섞여 있으면 그 쪽을 고른 순간 48줄 전부가 2400px로 늘어나
+//! 목록이 무너졌다. `ScrollArea::show_rows`는 줄 높이가 일정해야 쓸 수 있으므로, 높이는 중위
+//! 비율로 못박고, 판형이 다른 쪽은 그 칸 안에 늘이지 않고 맞춰 넣는다 — 책등은 얇은 띠로 보인다.
 
 use crate::app::PdfViewerApp;
 use std::collections::{HashMap, HashSet};
@@ -25,11 +31,16 @@ const LABEL_HEIGHT: f32 = 18.0;
 /// 줄 사이 여백.
 const ROW_GAP: f32 = 10.0;
 
+/// 쪽 크기를 알 수 없을 때 쓰는 세로/가로 비율(A4).
+const DEFAULT_RATIO: f32 = 1.414;
+
 #[derive(Default)]
 pub struct Thumbnails {
     cache: HashMap<u32, egui::TextureHandle>,
     /// 렌더를 맡겨 두고 기다리는 쪽 — 응답이 썸네일 것인지 가리는 데도 쓴다.
     inflight: HashSet<u32>,
+    /// 줄 높이를 정하는 문서 대표 비율. 문서마다 한 번만 재고 `clear`로 버린다.
+    row_ratio: Option<f32>,
 }
 
 impl Thumbnails {
@@ -37,6 +48,13 @@ impl Thumbnails {
     pub fn clear(&mut self) {
         self.cache.clear();
         self.inflight.clear();
+        self.row_ratio = None;
+    }
+
+    /// 줄 높이를 정하는 대표 비율. **평균이 아니라 중위값**을 쓴다 — 책등이나 접지처럼 판형이 크게
+    /// 다른 쪽이 한둘 끼어도 평균은 끌려가지만 중위값은 흔들리지 않는다.
+    fn row_ratio(&mut self, sizes: &[egui::Vec2]) -> f32 {
+        *self.row_ratio.get_or_insert_with(|| median_ratio(sizes))
     }
 
     /// 이 쪽의 렌더 결과를 기다리는 중인가. 워커 응답을 썸네일로 받을지 가리는 데 쓴다.
@@ -67,11 +85,29 @@ impl Thumbnails {
     }
 }
 
-/// 한 줄(썸네일 하나)의 높이. 쪽 크기에 따라 그림 높이가 달라지므로 문서에서 재어 쓴다.
-fn row_height(app: &PdfViewerApp, width: f32) -> f32 {
-    let size = app.page_size_pt(app.current_page.max(1));
-    let ratio = if size.x > 0.0 { (size.y / size.x) as f32 } else { 1.414 };
-    width * ratio + LABEL_HEIGHT + ROW_GAP
+/// 쪽들의 세로/가로 비율 중위값.
+fn median_ratio(sizes: &[egui::Vec2]) -> f32 {
+    let mut ratios: Vec<f32> =
+        sizes.iter().filter(|size| size.x > 0.0 && size.y > 0.0).map(|size| size.y / size.x).collect();
+    if ratios.is_empty() {
+        return DEFAULT_RATIO;
+    }
+    ratios.sort_by(|a, b| a.total_cmp(b));
+    ratios[ratios.len() / 2]
+}
+
+/// 한 쪽의 세로/가로 비율.
+fn page_ratio(size: egui::Vec2) -> f32 {
+    if size.x > 0.0 && size.y > 0.0 { size.y / size.x } else { DEFAULT_RATIO }
+}
+
+/// `box_size` 안에 `ratio` 비율을 **늘이지 않고** 맞춰 넣은 크기.
+fn fit(box_size: egui::Vec2, ratio: f32) -> egui::Vec2 {
+    if box_size.x * ratio <= box_size.y {
+        egui::vec2(box_size.x, box_size.x * ratio)
+    } else {
+        egui::vec2(box_size.y / ratio, box_size.y)
+    }
 }
 
 /// 썸네일 탭 본문.
@@ -87,7 +123,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
 
     // 그림 폭은 사이드바 폭에 맞추되, 렌더는 늘 THUMB_WIDTH로 한 번만 한다.
     let width = (ui.available_width() - 16.0).clamp(60.0, 240.0);
-    let height = row_height(app, width);
+    let box_height = width * app.thumbnails.row_ratio(&app.page_sizes);
+    let height = box_height + LABEL_HEIGHT + ROW_GAP;
     let mut go_to: Option<u32> = None;
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
@@ -97,7 +134,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
         |ui, rows| {
             for index in rows {
                 let page = index as u32 + 1;
-                if let Some(target) = row(ui, app, page, width, height) {
+                if let Some(target) = row(ui, app, page, width, box_height) {
                     go_to = Some(target);
                 }
             }
@@ -111,16 +148,20 @@ pub fn show(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     app.thumbnails.trim(app.current_page);
 }
 
-/// 줄 하나. 눌렸으면 그 쪽 번호를 돌려준다.
-fn row(ui: &mut egui::Ui, app: &mut PdfViewerApp, page: u32, width: f32, height: f32) -> Option<u32> {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::click());
+/// 줄 하나. 눌렸으면 그 쪽 번호를 돌려준다. `box_height`는 그림이 들어갈 칸의 높이이고, 줄 전체
+/// 높이는 거기에 쪽 번호 자리와 여백을 더한 것이다.
+fn row(ui: &mut egui::Ui, app: &mut PdfViewerApp, page: u32, width: f32, box_height: f32) -> Option<u32> {
+    let row_height = box_height + LABEL_HEIGHT + ROW_GAP;
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), row_height), egui::Sense::click());
     if !ui.is_rect_visible(rect) {
         return None;
     }
-    let image_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.center().x - width / 2.0, rect.top()),
-        egui::vec2(width, height - LABEL_HEIGHT - ROW_GAP),
-    );
+    // 칸은 모든 줄이 같고, 그림은 그 안에 제 비율로 맞춰 가운데 놓는다.
+    let box_rect =
+        egui::Rect::from_min_size(egui::pos2(rect.center().x - width / 2.0, rect.top()), egui::vec2(width, box_height));
+    let fitted = fit(box_rect.size(), page_ratio(app.page_size_pt(page)));
+    let image_rect = egui::Rect::from_center_size(box_rect.center(), fitted);
 
     let is_current = page == app.current_page;
     match app.thumbnails.cache.get(&page) {
@@ -153,7 +194,8 @@ fn row(ui: &mut egui::Ui, app: &mut PdfViewerApp, page: u32, width: f32, height:
     };
     ui.painter().rect_stroke(image_rect, 1.0, stroke);
 
-    let label_pos = egui::pos2(rect.center().x, image_rect.bottom() + LABEL_HEIGHT / 2.0);
+    // 쪽 번호는 그림 아래가 아니라 칸 아래에 붙인다 — 판형이 달라도 줄마다 같은 높이에 오도록.
+    let label_pos = egui::pos2(rect.center().x, box_rect.bottom() + LABEL_HEIGHT / 2.0);
     ui.painter().text(
         label_pos,
         egui::Align2::CENTER_CENTER,
@@ -187,6 +229,42 @@ mod tests {
         assert!(thumbs.cache.contains_key(&around), "보고 있는 쪽이 남아야 한다");
         assert!(thumbs.cache.contains_key(&(around + 1)));
         assert!(!thumbs.cache.contains_key(&(CACHE_LIMIT as u32 + 40)), "가장 먼 쪽이 버려져야 한다");
+    }
+
+    /// 책등처럼 판형이 크게 다른 쪽이 섞여도 줄 높이가 흔들리지 않아야 한다 — DTFA00006.pdf
+    /// 2쪽(216 × 3663 pt)을 고르자 목록 전체가 무너졌던 일(2026-09-30)의 회귀 시험.
+    #[test]
+    fn a_book_spine_page_does_not_change_the_row_height() {
+        let a4 = egui::vec2(2480.0, 3520.0);
+        let spine = egui::vec2(216.0, 3663.0);
+        let mut sizes = vec![a4; 47];
+        sizes.insert(1, spine);
+
+        let ratio = median_ratio(&sizes);
+        assert!((ratio - a4.y / a4.x).abs() < 1e-6, "중위 비율이 본문 판형이어야 한다: {ratio}");
+        // 평균을 썼다면 책등 하나에 끌려갔을 것이다.
+        let mean: f32 = sizes.iter().map(|size| size.y / size.x).sum::<f32>() / sizes.len() as f32;
+        assert!(mean > ratio * 1.2, "평균은 실제로 끌려간다({mean} vs {ratio})");
+    }
+
+    /// 칸보다 세로로 긴 쪽은 늘이지 않고 폭을 줄여 넣는다 — 책등이 칸을 뚫고 나오면 안 된다.
+    #[test]
+    fn a_tall_page_is_fitted_inside_the_box_instead_of_stretched() {
+        let box_size = egui::vec2(144.0, 204.0);
+        let fitted = fit(box_size, 3663.0 / 216.0);
+        assert!(fitted.y <= box_size.y + 1e-3, "칸 높이를 넘었다: {fitted:?}");
+        assert!(fitted.x > 0.0 && fitted.x < box_size.x, "폭이 줄어야 한다: {fitted:?}");
+
+        // 칸 비율과 같은 쪽은 칸을 꽉 채운다.
+        let snug = fit(box_size, box_size.y / box_size.x);
+        assert!((snug.x - box_size.x).abs() < 1e-3 && (snug.y - box_size.y).abs() < 1e-3, "{snug:?}");
+    }
+
+    /// 쪽 크기를 모르면 A4 비율로 버틴다(문서를 아직 재지 못한 첫 프레임).
+    #[test]
+    fn unknown_page_sizes_fall_back_to_a4() {
+        assert_eq!(median_ratio(&[]), DEFAULT_RATIO);
+        assert_eq!(page_ratio(egui::vec2(0.0, 100.0)), DEFAULT_RATIO);
     }
 
     /// 기다리는 중인 쪽은 두 번 맡기지 않는다.
