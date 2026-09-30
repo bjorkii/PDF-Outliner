@@ -34,7 +34,8 @@ pub struct OcrOverlay {
     pub on: bool,
     /// `7 Tr`·알파 0·크기 0까지 포함할지. 끄면 OCR 텍스트(이미지에 걸친 `3 Tr`)만 본다.
     pub include_all_hidden: bool,
-    /// 원본을 덮는 장막의 불투명도(0~100). 0이면 원본 그대로, 100이면 원본이 보이지 않는다.
+    /// **원본 지면의 불투명도**(0~100). 100이면 원본이 원래대로 다 보이고, 0이면 완전히 가려
+    /// 보이지 않는다. 주체가 장막이 아니라 원본이다(2026-09-30 정정).
     pub veil: u8,
     cache: std::cell::RefCell<std::collections::HashMap<u32, Vec<Word>>>,
     /// 사용자가 눌러 고른 낱말 (쪽 번호, 그 쪽 낱말 목록에서의 자리).
@@ -48,8 +49,8 @@ pub struct OcrOverlay {
 /// 캐시에 담아 둘 쪽 수. 연속 스크롤로 쭉 내려가도 무한정 쌓이지 않게 한다.
 const CACHE_PAGES: usize = 8;
 
-/// 원본을 가리는 기본값(%). 스캔 글자가 비칠 정도로 덮는다.
-pub const DEFAULT_VEIL: u8 = 69;
+/// 원본 지면 불투명도의 기본값(%). 스캔 글자가 비칠 정도만 남긴다.
+pub const DEFAULT_VEIL: u8 = 31;
 
 /// 화살표로 옮길 때 "같은 줄"로 볼 겹침 기준 — 고른 상자의 높이(가로 이동일 때) 대비 비율.
 /// 이만큼 겹친 상자가 하나라도 있으면 그 안에서만 고른다.
@@ -100,67 +101,34 @@ impl OcrOverlay {
     /// **고르는 규칙**(2026-09-30 사용자 지정). 오른쪽 화살표를 예로 들면:
     ///
     /// 1. **두 모서리가 모두 오른쪽에 있는 상자**만 후보다(`PX1 < NX1` 그리고 `PX2 < NX2`).
-    ///    없으면 아무 일도 하지 않는다. 한쪽 모서리만 넘은 상자를 받으면 크게 감싸는 상자나
-    ///    겹쳐 있는 상자로 튀어 버린다.
-    /// 2. 그중 **세로로 겹치는**(`Overlap > 0`) 상자만 남긴다. 하나도 없으면 아무 일도 하지
-    ///    않는다 — 같은 줄이 아닌 곳으로 건너뛰지 않는다는 뜻이다.
-    /// 3. 남은 것 가운데 **겹침이 기준치 이상인 것**(`Overlap >= OVERLAP_RATE × Bp의 높이`)을
-    ///    먼저 본다. 그런 상자가 있으면 그 안에서만 고른다.
-    /// 4. 마지막으로 **중앙점 사이의 거리가 가장 짧은 것**을 고른다. 거리가 같으면 겹침이 큰 쪽.
+    ///    상자끼리 가로로 겹쳐 있어도 두 모서리가 더 오른쪽이면 후보에 든다 — OCR 상자는 자주
+    ///    겹치므로 "떨어져 있을 것"을 요구하면 놓친다.
+    /// 2. **같은 줄인지**는 고른 상자의 세로 범위를 가로로 늘렸을 때 걸치는지로 본다. 물리적으로
+    ///    상자가 포개졌는지가 아니라 "그 줄에 속한다고 볼 수 있는지"의 판정이다.
+    /// 3. 걸침이 고른 상자 높이의 `OVERLAP_RATE` 이상인 것을 **먼저** 본다. 그런 상자가 하나도
+    ///    없을 때만 덜 걸친 것에서 고른다 — 위첨자처럼 살짝 걸친 상자도 갈 데가 없으면 갈 수
+    ///    있어야 하기 때문이다(영영 못 가는 상자를 만들지 않는다).
+    /// 4. 그 안에서 **움직이는 방향의 틈**이 가장 작은 것, 같으면 중앙점 거리가 짧은 것.
     ///
-    /// 위아래 화살표는 축만 바꿔 같은 규칙을 쓴다(넘김 판정은 y, 겹침 판정은 x).
+    /// 위아래 화살표는 축만 바꿔 같은 규칙을 쓴다(넘김 판정은 y, 걸침 판정은 x).
     ///
-    /// `/Rotate`가 걸린 쪽에서는 화면 방향과 사용자 공간 축이 어긋나 화살표가 돌아간 방향으로
-    /// 움직인다. 쓰기 어려울 정도는 아니라 지금은 그대로 둔다.
+    /// **줄 끝에서는 줄을 바꾼다**(가로 이동만). 걸치는 상자가 하나도 없으면 다음 줄(오른쪽이면
+    /// 아래, 왼쪽이면 위)로 넘어가 그 줄의 **반대쪽 끝**을 고른다. 읽는 순서 그대로다. 세로
+    /// 이동에는 적용하지 않는다 — 쪽을 넘어가는 이동은 이 기능의 몫이 아니다.
     pub fn move_selection(&self, right: f64, down: f64) -> bool {
         let Some((page, index)) = self.selected.get() else { return false };
         let cache = self.cache.borrow();
         let Some(words) = cache.get(&page) else { return false };
         let Some(from) = words.get(index) else { return false };
         let (dx, dy) = (right, -down);
-
-        // 움직이는 축(0=가로, 1=세로)과 그 방향(+1/-1). 겹침은 직각 축에서 잰다.
         let (axis, sign) = if dx != 0.0 { (0usize, dx.signum()) } else { (1usize, dy.signum()) };
-        let cross = 1 - axis;
-        let span = |w: &Word, a: usize| if a == 0 { (w.bounds[0], w.bounds[2]) } else { (w.bounds[1], w.bounds[3]) };
-        let center = |w: &Word| {
-            let (x0, x1) = span(w, 0);
-            let (y0, y1) = span(w, 1);
-            ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
-        };
 
-        let (from_low, from_high) = span(from, axis);
-        let (from_c_low, from_c_high) = span(from, cross);
-        let threshold = OVERLAP_RATE * (from_c_high - from_c_low);
-        let (fx, fy) = center(from);
-
-        let best = words
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != index)
-            .filter_map(|(i, w)| {
-                // 1. 두 모서리가 모두 그 방향으로 넘어가 있어야 한다.
-                let (low, high) = span(w, axis);
-                let ahead = if sign > 0.0 { low > from_low && high > from_high } else { low < from_low && high < from_high };
-                if !ahead {
-                    return None;
-                }
-                // 2. 직각 축에서 겹쳐야 한다.
-                let (c_low, c_high) = span(w, cross);
-                let overlap = c_high.min(from_c_high) - c_low.max(from_c_low);
-                if overlap <= 0.0 {
-                    return None;
-                }
-                // 3~4. 기준치를 넘는 것을 먼저, 그다음 중앙점 거리가 짧은 것, 그다음 겹침이 큰 것.
-                let (x, y) = center(w);
-                let distance = (x - fx).hypot(y - fy);
-                Some((i, (overlap < threshold, distance, -overlap)))
-            })
-            .min_by(|(_, a), (_, b)| {
-                a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)).then_with(|| a.2.total_cmp(&b.2))
-            });
-        match best {
-            Some((i, _)) => {
+        let next = in_line(words, index, axis, sign).or_else(|| {
+            // 가로로 갈 데가 없으면 줄을 바꾼다. 세로 이동에는 적용하지 않는다.
+            (axis == 0).then(|| wrap_line(words, index, sign)).flatten()
+        });
+        match next {
+            Some(i) => {
                 self.selected.set(Some((page, i)));
                 true
             }
@@ -212,6 +180,98 @@ impl OcrOverlay {
         let cache = self.cache.borrow();
         draw(cache.get(&page_number).map(Vec::as_slice).unwrap_or(&[]))
     }
+}
+
+/// `[low, high]` 꼴로 꺼낸다. bounds는 `[left, bottom, right, top]`이다.
+fn span(w: &Word, axis: usize) -> (f64, f64) {
+    if axis == 0 { (w.bounds[0], w.bounds[2]) } else { (w.bounds[1], w.bounds[3]) }
+}
+
+fn center(w: &Word) -> (f64, f64) {
+    ((w.bounds[0] + w.bounds[2]) / 2.0, (w.bounds[1] + w.bounds[3]) / 2.0)
+}
+
+/// 고른 상자의 세로(또는 가로) 범위에 후보가 얼마나 걸치는지. 0 이하면 다른 줄이다.
+fn straddle(from: &Word, w: &Word, cross: usize) -> f64 {
+    let (a_low, a_high) = span(from, cross);
+    let (b_low, b_high) = span(w, cross);
+    b_high.min(a_high) - b_low.max(a_low)
+}
+
+/// 같은 줄 안에서 그 방향의 이웃을 고른다(규칙 1~4).
+fn in_line(words: &[Word], index: usize, axis: usize, sign: f64) -> Option<usize> {
+    let from = &words[index];
+    let cross = 1 - axis;
+    let (from_low, from_high) = span(from, axis);
+    let (c_low, c_high) = span(from, cross);
+    let threshold = OVERLAP_RATE * (c_high - c_low);
+    let (fx, fy) = center(from);
+
+    words
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != index)
+        .filter_map(|(i, w)| {
+            let (low, high) = span(w, axis);
+            // 1. 두 모서리가 모두 그 방향으로 넘어가 있어야 한다(겹쳐 있어도 된다).
+            let ahead = if sign > 0.0 { low > from_low && high > from_high } else { low < from_low && high < from_high };
+            if !ahead {
+                return None;
+            }
+            // 2. 같은 줄로 볼 만큼 걸쳐야 한다.
+            let overlap = straddle(from, w, cross);
+            if overlap <= 0.0 {
+                return None;
+            }
+            // 3~4. 잘 걸친 것을 먼저, 그다음 이동 방향의 틈이 작은 것, 그다음 중앙점 거리.
+            let gap = if sign > 0.0 { low - from_high } else { from_low - high };
+            let (x, y) = center(w);
+            Some((i, (overlap < threshold, gap.max(0.0), (x - fx).hypot(y - fy))))
+        })
+        .min_by(|(_, a), (_, b)| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)).then_with(|| a.2.total_cmp(&b.2)))
+        .map(|(i, _)| i)
+}
+
+/// 줄 끝에서 다음 줄로 넘어간다. 오른쪽이면 아래 줄, 왼쪽이면 위 줄로 가서 **반대쪽 끝**을 고른다.
+///
+/// 다음 줄은 "고른 상자의 세로 범위에 걸치지 않으면서 그쪽에 있는 상자들 가운데 세로 틈이 가장
+/// 작은 것"이 정한다. 그 상자와 같은 줄인 것들(그 상자의 세로 범위에 걸치는 것들) 중에서 고른
+/// 상자로부터 중앙점이 가장 먼 것을 고르면 그 줄의 반대쪽 끝이 된다.
+fn wrap_line(words: &[Word], index: usize, sign: f64) -> Option<usize> {
+    let from = &words[index];
+    // 오른쪽으로 가다 막히면 아래 줄(PDF에서 y가 작은 쪽), 왼쪽이면 위 줄.
+    let toward = -sign;
+    let (fy_low, fy_high) = span(from, 1);
+    let (fx, fy) = center(from);
+
+    // 다음 줄을 대표할 상자: 세로로 걸치지 않으면서 그쪽에 있고, 세로 틈이 가장 작은 것.
+    let anchor = words
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != index)
+        .filter_map(|(i, w)| {
+            if straddle(from, w, 1) > 0.0 {
+                return None;
+            }
+            let (low, high) = span(w, 1);
+            let gap = if toward > 0.0 { low - fy_high } else { fy_low - high };
+            (gap > 0.0).then_some((i, gap))
+        })
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(i, _)| i)?;
+
+    // 그 줄에서 가장 먼 끝.
+    let row = &words[anchor];
+    words
+        .iter()
+        .enumerate()
+        .filter(|(i, w)| *i != index && straddle(row, w, 1) > 0.0)
+        .map(|(i, w)| {
+            let (x, y) = center(w);
+            (i, (x - fx).hypot(y - fy))
+        })
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(i, _)| i)
 }
 
 /// 한 쪽의 안 보이는 텍스트를 낱말로 묶어 돌려준다.
@@ -371,7 +431,9 @@ mod tests {
         assert_eq!(text(&overlay), "나", "오른쪽은 같은 줄의 다음 낱말");
         assert!(overlay.move_selection(1.0, 0.0));
         assert_eq!(text(&overlay), "다");
-        assert!(!overlay.move_selection(1.0, 0.0), "줄 끝에서는 더 갈 데가 없다");
+        // 줄 끝에서 오른쪽은 아랫줄 머리로 넘어간다(아래에 "라"가 있다).
+        assert!(overlay.move_selection(1.0, 0.0));
+        assert_eq!(text(&overlay), "라");
 
         // 방향은 화면 기준이다 — 아래 화살표는 +1이고, 그 자리 낱말은 PDF 좌표로 y가 작다.
         overlay.select(Some((1, 1))); // "나"
@@ -406,26 +468,68 @@ mod tests {
         assert_eq!(text(&overlay), "아주긴낱말", "같은 줄에서 가장자리가 가까운 쪽");
     }
 
-    /// 겹치지 않는 상자로는 **건너뛰지 않는다**(2026-09-30 사용자 지정). 줄 끝에서 오른쪽을
-    /// 눌러도, 다음 줄 머리로 넘어가지 않는다 — 그렇게 넘어가면 어디로 갈지 예측할 수 없다.
+    /// 줄 끝에서는 다음 줄의 반대쪽 끝으로 넘어간다(2026-09-30 사용자 지정). 오른쪽으로 가다
+    /// 막히면 아래 줄 머리로, 왼쪽으로 가다 막히면 위 줄 끝으로 — 읽는 순서 그대로다.
     #[test]
-    fn it_never_jumps_to_a_box_that_does_not_overlap() {
+    fn horizontal_arrows_wrap_to_the_next_line() {
         let overlay = OcrOverlay { on: true, ..Default::default() };
         overlay.cache.borrow_mut().insert(
             1,
             vec![
-                word(100.0, 100.0, 110.0, 110.0, "줄끝"),
-                // 다음 줄 머리 — 가로로도 세로로도 겹치지 않는다.
-                word(0.0, 80.0, 10.0, 90.0, "다음줄머리"),
+                word(0.0, 100.0, 10.0, 110.0, "윗줄머리"),
+                word(20.0, 100.0, 30.0, 110.0, "윗줄끝"),
+                word(0.0, 80.0, 10.0, 90.0, "아랫줄머리"),
+                word(20.0, 80.0, 30.0, 90.0, "아랫줄끝"),
+            ],
+        );
+        let at = |o: &OcrOverlay| o.selected().unwrap().1;
+
+        overlay.select(Some((1, 1))); // 윗줄끝
+        assert!(overlay.move_selection(1.0, 0.0));
+        assert_eq!(at(&overlay), 2, "오른쪽으로 막히면 아랫줄 머리로");
+
+        overlay.select(Some((1, 2))); // 아랫줄머리
+        assert!(overlay.move_selection(-1.0, 0.0));
+        assert_eq!(at(&overlay), 1, "왼쪽으로 막히면 윗줄 끝으로");
+
+        // 마지막 줄 끝에서 오른쪽은 더 갈 데가 없다.
+        overlay.select(Some((1, 3)));
+        assert!(!overlay.move_selection(1.0, 0.0));
+    }
+
+    /// 세로 이동에는 줄바꿈을 적용하지 않는다 — 쪽을 넘어가는 이동은 이 기능의 몫이 아니다.
+    #[test]
+    fn vertical_arrows_do_not_wrap() {
+        let overlay = OcrOverlay { on: true, ..Default::default() };
+        overlay.cache.borrow_mut().insert(
+            1,
+            vec![word(0.0, 100.0, 10.0, 110.0, "위"), word(80.0, 80.0, 90.0, 90.0, "아래멀리")],
+        );
+        overlay.select(Some((1, 0)));
+        assert!(!overlay.move_selection(0.0, 1.0), "가로로 걸치지 않으면 내려가지 않는다");
+    }
+
+    /// 세로 이동은 **가장 가까운 줄**을 먼저 본다. 중앙점 거리만 보면 두세 줄 아래로 건너뛴다
+    /// (2026-09-30 리포트: "수직방향 이동시 점프가 빈번").
+    #[test]
+    fn vertical_moves_take_the_nearest_row_not_the_nearest_centre() {
+        let overlay = OcrOverlay { on: true, ..Default::default() };
+        overlay.cache.borrow_mut().insert(
+            1,
+            vec![
+                word(0.0, 100.0, 40.0, 110.0, "기준"),
+                // 바로 아래 줄이지만 가로로 살짝 어긋나 중앙점은 조금 멀다.
+                word(18.0, 84.0, 58.0, 94.0, "바로아래"),
+                // 두 줄 아래인데 가로 위치가 똑같아 중앙점 거리는 더 가까울 수 있다.
+                word(0.0, 60.0, 40.0, 70.0, "두줄아래"),
             ],
         );
         overlay.select(Some((1, 0)));
-        assert!(!overlay.move_selection(1.0, 0.0), "오른쪽에 겹치는 상자가 없다");
-        assert!(!overlay.move_selection(0.0, 1.0), "아래에도 가로로 겹치는 상자가 없다");
-        assert_eq!(overlay.selected(), Some((1, 0)), "고른 것이 그대로여야 한다");
+        assert!(overlay.move_selection(0.0, 1.0));
+        assert_eq!(overlay.selected().unwrap().1, 1, "바로 아래 줄로 가야 한다");
     }
 
-    /// 아래 화살표는 가로로 겹치는 상자로만 간다 — 바로 밑에 있는 것.
+    /// 아래 화살표는 가로로 겹치는 상자로만 간다    /// 아래 화살표는 가로로 겹치는 상자로만 간다 — 바로 밑에 있는 것.
     #[test]
     fn down_goes_to_the_box_right_below() {
         let overlay = OcrOverlay { on: true, ..Default::default() };

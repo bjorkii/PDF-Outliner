@@ -133,7 +133,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
         // 있으니(toolbar::handle_scroll_zoom) 그 조합일 때는 패닝에서 제외한다. 연속
         // 스크롤 모드는 egui::ScrollArea가 스크롤 자체를 관리하므로 이 pan_offset 로직은
         // 쪽 단위 모드 전용이다.
-        if !app.continuous_scroll && !ctx.input(|i| i.modifiers.ctrl) {
+        if !app.continuous_scroll && !ctx.input(|i| i.modifiers.ctrl) && !pointer_over_popup(ctx) {
             let scroll_delta = ctx.input(|i| i.smooth_scroll_delta);
             if scroll_delta != egui::Vec2::ZERO {
                 app.viewport.pan_offset += scroll_delta;
@@ -483,13 +483,11 @@ fn show_continuous(
     // 가로 이동 — 확대로 내용이 패널보다 넓을 때만 가능. 트랙패드 좌우 스와이프(Ctrl+휠
     // 줌과 겹치지 않게 Ctrl 제외)로 움직이고, 세로 스크롤은 ScrollArea가 맡는다.
     let max_pan_x = ((content_width - available.x) / 2.0).max(0.0);
-    let horizontal_swipe = ctx.input(|i| {
-        if i.modifiers.ctrl {
-            0.0
-        } else {
-            i.smooth_scroll_delta.x
-        }
-    });
+    let horizontal_swipe = if pointer_over_popup(ctx) {
+        0.0
+    } else {
+        ctx.input(|i| if i.modifiers.ctrl { 0.0 } else { i.smooth_scroll_delta.x })
+    };
     app.continuous_pan_x = (app.continuous_pan_x + horizontal_swipe).clamp(-max_pan_x, max_pan_x);
 
     // 화면 좌표 → (페이지 번호, 그 페이지의 화면 rect). 클릭/드래그/호버 히트테스트가 전부
@@ -1434,6 +1432,17 @@ fn draw_ocr_mark(ui: &egui::Ui, app: &PdfViewerApp, image_rect: egui::Rect, targ
     }
 }
 
+/// 포인터가 창·메뉴·툴팁 위에 있는가.
+///
+/// 뷰어는 스크롤을 `ctx.input`에서 **전역으로** 읽는다(포인터가 어디 있든 같은 값이 온다). 그래서
+/// 설정 창 안에서 두 손가락으로 밀면 그 창이 스크롤되면서 뒤의 지면도 함께 움직였다(2026-09-30
+/// 리포트). egui의 `ScrollArea`는 레이어를 보고 알아서 판단하지만, 전역 값을 직접 읽는 이쪽은
+/// 같은 판단을 손으로 해야 한다. 패널은 `Background` 레이어이고 창·팝업은 그보다 위다.
+fn pointer_over_popup(ctx: &egui::Context) -> bool {
+    let Some(pos) = ctx.pointer_latest_pos() else { return false };
+    ctx.layer_id_at(pos).is_some_and(|layer| layer.order > egui::Order::Background)
+}
+
 /// OCR 표시 모드(예약 6): 지면을 흐리게 덮고 그 위에 안 보이는 텍스트의 자리와 글자를 그린다.
 ///
 /// 지면을 덮는 이유(2026-09-29 요청): 스캔 글자와 OCR 글자가 같은 자리에 겹쳐 있어, 그냥 얹으면
@@ -1447,7 +1456,8 @@ fn draw_ocr_overlay(ui: &egui::Ui, app: &PdfViewerApp, image_rect: egui::Rect, t
     let Ok(page) = document.pages().get((page_number - 1) as PdfPageIndex) else { return };
 
     // 원본을 덮는 흰 장막. 완전히 가리지 않는다 — 스캔 글자가 비쳐야 자리를 대조할 수 있다.
-    let veil = (app.ocr_overlay.veil as f32 / 100.0 * 255.0).round() as u8;
+    // `veil`은 **원본이 얼마나 보이는가**다. 덮는 장막은 그 나머지만큼 짙다.
+    let veil = ((100 - app.ocr_overlay.veil) as f32 / 100.0 * 255.0).round() as u8;
     ui.painter().rect_filled(image_rect, 0.0, egui::Color32::from_white_alpha(veil));
 
     let config = PdfRenderConfig::new().set_target_width(target_width);
