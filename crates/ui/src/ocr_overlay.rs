@@ -464,6 +464,27 @@ mod tests {
     // 서로를 막지 못한다(그 모듈 문서).
     use crate::pdfium_test::{engine as shared_engine, lock as pdfium_lock};
 
+    /// OCR이 살아 있는 DTFA00006 사본을 고른다.
+    ///
+    /// `DTFA00006.pdf`는 손으로 시험하는 파일이라 OCR을 지우거나 일부만 되넣어 둔 상태일 수 있다
+    /// (2026-10-01에 실제로 그래서 이 시험들이 깨졌다). 건드리지 않은 사본이 있으면 그쪽을 먼저
+    /// 쓰고, 둘 다 쓸 수 없으면 조용히 지나간다 — 시험이 틀린 것이 아니라 대상이 없는 것이다.
+    fn dtfa_page_39(engine: &pdf_engine::PdfEngine) -> Option<pdfium_render::prelude::PdfDocument<'static>> {
+        for name in ["DTFA00006-original.pdf", "DTFA00006.pdf"] {
+            let path = crate::pdfium_test::sample(name);
+            let Ok(document) = engine.open_document(&path) else { continue };
+            let Ok(page) = document.pages().get(38) else { continue };
+            let has_ocr = pdf_engine::text_layer::page_chars(&page)
+                .map(|chars| chars.iter().filter(|c| c.invisible && !c.ch.is_whitespace()).count() > 100)
+                .unwrap_or(false);
+            drop(page);
+            if has_ocr {
+                return Some(document);
+            }
+        }
+        None
+    }
+
     /// F1은 켜고 끄기만 한다 — 범위는 따로 정한다(2026-09-29 결정).
     #[test]
     fn f1_only_toggles_on_and_off() {
@@ -751,8 +772,7 @@ mod tests {
     fn vertical_moves_stay_within_one_row_on_a_real_page() {
         let _guard = pdfium_lock();
         let Some(engine) = shared_engine() else { return };
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pdf-samples/DTFA00006.pdf");
-        let Ok(document) = engine.open_document(&path) else { return };
+        let Some(document) = dtfa_page_39(&engine) else { return };
         let Ok(page) = document.pages().get(38) else { return };
         let overlay = OcrOverlay { on: true, ..Default::default() };
 
@@ -790,8 +810,7 @@ mod tests {
     fn horizontal_moves_stay_on_the_line_on_a_real_page() {
         let _guard = pdfium_lock();
         let Some(engine) = shared_engine() else { return };
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pdf-samples/DTFA00006.pdf");
-        let Ok(document) = engine.open_document(&path) else { return };
+        let Some(document) = dtfa_page_39(&engine) else { return };
         let Ok(page) = document.pages().get(38) else { return };
         let overlay = OcrOverlay { on: true, ..Default::default() };
 

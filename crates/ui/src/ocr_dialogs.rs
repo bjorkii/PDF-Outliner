@@ -995,22 +995,22 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     ui.spacing_mut().item_spacing.x = 3.0;
                     let big = |text: &str| egui::RichText::new(text).size(RANGE_SIZE);
                     ui.label(big("hOCR pp."));
-                    if ui.add(egui::DragValue::new(&mut dialog.hocr_first).range(1..=hocr_count)).changed() {
+                    if page_field(ui, "hocr_first", &mut dialog.hocr_first, hocr_count, RANGE_SIZE) {
                         edited = Some(Field::HocrFirst);
                     }
                     ui.label(big("-"));
-                    if ui.add(egui::DragValue::new(&mut dialog.hocr_last).range(1..=hocr_count)).changed() {
+                    if page_field(ui, "hocr_last", &mut dialog.hocr_last, hocr_count, RANGE_SIZE) {
                         edited = Some(Field::HocrLast);
                     }
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new("➜").size(RANGE_SIZE + 3.0).strong());
                     ui.add_space(8.0);
                     ui.label(big("PDF pp."));
-                    if ui.add(egui::DragValue::new(&mut dialog.pdf_first).range(1..=pdf_count)).changed() {
+                    if page_field(ui, "pdf_first", &mut dialog.pdf_first, pdf_count, RANGE_SIZE) {
                         edited = Some(Field::PdfFirst);
                     }
                     ui.label(big("-"));
-                    if ui.add(egui::DragValue::new(&mut dialog.pdf_last).range(1..=pdf_count)).changed() {
+                    if page_field(ui, "pdf_last", &mut dialog.pdf_last, pdf_count, RANGE_SIZE) {
                         edited = Some(Field::PdfLast);
                     }
                 });
@@ -1124,6 +1124,87 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
         Some(false) => app.ocr_import_dialog = None,
         None => {}
     }
+}
+
+/// 옵션 한 묶음을 둥근 상자로 두른다(2026-10-01 요청).
+///
+/// 내보내기 창에는 성격이 다른 묶음이 셋(내보낼 텍스트 / 내보낼 범위 / txt 형식) 들어 있는데,
+/// 줄만 띄워 두었더니 어디까지가 한 묶음인지 읽히지 않았다. 옅은 바탕과 테두리로 경계를 그리고
+/// 머리글을 상자 안 첫 줄에 둔다 — 구분선만으로는 머리글이 어느 쪽에 붙는지 애매하다.
+fn option_group(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
+    let visuals = ui.visuals();
+    egui::Frame::none()
+        .fill(visuals.faint_bg_color)
+        .rounding(6.0)
+        .stroke(egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color))
+        .inner_margin(egui::Margin { left: 12.0, right: 12.0, top: 9.0, bottom: 11.0 })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new(title).strong());
+            ui.add_space(5.0);
+            body(ui);
+        });
+}
+
+/// 쪽 번호를 입력받는 칸. **`DragValue`를 쓰지 않는다.**
+///
+/// egui는 위젯 id를 "그 `Ui`에 지금까지 몇 개를 넣었는지"로 만든다(`Ui::next_auto_id`). 그래서 값에
+/// 따라 나타났다 사라지는 안내 줄이 위에 **하나만** 있어도, 그 줄이 생기는 순간 아래 칸들의 id가
+/// 통째로 밀린다. `DragValue`는 편집 중인 글자를 자기 id로 기억해 두므로, id가 밀리면 **치던 글자를
+/// 잃고** 직전에 확정된 값으로 되돌아간다 — "23을 치고 옆 칸을 누르면 2가 된다"의 정체다
+/// (2026-10-01 리포트, 시험으로 재현: `page_field_tests`).
+///
+/// `push_id`로는 막을 수 없다. egui가 자식 `Ui`의 자동 id 씨앗을 **부모의 카운터**로 만들기 때문이다
+/// (`Ui::new_child`: `unique_id = stable_id.with(self.next_auto_id_salt)`). `DragValue`는 id를 받지
+/// 않지만 `TextEdit`은 받으므로, 여기서 직접 만든다.
+///
+/// 확정은 **칸을 떠날 때와 Enter**에만 한다. 한 글자마다 확정하면 "2"를 친 순간 값이 2로 정해져
+/// 범위가 따라 움직이고, 이어서 "3"을 칠 때는 이미 다른 상태에서 시작하게 된다.
+/// 값이 실제로 바뀌었으면 `true`.
+fn page_field(ui: &mut egui::Ui, salt: &str, value: &mut usize, max: usize, size: f32) -> bool {
+    let id = egui::Id::new(("ocr_page_field", salt));
+    let focused = ui.memory(|m| m.has_focus(id));
+    // 편집 중일 때만 치던 글자를 보여 준다. 그 밖에는 늘 값 자체를 보여 준다.
+    let mut text = ui
+        .data_mut(|d| d.get_temp::<String>(id))
+        .filter(|_| focused)
+        .unwrap_or_else(|| value.to_string());
+
+    let response = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .id(id)
+            .font(egui::FontId::proportional(size))
+            .horizontal_align(egui::Align::Center)
+            .desired_width(size * 2.2)
+            .char_limit(6),
+    );
+    // 칸을 처음 누른 순간 글자를 모두 고른 상태로 둔다 — 바로 새 번호를 쳐서 덮어쓸 수 있어야
+    // 한다(`DragValue`가 하던 일이고, 북마크 제목 편집도 같은 규칙이다).
+    if response.gained_focus() {
+        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {
+            let all = egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(text.chars().count()),
+            );
+            state.cursor.set_char_range(Some(all));
+            egui::TextEdit::store_state(ui.ctx(), id, state);
+        }
+    }
+    if response.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, text.clone()));
+    }
+
+    let enter = response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    if !response.lost_focus() && !enter {
+        return false;
+    }
+    ui.data_mut(|d| d.remove::<String>(id));
+    // 숫자가 아니거나 비었으면 손대지 않는다 — 원래 값이 그대로 다시 보인다.
+    let Ok(parsed) = text.trim().parse::<usize>() else { return false };
+    let clamped = parsed.clamp(1, max.max(1));
+    let changed = clamped != *value;
+    *value = clamped;
+    changed
 }
 
 /// 페이지 번호 목록을 "1-3, 7, 9-10"처럼 줄인다(최대 10구간).
@@ -1244,7 +1325,7 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 if nothing_to_export {
                     ui.colored_label(ui.visuals().warn_fg_color, "이 문서에는 내보낼 텍스트가 없습니다.");
                 } else {
-                    ui.label("내보낼 텍스트");
+                    option_group(ui, "내보낼 텍스트", |ui| {
                     // 의미 없는 선택지는 잠근다. 확인이 끝나기 전(`None`)에는 둘 다 열어 둔다 —
                     // 그동안 사용자가 골라 진행해도 결과는 달라지지 않는다.
                     //
@@ -1268,10 +1349,12 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     } else if kinds.is_some_and(|k| !k.invisible) {
                         bullet(ui, "이 문서에는 보이지 않는 텍스트(OCR 레이어)가 없습니다.");
                     }
+                    });
+
                     // ---- 내보낼 범위(예약 11) ----
-                    ui.add_space(12.0);
-                    ui.label("내보낼 범위");
+                    ui.add_space(10.0);
                     let total = total_pages.max(1);
+                    option_group(ui, "내보낼 범위", |ui| {
                     ui.radio_value(&mut dialog.scope, ExportScope::All, format!("전체 ({total}쪽)"));
                     ui.radio_value(
                         &mut dialog.scope,
@@ -1284,13 +1367,14 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                         ui.add_enabled_ui(picked, |ui| {
                             // 두 칸은 서로 넘어서지 않는다. 시작을 끝 뒤로 올리면 끝이 따라 올라가고,
                             // 끝을 시작 앞으로 내리면 시작이 따라 내려온다(가져오기 창과 같은 몸짓).
+                            let size = egui::TextStyle::Body.resolve(ui.style()).size;
                             ui.label("시작페이지");
-                            if ui.add(egui::DragValue::new(&mut dialog.first).range(1..=total)).changed() {
+                            if page_field(ui, "export_first", &mut dialog.first, total, size) {
                                 dialog.last = dialog.last.max(dialog.first);
                             }
                             ui.label("-");
                             ui.label("끝페이지");
-                            if ui.add(egui::DragValue::new(&mut dialog.last).range(1..=total)).changed() {
+                            if page_field(ui, "export_last", &mut dialog.last, total, size) {
                                 dialog.first = dialog.first.min(dialog.last);
                             }
                         });
@@ -1316,11 +1400,11 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                             },
                         );
                     }
+                    });
 
                     if dialog.format == ExportFormat::Txt {
-                        // 위(내보낼 텍스트 고르기)와 아래(txt 형식 다루기)는 성격이 다른 묶음이라
-                        // 눈에 보이게 띄운다(2026-09-29 요청).
-                        ui.add_space(12.0);
+                        ui.add_space(10.0);
+                        option_group(ui, "txt 형식", |ui| {
                         ui.checkbox(&mut dialog.txt_page_labels, "페이지 번호 함께 표기")
                             .on_hover_text("PDF의 페이지 레이블이 물리 번호와 다르면 === [p. 12 | xii] === 처럼 함께 적습니다.");
                         ui.checkbox(&mut dialog.txt_crlf, "줄바꿈을 CRLF로 처리(Windows 호환)");
@@ -1328,6 +1412,7 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                         ui.checkbox(&mut dialog.txt_form_feed, "페이지 사이에 경계 표식 삽입(다른 PDF툴 호환)");
                         ui.add_space(2.0);
                         bullet(ui, "txt에는 위치 정보가 없어 OCR 가져오기에 쓸 수 없습니다.");
+                        });
                     }
                 }
                 ui.add_space(8.0);
@@ -1365,12 +1450,21 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
     }
 
     if start {
+        // 부분만 내보내면 파일명에 범위를 적는다 — 나중에 가져올 때 이름만 보고 범위를 잡는다
+        // (2026-10-01 요청). 전체면 예전 그대로다.
+        let suffix = app
+            .ocr_export_dialog
+            .as_ref()
+            .map(|d| d.range(app.current_page as usize, app.total_pages as usize))
+            .filter(|(first, last)| (*first, *last) != (1, (app.total_pages as usize).max(1)))
+            .map(|(first, last)| if first == last { format!("_{first}") } else { format!("_{first}-{last}") })
+            .unwrap_or_default();
         let default_name = app
             .current_file
             .as_deref()
             .and_then(Path::file_stem)
-            .map(|s| format!("{}.{extension}", crate::app::display_filename(Path::new(s))))
-            .unwrap_or_else(|| format!("ocr.{extension}"));
+            .map(|s| format!("{}{suffix}.{extension}", crate::app::display_filename(Path::new(s))))
+            .unwrap_or_else(|| format!("ocr{suffix}.{extension}"));
         let file_dialog = crate::file_dialog::Dialog::new("OCR 텍스트를 저장할 파일 지정")
             .prompt("내보내기")
             .file_name(&default_name);
@@ -1436,15 +1530,9 @@ fn partial_path(output: &Path) -> PathBuf {
 fn describe_export(r: &ExportReport) -> Report {
     // 형식과 고른 범위는 창 제목·옵션에 이미 있고, 쪽·단어 수는 사용자가 관심 가질 값이
     // 아니다(2026-09-28 결정). 끝났다는 사실만 머리글로 적고, 이상이 있을 때만 줄을 더한다.
+    // 고른 범위는 **기본 파일명**(`문서_23-26.hocr`)이 이미 알린다 — 결과 창에 또 적지 않는다
+    // (2026-10-01 지정). 그 편이 나중에 가져올 때 파일명만 보고 범위를 잡기에도 좋다.
     let mut report = Report::new("내보내기를 완료했습니다.");
-    // 범위를 골라 내보냈으면 어디까지였는지 남긴다 — 옵션 창은 이미 닫혔다.
-    if let Some((first, last)) = r.range {
-        report.line(if first == last {
-            format!("{first}쪽만 내보냈습니다.")
-        } else {
-            format!("{first}쪽부터 {last}쪽까지 내보냈습니다.")
-        });
-    }
     if r.clamped_chars > 0 {
         report.line(format!("글자 높이가 비정상적으로 커서 보정한 글자: {}개", r.clamped_chars));
     }
@@ -1936,5 +2024,134 @@ mod export_range_tests {
         // 확인이 끝나기 전에는 아무 말도 하지 않는다.
         d.page_text = None;
         assert_eq!(d.range_has_text(1, 6), None);
+    }
+}
+
+
+/// 쪽 번호 칸이 **위쪽 줄 수가 달라져도** 치던 글자를 잃지 않아야 한다(2026-10-01 리포트).
+#[cfg(test)]
+mod page_field_tests {
+    use super::page_field;
+
+    /// 값에 따라 안내 줄이 나타났다 사라지는 창에서, 시작 칸에 "23"을 치고 끝 칸을 누른다.
+    ///
+    /// 이 배치가 핵심이다. `DragValue`로 만들었을 때는 "2"를 친 순간 위에 줄이 하나 생기면서 아래
+    /// 칸들의 id가 밀렸고(실측: `DE27` → `4AF6`), 그 바람에 치던 "23"을 잃고 2로 되돌아갔다.
+    #[test]
+    fn typing_a_two_digit_page_survives_a_line_appearing_above() {
+        let ctx = egui::Context::default();
+        let (mut first, mut last) = (1usize, 3usize);
+
+        let frame = |events: Vec<egui::Event>, first: &mut usize, last: &mut usize| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0))),
+                events,
+                ..Default::default()
+            };
+            let (mut a, mut b) = (egui::Rect::NOTHING, egui::Rect::NOTHING);
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    // 값에 따라 나타났다 사라지는 안내 — 실제 창에도 이런 줄이 있다.
+                    if *first > 1 {
+                        ui.label("• 이 범위에는 OCR 텍스트가 없습니다.");
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("시작페이지");
+                        if page_field(ui, "t_first", first, 48, 14.0) {
+                            *last = (*last).max(*first);
+                        }
+                        a = ui.min_rect();
+                        ui.label("-");
+                        ui.label("끝페이지");
+                        page_field(ui, "t_last", last, 48, 14.0);
+                        b = ui.min_rect();
+                    });
+                });
+            });
+            (a, b)
+        };
+
+        // 두 프레임을 돌려 자리를 잡는다(첫 프레임은 크기를 모른다).
+        let (row, _) = frame(vec![], &mut first, &mut last);
+        frame(vec![], &mut first, &mut last);
+        // 시작 칸은 "시작페이지" 라벨 바로 오른쪽이다.
+        let field_a = egui::pos2(row.left() + 90.0, row.center().y);
+        let field_b = egui::pos2(row.left() + 230.0, row.center().y);
+
+        let click = |pos: egui::Pos2| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+            ]
+        };
+
+        frame(click(field_a), &mut first, &mut last);
+        frame(vec![egui::Event::Text("2".into())], &mut first, &mut last);
+        frame(vec![egui::Event::Text("3".into())], &mut first, &mut last);
+        // 한 글자마다 확정하지 않는다 — 여기서는 아직 1이어야 한다.
+        assert_eq!(first, 1, "치는 도중에 값이 확정됐다");
+
+        frame(click(field_b), &mut first, &mut last);
+        frame(vec![], &mut first, &mut last);
+        assert_eq!(first, 23, "칸을 떠날 때 23으로 확정되어야 한다");
+        assert_eq!(last, 23, "시작이 끝을 넘어섰으니 끝이 따라와야 한다");
+    }
+
+    /// 숫자가 아니거나 비면 원래 값을 지키고, 문서 밖 쪽은 끌어들인다.
+    #[test]
+    fn a_nonsense_entry_keeps_the_previous_value() {
+        let ctx = egui::Context::default();
+        let mut value = 7usize;
+        let mut rect = egui::Rect::NOTHING;
+        let frame = |events: Vec<egui::Event>, value: &mut usize, rect: &mut egui::Rect| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 200.0))),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("쪽");
+                        page_field(ui, "solo", value, 48, 14.0);
+                        *rect = ui.min_rect();
+                    });
+                });
+            });
+        };
+        frame(vec![], &mut value, &mut rect);
+        frame(vec![], &mut value, &mut rect);
+        // "쪽" 라벨 오른쪽이 입력칸이다.
+        let pos = egui::pos2(rect.left() + 40.0, rect.center().y);
+
+        // 칸에 숫자를 쳐서 Enter로 확정하는 흐름이 실제로 먹는지부터 확인한다.
+        let type_and_commit = |text: &str, value: &mut usize, rect: &mut egui::Rect| {
+            frame(
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+                ],
+                value,
+                rect,
+            );
+            frame(vec![egui::Event::Text(text.to_string())], value, rect);
+            frame(
+                vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }],
+                value,
+                rect,
+            );
+            frame(vec![], value, rect);
+        };
+
+        type_and_commit("12", &mut value, &mut rect);
+        assert_eq!(value, 12, "정상 입력이 먹지 않는다 — 시험 자체가 칸을 못 잡고 있다");
+
+        type_and_commit("abc", &mut value, &mut rect);
+        assert_eq!(value, 12, "숫자가 아닌 입력에 값이 바뀌었다");
+
+        type_and_commit("900", &mut value, &mut rect);
+        assert_eq!(value, 48, "문서 끝을 넘는 값이 그대로 들어갔다");
     }
 }

@@ -563,9 +563,15 @@ fn render_nodes(
                 let (_, buffer) = drag_state.editing.as_mut().unwrap();
                 let buffer_len_chars = buffer.chars().count();
                 let edit_id = Id::new(("bm_edit", node.id));
+                // **여러 줄 칸을 쓰되 Enter는 확정에 남긴다**(2026-10-01 요청). 한 줄 칸은 긴 제목이
+                // 옆으로 흘러 나가 편집이 어렵다. `return_key(None)`으로 줄바꿈 삽입을 꺼 두면
+                // 아래 `enter_pressed`가 예전처럼 확정을 맡는다. `desired_rows(1)`이라 짧은 제목은
+                // 한 줄 높이 그대로이고, 길어지면 그만큼 칸이 자란다.
                 let edit_response = ui.add(
-                    egui::TextEdit::singleline(buffer)
+                    egui::TextEdit::multiline(buffer)
                         .desired_width(ui.available_width())
+                        .desired_rows(1)
+                        .return_key(None)
                         .id(edit_id),
                 );
                 if drag_state.focus_editing {
