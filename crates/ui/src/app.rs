@@ -2680,6 +2680,7 @@ impl eframe::App for PdfViewerApp {
         // 어떤 그리기보다 먼저 — 지난 프레임에 캐시에서 빠진 텍스처를 이제 해제한다
         // (texture_cache 모듈 문서: 같은 프레임에 그리고 해제하면 wgpu 패닉).
         self.page_textures.begin_frame(ctx);
+        self.thumbnails.begin_frame();
 
         if self.max_texture_side.is_none() {
             self.max_texture_side = frame

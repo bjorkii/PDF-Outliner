@@ -11,6 +11,15 @@
 //! 뷰어 텍스처와 **캐시를 나눠 둔다**. `page_textures`는 쪽마다 배율 하나만 들고 있어서, 썸네일을
 //! 거기 넣으면 보고 있던 큰 텍스처를 밀어낸다.
 //!
+//! **캐시에서 빠진 텍스처는 한 프레임 뒤에 놓아준다**(2026-09-30 크래시). egui-wgpu는 한 프레임을
+//! 올리기 → 그리기 → 해제 → GPU 제출 순으로 처리하므로, 이번 프레임에 그린 텍스처를 같은 프레임
+//! 안에서 놓으면 제출 시점에 `Texture ... has been destroyed`로 패닉한다. `texture_cache` 모듈이
+//! 같은 이유로 `retired`를 두고 있고, 여기도 같은 방식을 쓴다.
+//!
+//! **버릴 쪽은 `current_page`가 아니라 지금 보고 있는 줄을 기준으로 고른다.** 처음에는 현재 쪽에서
+//! 먼 것부터 버렸는데, 목록만 멀리 스크롤하면 **화면에 보이는 쪽이 곧 가장 먼 쪽**이라 방금 그린
+//! 텍스처를 그 프레임에 바로 버렸다. 위의 패닉이 난 경로가 이것이다.
+//!
 //! **줄 높이는 문서의 중위 비율로 한 번만 정하고, 그림은 쪽마다 제 비율로 그 안에 맞춰 넣는다**
 //! (2026-09-30 리포트). 처음에는 *현재 쪽*의 비율로 모든 줄의 높이를 잡았는데, DTFA00006.pdf
 //! 2쪽처럼 책등(216 × 3663 pt, 17:1)이 섞여 있으면 그 쪽을 고른 순간 48줄 전부가 2400px로 늘어나
@@ -21,10 +30,20 @@ use crate::app::PdfViewerApp;
 use std::collections::{HashMap, HashSet};
 
 /// 썸네일 렌더 폭(px). 사이드바를 넓혀도 이 폭으로 한 번만 그려 두고 늘려 보여 준다.
-pub const THUMB_WIDTH: i32 = 160;
+///
+/// 이 값은 렌더 워커 응답이 썸네일 것인지 가리는 열쇠이기도 하므로(`app::update` 응답 분기), 뷰어가
+/// 쓸 일이 없을 만큼 작아야 한다.
+pub const THUMB_WIDTH: i32 = 208;
 
-/// 캐시에 담아 둘 쪽 수. 넘으면 지금 보이는 자리에서 먼 것부터 버린다.
-const CACHE_LIMIT: usize = 240;
+/// 그림을 보여 줄 수 있는 폭의 범위(pt). 사이드바를 넓히면 위쪽 한계까지 따라 커진다.
+const MIN_DISPLAY_WIDTH: f32 = 60.0;
+const MAX_DISPLAY_WIDTH: f32 = 312.0;
+
+/// 캐시에 담아 둘 쪽 수. 넘으면 지금 보이는 줄에서 먼 것부터 버린다.
+///
+/// 렌더 폭을 키운 만큼(160 → 208) 한 장이 차지하는 메모리도 1.7배라, 상한을 240에서 줄여 전체
+/// 사용량을 그대로 뒀다(약 40MB). 버려진 쪽은 되돌아가면 다시 그려진다.
+const CACHE_LIMIT: usize = 160;
 
 /// 줄 하나에서 그림 아래 쪽 번호가 차지하는 높이.
 const LABEL_HEIGHT: f32 = 18.0;
@@ -41,12 +60,25 @@ pub struct Thumbnails {
     inflight: HashSet<u32>,
     /// 줄 높이를 정하는 문서 대표 비율. 문서마다 한 번만 재고 `clear`로 버린다.
     row_ratio: Option<f32>,
+    /// 이번 프레임에 캐시에서 빠진 텍스처 — 다음 프레임 `begin_frame`에서 놓아준다.
+    retired: Vec<egui::TextureHandle>,
 }
 
 impl Thumbnails {
-    /// 문서가 바뀌면 전부 버린다.
+    /// 매 프레임 `update` 맨 앞(어떤 그리기보다 먼저)에 호출 — 지난 프레임에 빠진 텍스처를 이제
+    /// 놓아준다. 지난 프레임은 이미 GPU에 제출됐으므로 안전하다.
+    pub fn begin_frame(&mut self) {
+        if self.retired.is_empty() {
+            return;
+        }
+        let ids: Vec<egui::TextureId> = self.retired.iter().map(egui::TextureHandle::id).collect();
+        self.retired.clear();
+        crate::trace::record(format_args!("썸네일 퇴역 반납: {ids:?}"));
+    }
+
+    /// 문서가 바뀌면 전부 버린다. 그리던 중일 수 있으므로 텍스처는 곧장 놓지 않는다.
     pub fn clear(&mut self) {
-        self.cache.clear();
+        self.retired.extend(self.cache.drain().map(|(_, texture)| texture));
         self.inflight.clear();
         self.row_ratio = None;
     }
@@ -64,7 +96,10 @@ impl Thumbnails {
 
     pub fn insert(&mut self, page: u32, texture: egui::TextureHandle) {
         self.inflight.remove(&page);
-        self.cache.insert(page, texture);
+        // 같은 쪽을 다시 그린 경우, 밀려난 것도 곧장 놓지 않는다(`trim` 주석과 같은 이유).
+        if let Some(old) = self.cache.insert(page, texture) {
+            self.retired.push(old);
+        }
     }
 
     /// 렌더가 실패했거나 버려졌을 때 — 다음에 다시 맡길 수 있게 표시만 지운다.
@@ -72,16 +107,24 @@ impl Thumbnails {
         self.inflight.remove(&page);
     }
 
-    /// 캐시가 너무 커지면 지금 보는 자리에서 먼 쪽부터 버린다.
+    /// 캐시가 너무 커지면 **지금 보고 있는 줄**에서 먼 쪽부터 버린다. `around`에 현재 쪽을 넣으면
+    /// 안 된다 — 목록만 멀리 스크롤했을 때 방금 그린 것부터 버리게 된다(모듈 문서).
+    ///
+    /// 뺀 텍스처는 `retired`에 한 프레임 붙잡아 둔다. 여기서 바로 놓으면 이번 프레임에 그린
+    /// 텍스처가 GPU 제출 전에 사라져 wgpu가 패닉한다.
     fn trim(&mut self, around: u32) {
         if self.cache.len() <= CACHE_LIMIT {
             return;
         }
         let mut pages: Vec<u32> = self.cache.keys().copied().collect();
         pages.sort_by_key(|page| page.abs_diff(around));
-        for page in pages.into_iter().skip(CACHE_LIMIT) {
-            self.cache.remove(&page);
+        let dropped: Vec<u32> = pages.into_iter().skip(CACHE_LIMIT).collect();
+        for page in &dropped {
+            if let Some(texture) = self.cache.remove(page) {
+                self.retired.push(texture);
+            }
         }
+        crate::trace::record(format_args!("썸네일 정리(기준 p{around}): {}장 퇴역", dropped.len()));
     }
 }
 
@@ -122,16 +165,19 @@ pub fn show(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     }
 
     // 그림 폭은 사이드바 폭에 맞추되, 렌더는 늘 THUMB_WIDTH로 한 번만 한다.
-    let width = (ui.available_width() - 16.0).clamp(60.0, 240.0);
+    let width = (ui.available_width() - 16.0).clamp(MIN_DISPLAY_WIDTH, MAX_DISPLAY_WIDTH);
     let box_height = width * app.thumbnails.row_ratio(&app.page_sizes);
     let height = box_height + LABEL_HEIGHT + ROW_GAP;
     let mut go_to: Option<u32> = None;
+    // 캐시 정리의 기준점. 현재 쪽이 아니라 지금 화면에 보이는 줄의 한가운데다.
+    let mut visible_center = app.current_page;
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
         ui,
         height,
         pages as usize,
         |ui, rows| {
+            visible_center = (rows.start + rows.end).div_ceil(2) as u32;
             for index in rows {
                 let page = index as u32 + 1;
                 if let Some(target) = row(ui, app, page, width, box_height) {
@@ -145,7 +191,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
         app.focus_area = crate::app::FocusArea::Sidebar;
         app.go_to_page(page);
     }
-    app.thumbnails.trim(app.current_page);
+    app.thumbnails.trim(visible_center.clamp(1, pages));
 }
 
 /// 줄 하나. 눌렸으면 그 쪽 번호를 돌려준다. `box_height`는 그림이 들어갈 칸의 높이이고, 줄 전체
@@ -211,17 +257,23 @@ fn row(ui: &mut egui::Ui, app: &mut PdfViewerApp, page: u32, width: f32, box_hei
 mod tests {
     use super::*;
 
+    /// 쪽 하나에 텍스처를 채워 넣은 캐시.
+    fn filled(ctx: &egui::Context, pages: u32) -> Thumbnails {
+        let mut thumbs = Thumbnails::default();
+        let image = egui::ColorImage::new([1, 1], egui::Color32::WHITE);
+        for page in 1..=pages {
+            let texture = ctx.load_texture(format!("t{page}"), image.clone(), egui::TextureOptions::LINEAR);
+            thumbs.insert(page, texture);
+        }
+        thumbs
+    }
+
     /// 캐시가 상한을 넘으면 지금 보는 자리에서 먼 쪽부터 버린다 — 가까운 쪽은 남아야 스크롤이
     /// 매끄럽다.
     #[test]
     fn trimming_keeps_the_pages_around_the_current_one() {
         let ctx = egui::Context::default();
-        let mut thumbs = Thumbnails::default();
-        let image = egui::ColorImage::new([1, 1], egui::Color32::WHITE);
-        for page in 1..=(CACHE_LIMIT as u32 + 40) {
-            let texture = ctx.load_texture(format!("t{page}"), image.clone(), egui::TextureOptions::LINEAR);
-            thumbs.insert(page, texture);
-        }
+        let mut thumbs = filled(&ctx, CACHE_LIMIT as u32 + 40);
         let around = CACHE_LIMIT as u32 / 2;
         thumbs.trim(around);
 
@@ -229,6 +281,40 @@ mod tests {
         assert!(thumbs.cache.contains_key(&around), "보고 있는 쪽이 남아야 한다");
         assert!(thumbs.cache.contains_key(&(around + 1)));
         assert!(!thumbs.cache.contains_key(&(CACHE_LIMIT as u32 + 40)), "가장 먼 쪽이 버려져야 한다");
+    }
+
+    /// 목록만 멀리 스크롤했을 때, **보고 있는 줄** 둘레가 남아야 한다. 현재 쪽을 기준으로 삼았을
+    /// 때는 화면에 보이는 쪽이 곧 가장 먼 쪽이라 방금 그린 것부터 버려졌다(2026-09-30 크래시).
+    #[test]
+    fn trimming_keeps_what_is_on_screen_even_when_it_is_far_from_the_current_page() {
+        let ctx = egui::Context::default();
+        let total = CACHE_LIMIT as u32 + 40;
+        let mut thumbs = filled(&ctx, total);
+        // 현재 쪽은 1쪽인데 목록은 맨 끝을 보고 있는 상황.
+        thumbs.trim(total - 5);
+
+        for page in (total - 10)..=total {
+            assert!(thumbs.cache.contains_key(&page), "화면에 보이는 p{page}가 버려졌다");
+        }
+        assert!(!thumbs.cache.contains_key(&1), "멀리 있는 1쪽이 버려져야 한다");
+    }
+
+    /// 버린 텍스처는 그 프레임에 놓지 않고 다음 프레임까지 붙잡아 둔다 — 같은 프레임에 그리고
+    /// 놓으면 wgpu가 제출 때 패닉한다(모듈 문서, 2026-09-30 크래시).
+    #[test]
+    fn dropped_textures_are_held_for_one_more_frame() {
+        let ctx = egui::Context::default();
+        let mut thumbs = filled(&ctx, CACHE_LIMIT as u32 + 40);
+        thumbs.trim(1);
+        assert_eq!(thumbs.retired.len(), 40, "뺀 텍스처를 붙잡아 두어야 한다");
+
+        thumbs.begin_frame();
+        assert!(thumbs.retired.is_empty(), "다음 프레임에 놓아주어야 한다");
+
+        // 문서를 닫을 때도 마찬가지다.
+        thumbs.clear();
+        assert!(thumbs.cache.is_empty());
+        assert_eq!(thumbs.retired.len(), CACHE_LIMIT, "비울 때도 곧장 놓으면 안 된다");
     }
 
     /// 책등처럼 판형이 크게 다른 쪽이 섞여도 줄 높이가 흔들리지 않아야 한다 — DTFA00006.pdf
