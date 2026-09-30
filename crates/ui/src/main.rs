@@ -21,6 +21,8 @@ mod ocr_dialogs;
 mod ocr_import;
 mod ocr_overlay;
 mod ocr_worker;
+#[cfg(test)]
+mod pdfium_test;
 mod render_worker;
 mod settings;
 mod search_panel;

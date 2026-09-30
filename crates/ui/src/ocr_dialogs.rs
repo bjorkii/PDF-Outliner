@@ -22,9 +22,28 @@ fn focus_window(ctx: &egui::Context) {
 }
 
 /// 내보내기 옵션 대화상자 상태. 형식은 메뉴에서 고른다.
+/// 내보낼 쪽의 범위를 고르는 방식(예약 11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportScope {
+    /// 문서 전체.
+    All,
+    /// 지금 뷰어에 떠 있는 쪽 하나.
+    Current,
+    /// 아래 두 칸으로 지정한 범위.
+    Range,
+}
+
 pub struct ExportDialog {
     pub format: ExportFormat,
     pub invisible_only: bool,
+    pub scope: ExportScope,
+    /// `ExportScope::Range`일 때의 시작·끝 쪽(1부터, 양끝 포함). 다른 방식일 때도 값은 남겨 두어
+    /// 라디오를 오갈 때 고쳐 둔 범위가 사라지지 않게 한다.
+    pub first: usize,
+    pub last: usize,
+    /// 쪽마다 어떤 텍스트가 있는지 — 고른 범위에 내보낼 것이 있는지 알리는 데 쓴다. 확인이 끝나기
+    /// 전에는 `None`이라 아무 말도 하지 않는다(`Event::PageTextMap`).
+    pub page_text: Option<PageTextMap>,
     pub txt_page_labels: bool,
     pub txt_crlf: bool,
     pub txt_form_feed: bool,
@@ -35,17 +54,54 @@ pub struct ExportDialog {
     pub start_pending: bool,
 }
 
+/// 쪽마다 어떤 텍스트가 있는지. 길이는 문서 쪽 수와 같다.
+#[derive(Debug, Clone, Default)]
+pub struct PageTextMap {
+    pub visible: Vec<bool>,
+    pub invisible: Vec<bool>,
+}
+
 impl ExportDialog {
-    pub fn new(format: ExportFormat) -> Self {
+    pub fn new(format: ExportFormat, total_pages: usize) -> Self {
         Self {
             format,
             invisible_only: true,
+            scope: ExportScope::All,
+            first: 1,
+            last: total_pages.max(1),
+            page_text: None,
             txt_page_labels: true,
             txt_crlf: false,
             txt_form_feed: false,
             text_kinds: None,
             start_pending: false,
         }
+    }
+
+    /// 고른 방식을 실제 쪽 범위로(1부터, 양끝 포함).
+    pub fn range(&self, current_page: usize, total_pages: usize) -> (usize, usize) {
+        let total = total_pages.max(1);
+        match self.scope {
+            ExportScope::All => (1, total),
+            ExportScope::Current => {
+                let page = current_page.clamp(1, total);
+                (page, page)
+            }
+            // 두 칸은 서로 넘어서지 않는다. 가져오기 창처럼 한 칸을 고치면 나머지가 따라오되,
+            // 여기는 맞춰야 할 반대쪽 범위가 없으므로 쪽수를 지킬 이유도 없다 — 넘어선 쪽만 민다.
+            ExportScope::Range => {
+                let last = self.last.clamp(1, total);
+                (self.first.clamp(1, last), last)
+            }
+        }
+    }
+
+    /// 고른 범위에 내보낼 글이 있는가. 아직 확인 전이면 `None`.
+    pub fn range_has_text(&self, current_page: usize, total_pages: usize) -> Option<bool> {
+        let map = self.page_text.as_ref()?;
+        let (first, last) = self.range(current_page, total_pages);
+        let any = |flags: &[bool]| flags.get(first - 1..last.min(flags.len())).is_some_and(|s| s.iter().any(|f| *f));
+        Some(if self.invisible_only { any(&map.invisible) } else { any(&map.invisible) || any(&map.visible) })
     }
 }
 
@@ -70,7 +126,7 @@ impl TextKinds {
 /// 같은 선택을 열어 둔 채로 보여 주게 된다. 그래서 창은 바로 띄우고, 답이 오면 그때 라디오를
 /// 잠근다 — 답이 오기 전에 사용자가 골라 진행해도 결과는 어차피 같으므로 문제가 없다.
 pub fn request_export(ctx: &egui::Context, app: &mut PdfViewerApp, format: ExportFormat) {
-    app.ocr_export_dialog = Some(ExportDialog::new(format));
+    app.ocr_export_dialog = Some(ExportDialog::new(format, app.total_pages as usize));
     finish_probe(app);
     if let Some(pdf) = app.current_file.clone() {
         // 실패하면 확인만 없는 것이고(라디오는 열린 채로 남는다) 내보내기 자체는 되므로 조용히 넘긴다.
@@ -91,7 +147,8 @@ fn poll_export_probe(app: &mut PdfViewerApp) {
         finish_probe(app);
         return;
     }
-    // 답은 한 번뿐이라 한 프레임에 한 줄만 읽는다(끝 이벤트든 실패든 바로 확인을 놓는다).
+    // 답이 두 번에 나눠 온다 — 문서 전체의 텍스트 종류가 먼저, 쪽별 목록이 나중이다
+    // (`ocr_worker::probe_text_kinds`). 앞의 것으로 확인을 놓으면 뒤의 것을 못 받는다.
     let Some(probe) = app.ocr_export_probe.as_ref() else { return };
     match probe.poll() {
         WorkerPoll::Empty => {}
@@ -103,12 +160,18 @@ fn poll_export_probe(app: &mut PdfViewerApp) {
                     dialog.invisible_only = invisible;
                 }
             }
+        }
+        WorkerPoll::Event(Event::PageTextMap { visible, invisible }) => {
+            if let Some(dialog) = app.ocr_export_dialog.as_mut() {
+                dialog.page_text = Some(PageTextMap { visible, invisible });
+            }
             finish_probe(app);
         }
-        // 다른 이벤트나 실패 — 라디오는 열어 두고, 기다리던 "내보내기…"는 풀어 준다.
+        // 다른 이벤트나 실패 — 라디오는 열어 두고, 기다리던 "내보내기…"는 풀어 준다. 쪽별 목록은
+        // 오지 않으므로 범위 안내도 뜨지 않는다(모르는 것을 단정해 말하지 않는다).
         WorkerPoll::Event(_) | WorkerPoll::Closed => {
             if let Some(dialog) = app.ocr_export_dialog.as_mut() {
-                dialog.text_kinds = Some(TextKinds::UNKNOWN);
+                dialog.text_kinds.get_or_insert(TextKinds::UNKNOWN);
             }
             finish_probe(app);
         }
@@ -345,7 +408,7 @@ fn poll_events(app: &mut PdfViewerApp) {
                 }
             }
             // 내보내기 옵션 창의 조용한 확인은 작업 창과 별개 경로다(`poll_export_probe`).
-            WorkerPoll::Event(Event::TextKinds { .. }) => {}
+            WorkerPoll::Event(Event::TextKinds { .. } | Event::PageTextMap { .. }) => {}
             WorkerPoll::Event(Event::Failed(message)) => job.fail(message),
             // 끝 이벤트 없이 출력이 끝남 — 작업 프로세스가 죽었다.
             WorkerPoll::Closed => job.fail("작업 프로세스가 예기치 않게 끝났습니다(panic.log 확인).".to_string()),
@@ -1155,6 +1218,9 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
         app.ocr_export_dialog = None;
         return;
     }
+    // 창을 빌리기 전에 먼저 꺼내 둔다 — 아래에서 `dialog`를 `&mut`로 잡고 있으면 `app`을 못 읽는다.
+    let total_pages = app.total_pages as usize;
+    let current_page = app.current_page as usize;
     let Some(dialog) = app.ocr_export_dialog.as_mut() else { return };
     let (title, extension) = match dialog.format {
         ExportFormat::Hocr => ("OCR 텍스트를 hOCR로 내보내기", "hocr"),
@@ -1202,6 +1268,54 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     } else if kinds.is_some_and(|k| !k.invisible) {
                         bullet(ui, "이 문서에는 보이지 않는 텍스트(OCR 레이어)가 없습니다.");
                     }
+                    // ---- 내보낼 범위(예약 11) ----
+                    ui.add_space(12.0);
+                    ui.label("내보낼 범위");
+                    let total = total_pages.max(1);
+                    ui.radio_value(&mut dialog.scope, ExportScope::All, format!("전체 ({total}쪽)"));
+                    ui.radio_value(
+                        &mut dialog.scope,
+                        ExportScope::Current,
+                        format!("현재 페이지 ({}쪽)", current_page.clamp(1, total)),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut dialog.scope, ExportScope::Range, "범위 지정");
+                        let picked = dialog.scope == ExportScope::Range;
+                        ui.add_enabled_ui(picked, |ui| {
+                            // 두 칸은 서로 넘어서지 않는다. 시작을 끝 뒤로 올리면 끝이 따라 올라가고,
+                            // 끝을 시작 앞으로 내리면 시작이 따라 내려온다(가져오기 창과 같은 몸짓).
+                            ui.label("시작페이지");
+                            if ui.add(egui::DragValue::new(&mut dialog.first).range(1..=total)).changed() {
+                                dialog.last = dialog.last.max(dialog.first);
+                            }
+                            ui.label("-");
+                            ui.label("끝페이지");
+                            if ui.add(egui::DragValue::new(&mut dialog.last).range(1..=total)).changed() {
+                                dialog.first = dialog.first.min(dialog.last);
+                            }
+                        });
+                    });
+                    // 일부만 내보낸 hOCR은 그 자체로는 멀쩡한 문서지만, 안에 원본 쪽 번호가 없다.
+                    // 다른 앱에서 원본 전체와 짝지으면 3쪽 글이 1쪽에 얹힌다 — 그것만 알린다.
+                    // txt는 `=== [p. 12] ===`로 원본 번호를 그대로 적으므로 해당이 없다.
+                    if dialog.format == ExportFormat::Hocr
+                        && dialog.range(current_page, total_pages) != (1, total)
+                    {
+                        bullet(ui, "일부만 내보낸 hOCR은 그 범위만 담은 별개 문서가 됩니다. 다른 앱에서 원본 전체와 짝지으면 쪽이 어긋납니다.");
+                    }
+                    // 고른 범위에 내보낼 것이 없으면 알린다. 쪽마다 있는지 없는지까지 늘어놓지는
+                    // 않는다 — F1(OCR 표시)로 바로 볼 수 있다(2026-10-01 결정).
+                    if dialog.range_has_text(current_page, total_pages) == Some(false) {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            if dialog.invisible_only {
+                                "• 이 범위에는 OCR 텍스트가 없습니다."
+                            } else {
+                                "• 이 범위에는 내보낼 텍스트가 없습니다."
+                            },
+                        );
+                    }
+
                     if dialog.format == ExportFormat::Txt {
                         // 위(내보낼 텍스트 고르기)와 아래(txt 형식 다루기)는 성격이 다른 묶음이라
                         // 눈에 보이게 띄운다(2026-09-29 요청).
@@ -1275,7 +1389,9 @@ fn show_export_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
 }
 
 fn start_export(ctx: &egui::Context, app: &mut PdfViewerApp, output: PathBuf) {
+    let (current_page, total_pages) = (app.current_page as usize, app.total_pages as usize);
     let Some(dialog) = app.ocr_export_dialog.take() else { return };
+    let (first, last) = dialog.range(current_page, total_pages);
     let Some(pdf) = app.current_file.clone() else { return };
     if !pdf.exists() {
         app.status_message = Some("원본 PDF를 찾을 수 없습니다(이름이 바뀌었거나 이동/삭제됨).".to_string());
@@ -1285,6 +1401,8 @@ fn start_export(ctx: &egui::Context, app: &mut PdfViewerApp, output: PathBuf) {
     let job = ExportJob {
         pdf,
         output: output.clone(),
+        first,
+        last,
         temp_output: temp_output.clone(),
         format: dialog.format,
         invisible_only: dialog.invisible_only,
@@ -1318,6 +1436,14 @@ fn describe_export(r: &ExportReport) -> Report {
     // 형식과 고른 범위는 창 제목·옵션에 이미 있고, 쪽·단어 수는 사용자가 관심 가질 값이
     // 아니다(2026-09-28 결정). 끝났다는 사실만 머리글로 적고, 이상이 있을 때만 줄을 더한다.
     let mut report = Report::new("내보내기를 완료했습니다.");
+    // 범위를 골라 내보냈으면 어디까지였는지 남긴다 — 옵션 창은 이미 닫혔다.
+    if let Some((first, last)) = r.range {
+        report.line(if first == last {
+            format!("{first}쪽만 내보냈습니다.")
+        } else {
+            format!("{first}쪽부터 {last}쪽까지 내보냈습니다.")
+        });
+    }
     if r.clamped_chars > 0 {
         report.line(format!("글자 높이가 비정상적으로 커서 보정한 글자: {}개", r.clamped_chars));
     }
@@ -1733,5 +1859,81 @@ mod import_range_tests {
         }
         assert_eq!(job.pdf_index_for(0), None); // hOCR 1쪽 — 범위 밖
         assert_eq!(job.pdf_index_for(6), None); // hOCR 7쪽 — 문서 밖
+    }
+}
+
+/// 내보내기 창의 페이지 범위(예약 11, 2026-10-01).
+#[cfg(test)]
+mod export_range_tests {
+    use super::*;
+
+    fn dialog(total: usize) -> ExportDialog {
+        ExportDialog::new(ExportFormat::Hocr, total)
+    }
+
+    /// 기본은 문서 전체다.
+    #[test]
+    fn the_default_is_the_whole_document() {
+        let d = dialog(24);
+        assert_eq!(d.scope, ExportScope::All);
+        assert_eq!(d.range(7, 24), (1, 24));
+    }
+
+    /// "현재 페이지"는 뷰어가 보고 있는 쪽 하나를 따라간다 — 창을 띄운 뒤에 쪽을 넘겨도 그렇다.
+    #[test]
+    fn the_current_page_scope_follows_the_viewer() {
+        let mut d = dialog(24);
+        d.scope = ExportScope::Current;
+        assert_eq!(d.range(7, 24), (7, 7));
+        assert_eq!(d.range(12, 24), (12, 12));
+        // 문서 밖을 가리키면 끌어들인다.
+        assert_eq!(d.range(99, 24), (24, 24));
+    }
+
+    /// 범위는 문서 안으로, 그리고 시작 ≤ 끝으로 맞춘다. 문서가 바뀌어 쪽 수가 줄어도 안전해야 한다.
+    #[test]
+    fn a_range_is_clamped_to_the_document() {
+        let mut d = dialog(24);
+        d.scope = ExportScope::Range;
+        d.first = 3;
+        d.last = 10;
+        assert_eq!(d.range(1, 24), (3, 10));
+
+        // 쪽 수가 줄었다.
+        assert_eq!(d.range(1, 5), (3, 5));
+        // 뒤집힌 값이 들어와도 빈 범위를 내놓지 않는다.
+        d.first = 20;
+        d.last = 4;
+        let (first, last) = d.range(1, 24);
+        assert!(first <= last, "({first}, {last})");
+        assert_eq!((first, last), (4, 4));
+    }
+
+    /// 안내는 **고른 범위 안**만 본다. 문서 어딘가에 OCR이 있어도 그 범위에 없으면 알려야 한다.
+    #[test]
+    fn the_warning_looks_only_inside_the_chosen_range() {
+        let mut d = dialog(6);
+        // 1~2쪽에만 OCR, 5쪽에만 보이는 텍스트.
+        d.page_text = Some(PageTextMap {
+            invisible: vec![true, true, false, false, false, false],
+            visible: vec![false, false, false, false, true, false],
+        });
+        d.scope = ExportScope::Range;
+
+        d.first = 1;
+        d.last = 2;
+        assert_eq!(d.range_has_text(1, 6), Some(true));
+
+        d.first = 3;
+        d.last = 6;
+        assert_eq!(d.range_has_text(1, 6), Some(false), "3~6쪽에는 OCR이 없다");
+
+        // "모든 텍스트"로 바꾸면 5쪽의 보이는 텍스트가 잡힌다.
+        d.invisible_only = false;
+        assert_eq!(d.range_has_text(1, 6), Some(true));
+
+        // 확인이 끝나기 전에는 아무 말도 하지 않는다.
+        d.page_text = None;
+        assert_eq!(d.range_has_text(1, 6), None);
     }
 }

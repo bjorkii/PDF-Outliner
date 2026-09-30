@@ -460,16 +460,9 @@ fn on_scan(bounds: &[f64; 4], scans: &[[f64; 4]]) -> bool {
 mod tests {
     use super::*;
 
-    /// pdfium은 스레드 안전하지 않다(설계 메모 §7). `cargo test`는 시험을 병렬로 돌리므로,
-    /// 문서를 여는 시험은 이 잠금으로 줄을 세우고 **엔진도 하나만 만들어 나눠 쓴다**. 시험마다
-    /// 새로 만들면 여러 스레드가 라이브러리를 동시에 초기화해 진짜로 죽는다(2026-09-30에 겪음:
-    /// SIGSEGV).
-    static PDFIUM: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn shared_engine() -> Option<pdf_engine::PdfEngine> {
-        static ENGINE: std::sync::OnceLock<Option<pdf_engine::PdfEngine>> = std::sync::OnceLock::new();
-        *ENGINE.get_or_init(crate::app::create_engine)
-    }
+    // pdfium 잠금과 엔진은 `crate::pdfium_test`에 모아 두었다 — 모듈마다 따로 두면 잠금이 둘이라
+    // 서로를 막지 못한다(그 모듈 문서).
+    use crate::pdfium_test::{engine as shared_engine, lock as pdfium_lock};
 
     /// F1은 켜고 끄기만 한다 — 범위는 따로 정한다(2026-09-29 결정).
     #[test]
@@ -756,7 +749,7 @@ mod tests {
     /// 키가 세 배인 상자가 여러 행에 걸친다. 그런 쪽에서도 한 번에 한 행씩만 움직여야 한다.
     #[test]
     fn vertical_moves_stay_within_one_row_on_a_real_page() {
-        let _guard = PDFIUM.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = pdfium_lock();
         let Some(engine) = shared_engine() else { return };
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pdf-samples/DTFA00006.pdf");
         let Ok(document) = engine.open_document(&path) else { return };
@@ -795,7 +788,7 @@ mod tests {
     /// 움직이고, 그 밖에는 같은 줄에 있어야 한다.
     #[test]
     fn horizontal_moves_stay_on_the_line_on_a_real_page() {
-        let _guard = PDFIUM.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = pdfium_lock();
         let Some(engine) = shared_engine() else { return };
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pdf-samples/DTFA00006.pdf");
         let Ok(document) = engine.open_document(&path) else { return };
@@ -834,7 +827,7 @@ mod tests {
     /// 같은 기준으로 609개를 찾는다(2026-09-29 실측) — 화면에 그리는 것도 그와 같아야 한다.
     #[test]
     fn ocr_words_are_found_on_a_real_scan() {
-        let _guard = PDFIUM.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = pdfium_lock();
         let Some(engine) = shared_engine() else {
             eprintln!("pdfium이 없어 건너뜀");
             return;

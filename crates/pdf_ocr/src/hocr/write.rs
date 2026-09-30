@@ -2,7 +2,12 @@
 //!
 //! - 좌표는 표시 페이지 프레임을 `dpi`로 환산한 픽셀이다. `ocr_page`에 `bbox 0 0 W H`와
 //!   `scan_res`를 적어, 가져오기가 같은 프레임으로 되돌릴 수 있게 한다.
-//! - `ppageno`는 hOCR 규격대로 0부터 센다.
+//! - `ppageno`는 hOCR 규격대로 **이 파일 안에서** 0부터 센다. 원본의 3~10쪽만 내보내도 2가 아니라
+//!   0부터 시작한다. 규격이 말하는 "문서"가 곧 이 파일이고, 무엇보다 그래야 다른 도구에서 탈이
+//!   없다 — Tesseract가 쪽마다 뽑은 hOCR은 전부 `ppageno 0`이라 현장에서 이 값은 이미 믿을 수 없고
+//!   (`ui::ocr_import::load_hocr` 주석), 도구들은 `ocr_page`의 등장 순서를 쓴다. 게다가 2~9로 적으면
+//!   그 값을 색인으로 쓰는 도구에서 8쪽짜리 파일의 범위를 벗어난다. 원본 쪽 번호는 잃지 않도록
+//!   `ocr-source-pages` 메타로 따로 적는다(표준 밖 이름이라 다른 도구는 무시한다).
 //! - 계층은 `ocr_page → ocr_carea → ocr_par → ocr_line → ocrx_word`. 영역·문단 정보가 없으므로
 //!   글자가 있는 페이지마다 carea와 par를 하나씩 둔다. 글자가 없는 페이지도 빈 `ocr_page`로 넣어
 //!   페이지 번호 대응을 유지한다.
@@ -22,7 +27,14 @@ pub struct HocrWriter<W: Write> {
 
 impl<W: Write> HocrWriter<W> {
     /// 문서 머리를 쓴다. `system`은 `ocr-system` 메타 값(예: "PDF-Outliner v0.2.2").
-    pub fn new(mut out: W, dpi: f64, title: &str, system: &str) -> io::Result<Self> {
+    /// `source_pages`는 원본에서 잘라 온 쪽 범위(1부터, 양끝 포함) — 전체를 내보낼 때는 `None`이다.
+    pub fn new(
+        mut out: W,
+        dpi: f64,
+        title: &str,
+        system: &str,
+        source_pages: Option<(usize, usize)>,
+    ) -> io::Result<Self> {
         write!(
             out,
             concat!(
@@ -35,12 +47,14 @@ impl<W: Write> HocrWriter<W> {
                 "  <meta http-equiv=\"Content-Type\" content=\"text/html;charset=utf-8\"/>\n",
                 "  <meta name=\"ocr-system\" content=\"{system}\"/>\n",
                 "  <meta name=\"ocr-capabilities\" content=\"ocr_page ocr_carea ocr_par ocr_line ocrx_word\"/>\n",
-                " </head>\n",
-                " <body>\n",
             ),
             title = escape(title),
             system = escape(system),
         )?;
+        if let Some((first, last)) = source_pages {
+            writeln!(out, "  <meta name=\"ocr-source-pages\" content=\"{first}-{last}\"/>")?;
+        }
+        write!(out, " </head>\n <body>\n")?;
         Ok(Self { out, dpi, page_index: 0 })
     }
 
@@ -134,18 +148,34 @@ mod tests {
         let mut chars = line_chars("a<b c", 0, true);
         chars.extend(line_chars("d", 1, true));
         let (lines, _) = build_lines(&chars, &LayoutOptions::default());
-        let mut writer = HocrWriter::new(Vec::new(), 144.0, "t&t", "PDF-Outliner test").unwrap();
+        let mut writer = HocrWriter::new(Vec::new(), 144.0, "t&t", "PDF-Outliner test", None).unwrap();
         writer.page((100.0, 50.0), &lines).unwrap();
         writer.page((100.0, 50.0), &[]).unwrap();
         let html = String::from_utf8(writer.finish().unwrap()).unwrap();
         assert!(html.contains("<title>t&amp;t</title>"));
         assert!(html.contains("title=\"bbox 0 0 200 100; ppageno 0; scan_res 144 144\""));
         assert!(html.contains("ppageno 1;"));
+        assert!(!html.contains("ocr-source-pages"), "전체를 내보낼 때는 범위 메타를 적지 않는다");
         // 첫 줄: x 0~50pt, y 0~12pt → 0~100px, 0~24px, 기준선 10pt → 20px(아래 끝에서 -4)
         assert!(html.contains("title=\"bbox 0 0 100 24; baseline 0 -4; x_size 24\""));
         assert!(html.contains(">a&lt;b</span>"));
         assert!(html.contains("id=\"word_1_3\" title=\"bbox 0 40 20 64\">d</span>"));
         assert_eq!(html.matches("class=\"ocr_page\"").count(), 2);
         assert_eq!(html.matches("class=\"ocr_carea\"").count(), 1);
+    }
+
+    /// 일부만 내보내도 `ppageno`는 0부터 다시 매기고(다른 도구가 색인으로 써도 범위를 벗어나지
+    /// 않게), 원본 쪽 번호는 `ocr-source-pages` 메타로 남긴다(모듈 문서).
+    #[test]
+    fn a_partial_export_restarts_ppageno_and_records_the_source_range() {
+        let mut writer = HocrWriter::new(Vec::new(), 144.0, "doc", "test", Some((3, 10))).unwrap();
+        writer.page((100.0, 50.0), &[]).unwrap();
+        writer.page((100.0, 50.0), &[]).unwrap();
+        let html = String::from_utf8(writer.finish().unwrap()).unwrap();
+
+        assert!(html.contains("<meta name=\"ocr-source-pages\" content=\"3-10\"/>"), "{html}");
+        assert!(html.contains("ppageno 0;"), "첫 쪽은 2가 아니라 0이어야 한다: {html}");
+        assert!(html.contains("ppageno 1;"));
+        assert!(!html.contains("ppageno 2;"), "원본 쪽 번호를 ppageno에 넣으면 안 된다");
     }
 }

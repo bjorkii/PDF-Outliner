@@ -117,6 +117,9 @@ pub enum ExportFormat {
 pub struct ExportJob {
     pub pdf: PathBuf,
     pub output: PathBuf,
+    /// 내보낼 쪽 범위(1부터, 양끝 포함). 전체면 `(1, 마지막 쪽)`이다.
+    pub first: usize,
+    pub last: usize,
     /// 여기에 먼저 쓰고 끝나면 `output`으로 이름을 바꾼다.
     pub temp_output: PathBuf,
     pub format: ExportFormat,
@@ -128,7 +131,10 @@ pub struct ExportJob {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExportReport {
+    /// 실제로 내보낸 쪽 수(범위를 골랐으면 그 범위의 쪽 수).
     pub pages: usize,
+    /// 문서 전체가 아니라 일부만 내보냈을 때의 범위(1부터, 양끝 포함).
+    pub range: Option<(usize, usize)>,
     pub pages_with_text: usize,
     pub words: usize,
     /// 높이가 비정상적으로 커서 보정한 글자 수(`pdf_ocr::layout` 문서).
@@ -202,8 +208,11 @@ pub enum Event {
     BatchDone(BatchReport),
     ImportAnalysis(crate::ocr_import::ImportAnalysis),
     ImportDone(crate::ocr_import::ImportReport),
-    /// 이 문서에 어떤 종류의 텍스트가 있는지(→ `Job::ProbeTextKinds`).
+    /// 이 문서에 어떤 종류의 텍스트가 있는지(→ `Job::ProbeTextKinds`). 둘 다 찾는 즉시 보낸다.
     TextKinds { visible: bool, invisible: bool },
+    /// 쪽마다 어떤 텍스트가 있는지(→ `Job::ProbeTextKinds`, 전부 훑은 뒤). 내보내기 창이 "이
+    /// 범위에는 OCR 텍스트가 없습니다"를 판단하는 데 쓴다. 길이는 쪽 수와 같다.
+    PageTextMap { visible: Vec<bool>, invisible: Vec<bool> },
     Failed(String),
 }
 
@@ -323,8 +332,7 @@ pub fn run_worker_process() -> i32 {
             crate::ocr_import::analyze(engine, pdf, hocr_files, &mut emit).map(Event::ImportAnalysis)
         }
         Job::Import(job) => crate::ocr_import::run(engine, job, &mut emit).map(Event::ImportDone),
-        Job::ProbeTextKinds { pdf } => probe_text_kinds(engine, pdf)
-            .map(|(visible, invisible)| Event::TextKinds { visible, invisible }),
+        Job::ProbeTextKinds { pdf } => probe_text_kinds(engine, pdf, &mut emit),
     };
     match result {
         Ok(event) => {
@@ -361,32 +369,58 @@ enum Output<W: Write> {
 /// 텍스트만"은 빈 파일을 만든다.
 ///
 /// **내보내기와 같은 경로**(`text_layer::page_chars`의 invisible 플래그)를 일부러 쓴다. 다른 방법으로
-/// 재면 회색 처리와 실제 내보내기 결과가 어긋날 수 있다. 둘 다 찾으면 바로 끝낸다 — 섞여 있는
-/// 문서는 첫 쪽에서 끝나고, 한쪽만 있는 문서만 끝까지 훑는다(그래서 창을 먼저 띄운다).
-fn probe_text_kinds(engine: PdfEngine, pdf: &Path) -> anyhow::Result<(bool, bool)> {
+/// 재면 회색 처리와 실제 내보내기 결과가 어긋날 수 있다.
+///
+/// 답을 **두 번에 나눠 보낸다**. 문서 전체에 어떤 텍스트가 있는지(`TextKinds`)는 둘 다 찾는 즉시
+/// 보내 라디오를 바로 풀어 주고, 쪽별 목록(`PageTextMap`)은 끝까지 훑은 뒤에 보낸다. 쪽별 목록은
+/// 페이지 범위를 고르는 데만 쓰이므로 조금 늦어도 되고, 라디오까지 늦추면 큰 문서에서 창이
+/// 먹먹해진다(그래서 창을 먼저 띄우는 것이다).
+fn probe_text_kinds(engine: PdfEngine, pdf: &Path, emit: &mut dyn FnMut(Event)) -> anyhow::Result<Event> {
     let document = engine.open_document(pdf).map_err(|e| open_error_message(e, Action::Export))?;
+    let pages = document.pages();
+    let mut visible_pages = Vec::with_capacity(pages.len() as usize);
+    let mut invisible_pages = Vec::with_capacity(pages.len() as usize);
     let (mut visible, mut invisible) = (false, false);
-    for page in document.pages().iter() {
-        let Ok(chars) = pdf_engine::text_layer::page_chars(&page) else { continue };
-        for c in chars.iter().filter(|c| !c.generated && !c.ch.is_whitespace()) {
-            if c.invisible {
-                invisible = true;
-            } else {
-                visible = true;
+    let mut announced = false;
+    for page in pages.iter() {
+        let (mut page_visible, mut page_invisible) = (false, false);
+        if let Ok(chars) = pdf_engine::text_layer::page_chars(&page) {
+            for c in chars.iter().filter(|c| !c.generated && !c.ch.is_whitespace()) {
+                if c.invisible {
+                    page_invisible = true;
+                } else {
+                    page_visible = true;
+                }
+                if page_visible && page_invisible {
+                    break;
+                }
             }
         }
-        if visible && invisible {
-            break;
+        visible |= page_visible;
+        invisible |= page_invisible;
+        visible_pages.push(page_visible);
+        invisible_pages.push(page_invisible);
+        if visible && invisible && !announced {
+            announced = true;
+            emit(Event::TextKinds { visible, invisible });
         }
     }
-    Ok((visible, invisible))
+    if !announced {
+        emit(Event::TextKinds { visible, invisible });
+    }
+    Ok(Event::PageTextMap { visible: visible_pages, invisible: invisible_pages })
 }
 
 fn run_export(engine: PdfEngine, job: &ExportJob, emit: &mut dyn FnMut(Event)) -> anyhow::Result<ExportReport> {
     use anyhow::Context;
     let document = engine.open_document(&job.pdf).map_err(|e| open_error_message(e, Action::Export))?;
     let pages = document.pages();
-    let total = pages.len() as usize;
+    let page_count = pages.len() as usize;
+    // 범위는 UI에서 이미 맞춰 오지만, 작업 프로세스는 스스로도 지킨다 — 문서가 그새 바뀌었을 수 있다.
+    let last = job.last.clamp(1, page_count.max(1));
+    let first = job.first.clamp(1, last);
+    let total = last - first + 1;
+    let partial = first > 1 || last < page_count;
 
     let file = std::fs::File::create(&job.temp_output)
         .with_context(|| format!("임시 파일을 만들 수 없음: {}", job.temp_output.display()))?;
@@ -395,7 +429,10 @@ fn run_export(engine: PdfEngine, job: &ExportJob, emit: &mut dyn FnMut(Event)) -
         ExportFormat::Hocr => {
             let title = file_display_name(&job.pdf);
             let system = concat!("PDF-Outliner ", env!("PDF_OUTLINER_VERSION"));
-            Output::Hocr(HocrWriter::new(writer, HOCR_DPI, &title, system)?)
+            // 일부만 내보낼 때만 원본 쪽 범위를 머리에 적는다. `ppageno`는 규격대로 0부터 다시
+            // 매기므로(hocr::write 모듈 문서), 원본 쪽 번호는 이 메타로만 남는다.
+            let source = partial.then_some((first, last));
+            Output::Hocr(HocrWriter::new(writer, HOCR_DPI, &title, system, source)?)
         }
         ExportFormat::Txt => Output::Txt(TxtWriter::new(
             writer,
@@ -407,8 +444,11 @@ fn run_export(engine: PdfEngine, job: &ExportJob, emit: &mut dyn FnMut(Event)) -
         keep_format_chars: false,
     };
 
-    let mut report = ExportReport { pages: total, ..Default::default() };
-    for (index, page) in pages.iter().enumerate() {
+    let mut report =
+        ExportReport { pages: total, range: partial.then_some((first, last)), ..Default::default() };
+    for (done, (index, page)) in pages.iter().enumerate().skip(first - 1).take(total).enumerate() {
+        // `number`는 **원본 쪽 번호**다. txt의 `=== [p. 12] ===`와 실패 보고가 이 값을 쓴다 —
+        // 사람이 읽는 표시라 원본을 가리켜야 한다.
         let number = index + 1;
         let (size, lines, label) = match extract_page(&page, &options) {
             Ok((frame, lines, clamped)) => {
@@ -429,7 +469,7 @@ fn run_export(engine: PdfEngine, job: &ExportJob, emit: &mut dyn FnMut(Event)) -
             Output::Hocr(w) => w.page(size, &lines)?,
             Output::Txt(w) => w.page(number, label.as_deref(), &lines)?,
         }
-        emit(Event::Progress { done: number, total });
+        emit(Event::Progress { done: done + 1, total });
     }
 
     let mut writer = match output {
@@ -921,4 +961,79 @@ pub(crate) fn open_error_message(err: anyhow::Error, action: Action) -> anyhow::
 
 fn file_display_name(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().nfc().collect()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod export_range_tests {
+    use super::*;
+    use crate::pdfium_test;
+
+    fn export(pdf: &Path, dir: &Path, format: ExportFormat, first: usize, last: usize) -> (String, ExportReport) {
+        let engine = pdfium_test::engine().expect("엔진");
+        let output = dir.join(if format == ExportFormat::Hocr { "out.hocr" } else { "out.txt" });
+        let job = ExportJob {
+            pdf: pdf.to_path_buf(),
+            output: output.clone(),
+            first,
+            last,
+            temp_output: dir.join("out.part"),
+            format,
+            invisible_only: false,
+            txt_crlf: false,
+            txt_form_feed: false,
+            txt_page_labels: true,
+        };
+        let report = run_export(engine, &job, &mut |_| {}).expect("내보내기");
+        (std::fs::read_to_string(&output).expect("결과 파일"), report)
+    }
+
+    /// 범위를 골라 내보내면 **그 쪽만** 나온다. hOCR의 `ppageno`는 0부터 다시 매기고 원본 범위는
+    /// 메타로 남기며(hocr::write 모듈 문서), txt의 쪽 머리는 **원본 번호** 그대로다(2026-10-01 지정).
+    #[test]
+    fn a_ranged_export_writes_only_those_pages() {
+        let _guard = pdfium_test::lock();
+        if pdfium_test::engine().is_none() {
+            return;
+        }
+        let pdf = pdfium_test::sample("BZR001088_01-mod.pdf");
+        if !pdf.exists() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+
+        let (hocr, report) = export(&pdf, dir.path(), ExportFormat::Hocr, 3, 10);
+        assert_eq!(report.pages, 8, "8쪽만 내보내야 한다");
+        assert_eq!(report.range, Some((3, 10)));
+        assert_eq!(hocr.matches("class=\"ocr_page\"").count(), 8, "쪽 수가 맞지 않는다");
+        assert!(hocr.contains("<meta name=\"ocr-source-pages\" content=\"3-10\"/>"), "원본 범위 메타가 없다");
+        assert!(hocr.contains("ppageno 0;") && hocr.contains("ppageno 7;"), "ppageno는 0부터 7까지여야 한다");
+        assert!(!hocr.contains("ppageno 8;"), "범위 밖 쪽이 들어갔다");
+
+        let (txt, report) = export(&pdf, dir.path(), ExportFormat::Txt, 3, 10);
+        assert_eq!(report.pages, 8);
+        assert!(txt.contains("[p. 3]"), "txt 쪽 머리는 원본 번호여야 한다: {}", &txt[..txt.len().min(200)]);
+        assert!(txt.contains("[p. 10]"));
+        assert!(!txt.contains("[p. 2]") && !txt.contains("[p. 11]"), "범위 밖 쪽이 들어갔다");
+        assert!(!txt.contains("[p. 1]"), "1쪽부터 다시 매기면 안 된다");
+    }
+
+    /// 전체를 내보내면 예전 그대로다 — 범위 메타도, 보고의 범위도 없다.
+    #[test]
+    fn a_full_export_is_unchanged() {
+        let _guard = pdfium_test::lock();
+        if pdfium_test::engine().is_none() {
+            return;
+        }
+        let pdf = pdfium_test::sample("BZR001088_01-mod.pdf");
+        if !pdf.exists() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+
+        let (hocr, report) = export(&pdf, dir.path(), ExportFormat::Hocr, 1, 24);
+        assert_eq!(report.pages, 24);
+        assert_eq!(report.range, None, "전체면 범위를 적지 않는다");
+        assert!(!hocr.contains("ocr-source-pages"));
+        assert_eq!(hocr.matches("class=\"ocr_page\"").count(), 24);
+    }
 }
