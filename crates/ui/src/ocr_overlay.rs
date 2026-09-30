@@ -105,10 +105,9 @@ impl OcrOverlay {
     ///    겹치므로 "떨어져 있을 것"을 요구하면 놓친다.
     /// 2. **같은 줄인지**는 고른 상자의 세로 범위를 가로로 늘렸을 때 걸치는지로 본다. 물리적으로
     ///    상자가 포개졌는지가 아니라 "그 줄에 속한다고 볼 수 있는지"의 판정이다.
-    /// 3. 걸침이 고른 상자 높이의 `OVERLAP_RATE` 이상인 것을 **먼저** 본다. 그런 상자가 하나도
-    ///    없을 때만 덜 걸친 것에서 고른다 — 위첨자처럼 살짝 걸친 상자도 갈 데가 없으면 갈 수
-    ///    있어야 하기 때문이다(영영 못 가는 상자를 만들지 않는다).
-    /// 4. 그 안에서 **움직이는 방향의 틈**이 가장 작은 것, 같으면 중앙점 거리가 짧은 것.
+    /// 3. 걸침이 고른 상자 높이의 `OVERLAP_RATE` 이상이어야 한다. **이것도 확정적인 조건이라**,
+    ///    못 미치는 상자는 아예 후보가 아니다(위첨자처럼 줄에 살짝 걸친 것으로 튀지 않는다).
+    /// 4. 남은 것 중 **이동 축의 중앙점 거리**가 가장 짧은 것, 같으면 걸침이 큰 것.
     ///
     /// 위아래 화살표는 축만 바꿔 같은 규칙을 쓴다(넘김 판정은 y, 걸침 판정은 x).
     ///
@@ -198,14 +197,28 @@ fn straddle(from: &Word, w: &Word, cross: usize) -> f64 {
     b_high.min(a_high) - b_low.max(a_low)
 }
 
-/// 같은 줄 안에서 그 방향의 이웃을 고른다(규칙 1~4).
+/// 같은 줄 안에서 그 방향의 이웃을 고른다.
+///
+/// **거르는 조건 둘은 확정적이다**(2026-09-30 사용자 정정). 둘 다 만족하는 상자가 하나도 없으면
+/// 아무것도 돌려주지 않는다.
+///
+/// 1. **이동 방향 쪽에 있을 것** — 두 모서리가 모두 그쪽으로 넘어가 있어야 한다
+///    (`PX1 < NX1` 그리고 `PX2 < NX2`). 상자끼리 **가로로 겹쳐 있어도 된다**. OCR 상자는 자주
+///    겹치므로 "떨어져 있을 것"을 요구하면 바로 옆 낱말을 놓친다.
+/// 2. **같은 줄로 볼 만큼 걸칠 것** — 고른 상자의 세로 범위를 가로로 늘렸을 때 걸치는 길이가
+///    그 높이의 `OVERLAP_RATE` 이상이어야 한다. 물리적으로 상자가 포개졌는지가 아니라 "그 줄에
+///    속한다고 볼 수 있는지"의 판정이다.
+///
+/// 남은 것 가운데 **이동 축의 중앙점 거리가 가장 짧은 것**을 고르고, 같으면 걸침이 큰 쪽을
+/// 고른다. 세로 이동도 축만 바꿔 똑같다(넘김 판정은 y, 걸침 판정은 x, 거리는 세로 거리).
 fn in_line(words: &[Word], index: usize, axis: usize, sign: f64) -> Option<usize> {
     let from = &words[index];
     let cross = 1 - axis;
     let (from_low, from_high) = span(from, axis);
     let (c_low, c_high) = span(from, cross);
     let threshold = OVERLAP_RATE * (c_high - c_low);
-    let (fx, fy) = center(from);
+    let from_center = center(from);
+    let along = |c: (f64, f64)| if axis == 0 { c.0 } else { c.1 };
 
     words
         .iter()
@@ -213,22 +226,18 @@ fn in_line(words: &[Word], index: usize, axis: usize, sign: f64) -> Option<usize
         .filter(|(i, _)| *i != index)
         .filter_map(|(i, w)| {
             let (low, high) = span(w, axis);
-            // 1. 두 모서리가 모두 그 방향으로 넘어가 있어야 한다(겹쳐 있어도 된다).
             let ahead = if sign > 0.0 { low > from_low && high > from_high } else { low < from_low && high < from_high };
             if !ahead {
                 return None;
             }
-            // 2. 같은 줄로 볼 만큼 걸쳐야 한다.
             let overlap = straddle(from, w, cross);
-            if overlap <= 0.0 {
+            if overlap < threshold || overlap <= 0.0 {
                 return None;
             }
-            // 3~4. 잘 걸친 것을 먼저, 그다음 이동 방향의 틈이 작은 것, 그다음 중앙점 거리.
-            let gap = if sign > 0.0 { low - from_high } else { from_low - high };
-            let (x, y) = center(w);
-            Some((i, (overlap < threshold, gap.max(0.0), (x - fx).hypot(y - fy))))
+            let distance = (along(center(w)) - along(from_center)).abs();
+            Some((i, (distance, -overlap)))
         })
-        .min_by(|(_, a), (_, b)| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)).then_with(|| a.2.total_cmp(&b.2)))
+        .min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)))
         .map(|(i, _)| i)
 }
 
@@ -543,6 +552,40 @@ mod tests {
         );
         overlay.select(Some((1, 0)));
         assert!(overlay.move_selection(0.0, 1.0));
+        assert_eq!(overlay.selected(), Some((1, 1)));
+    }
+
+    /// **거르는 조건 둘은 확정적이다**(2026-09-30 사용자 정정). 기준치에 못 미치게 걸친 상자는
+    /// 다른 후보가 없어도 후보가 아니다 — 위첨자처럼 줄에 살짝 걸친 것으로 튀지 않게 하려는 것.
+    #[test]
+    fn the_overlap_rate_is_a_hard_filter_not_a_preference() {
+        let overlay = OcrOverlay { on: true, ..Default::default() };
+        overlay.cache.borrow_mut().insert(
+            1,
+            vec![
+                word(0.0, 100.0, 10.0, 120.0, "기준"),     // 높이 20, 기준치 10
+                word(12.0, 118.0, 16.0, 124.0, "윗첨자"),  // 걸침 2뿐 — 유일한 오른쪽 이웃이다
+            ],
+        );
+        overlay.select(Some((1, 0)));
+        assert!(!overlay.move_selection(1.0, 0.0), "기준치에 못 미치면 유일한 후보라도 가지 않는다");
+    }
+
+    /// 상자가 **가로로 겹쳐 있어도** 두 모서리가 더 오른쪽이면 후보다. OCR 상자는 자주 겹치므로
+    /// "떨어져 있을 것"을 요구하면 바로 옆 낱말을 놓친다(2026-09-30 확인 요청).
+    #[test]
+    fn a_horizontally_overlapping_neighbour_is_still_a_candidate() {
+        let overlay = OcrOverlay { on: true, ..Default::default() };
+        overlay.cache.borrow_mut().insert(
+            1,
+            vec![
+                word(0.0, 100.0, 40.0, 110.0, "기준"),
+                // 기준 상자와 절반이 포개져 있지만 두 모서리 모두 더 오른쪽이다.
+                word(20.0, 100.0, 60.0, 110.0, "포개진옆낱말"),
+            ],
+        );
+        overlay.select(Some((1, 0)));
+        assert!(overlay.move_selection(1.0, 0.0));
         assert_eq!(overlay.selected(), Some((1, 1)));
     }
 
