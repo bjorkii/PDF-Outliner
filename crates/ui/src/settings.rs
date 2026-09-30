@@ -123,6 +123,9 @@ pub const COLOR_ROWS: [ColorRow; 5] = [
     },
 ];
 
+/// 아래 버튼 줄의 높이.
+const ACTION_ROW_HEIGHT: f32 = 38.0;
+
 /// 설정 창. 다른 기능 창과 같은 규칙이다 — 끌어서 옮길 수 있고, Esc로 닫히고, 본문에 여백이 있다.
 ///
 /// **아래 버튼 줄은 스크롤과 무관하게 고정한다**(2026-09-30 요청). 색 항목이 늘어 본문이 창을
@@ -146,20 +149,22 @@ pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
         .default_pos(ctx.screen_rect().center())
         .show(ctx, |ui| {
             crate::app::window_body(ui, |ui| {
-                egui::TopBottomPanel::bottom("settings_actions").show_inside(ui, |ui| {
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("로그파일 위치 열기").clicked() {
-                            open_logs = true;
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("닫기").clicked() {
-                                close = true;
+                // 높이를 못박고 그 안에서 세로 가운데에 놓는다. 내용에 맡겨 두었더니 줄이
+                // 필요 이상으로 높아지고 버튼이 위쪽에 붙었다(2026-09-30 리포트).
+                egui::TopBottomPanel::bottom("settings_actions")
+                    .exact_height(ACTION_ROW_HEIGHT)
+                    .show_inside(ui, |ui| {
+                        ui.horizontal_centered(|ui| {
+                            if ui.button("로그파일 위치 열기").clicked() {
+                                open_logs = true;
                             }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("닫기").clicked() {
+                                    close = true;
+                                }
+                            });
                         });
                     });
-                    ui.add_space(4.0);
-                });
                 egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(420.0).show(ui, |ui| {
                     ui.label("색");
                     ui.add_space(6.0);
