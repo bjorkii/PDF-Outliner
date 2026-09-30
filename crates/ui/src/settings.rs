@@ -123,8 +123,8 @@ pub const COLOR_ROWS: [ColorRow; 5] = [
     },
 ];
 
-/// 아래 버튼 줄의 높이.
-const ACTION_ROW_HEIGHT: f32 = 38.0;
+/// 색 목록이 이보다 길어지면 그 안에서 스크롤한다. 버튼 줄은 늘 그 아래에 보인다.
+const COLOR_LIST_MAX: f32 = 420.0;
 
 /// 설정 창. 다른 기능 창과 같은 규칙이다 — 끌어서 옮길 수 있고, Esc로 닫히고, 본문에 여백이 있다.
 ///
@@ -149,29 +149,34 @@ pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
         .default_pos(ctx.screen_rect().center())
         .show(ctx, |ui| {
             crate::app::window_body(ui, |ui| {
-                // 높이를 못박고 그 안에서 세로 가운데에 놓는다. 내용에 맡겨 두었더니 줄이
-                // 필요 이상으로 높아지고 버튼이 위쪽에 붙었다(2026-09-30 리포트).
-                egui::TopBottomPanel::bottom("settings_actions")
-                    .exact_height(ACTION_ROW_HEIGHT)
-                    .show_inside(ui, |ui| {
-                        ui.horizontal_centered(|ui| {
-                            if ui.button("로그파일 위치 열기").clicked() {
-                                open_logs = true;
+                // 버튼 줄을 `TopBottomPanel`로 붙였더니 창 아래에 빈 자리가 크게 생겼다
+                // (2026-09-30 리포트). 스크롤 영역이 `auto_shrink`를 끈 채 남는 높이를 모두
+                // 차지하고, 패널은 그 아래 맨 끝에 놓였기 때문이다. 세로로는 내용만큼만 쓰게 하고
+                // (`max_height`로 상한만 둔다) 버튼 줄은 그냥 뒤에 그린다 — 내용이 상한을 넘으면
+                // 스크롤 영역 안에서만 넘치므로 버튼은 늘 보인다.
+                egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(COLOR_LIST_MAX).show(
+                    ui,
+                    |ui| {
+                        for (index, row) in COLOR_ROWS.iter().enumerate() {
+                            if index > 0 {
+                                ui.add_space(10.0);
                             }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("닫기").clicked() {
-                                    close = true;
-                                }
-                            });
-                        });
-                    });
-                egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(420.0).show(ui, |ui| {
-                    ui.label("색");
-                    ui.add_space(6.0);
-                    for row in &COLOR_ROWS {
-                        color_row(ui, &mut app.colors, row);
-                        ui.add_space(10.0);
+                            color_row(ui, &mut app.colors, row);
+                        }
+                    },
+                );
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("로그파일 위치 열기").clicked() {
+                        open_logs = true;
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("닫기").clicked() {
+                            close = true;
+                        }
+                    });
                 });
             });
         });
