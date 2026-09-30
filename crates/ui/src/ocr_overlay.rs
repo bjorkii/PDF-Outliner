@@ -118,7 +118,10 @@ impl OcrOverlay {
         let Some((page, index)) = self.selected.get() else { return false };
         let cache = self.cache.borrow();
         let Some(words) = cache.get(&page) else { return false };
-        let Some(from) = words.get(index) else { return false };
+        // 고른 낱말이 아직 그 자리에 있는지만 확인한다(재측정으로 목록이 짧아졌을 수 있다).
+        if index >= words.len() {
+            return false;
+        }
         let (dx, dy) = (right, -down);
         let (axis, sign) = if dx != 0.0 { (0usize, dx.signum()) } else { (1usize, dy.signum()) };
 

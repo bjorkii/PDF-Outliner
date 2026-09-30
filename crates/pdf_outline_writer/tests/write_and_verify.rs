@@ -37,12 +37,12 @@ fn assert_toc_matches(pdf_path: &Path, expected_flat: &[(usize, &str, usize)]) {
 
 #[test]
 fn write_bookmarks_to_real_sample_pdf_and_reread() {
-    // BZR001088_01.pdf는 24페이지짜리라 sample_tree()가 쓰는 페이지 번호(1~5)가 전부
+    // BZR001088_01-mod.pdf는 24페이지짜리라 sample_tree()가 쓰는 페이지 번호(1~5)가 전부
     // 실존 범위 안에 있음. KKZ000160_01.pdf(1페이지짜리)로는 이 테스트를 할 수 없다 —
     // 존재하지 않는 페이지 번호는 안전하게 첫 페이지로 폴백되는 게 의도된 동작이라
     // (add_nodes의 페이지-없음 폴백 로직 참고), 1페이지 문서에서는 전부 1로 뭉개져 보인다.
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../pdf-samples/BZR001088_01.pdf");
+        .join("../../pdf-samples/BZR001088_01-mod.pdf");
     assert!(source.exists(), "샘플 PDF가 없음: {:?}", source);
 
     let original_bytes = std::fs::read(&source).unwrap();
@@ -124,7 +124,7 @@ fn shared_engine() -> pdf_engine::PdfEngine {
 
 #[test]
 fn pdfium_can_reread_what_lopdf_wrote() {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pdf-samples/BZR001088_01.pdf");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pdf-samples/BZR001088_01-mod.pdf");
 
     let dir = tempdir().unwrap();
     let out_path = dir.path().join("pdfium_reread.pdf");

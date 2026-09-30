@@ -89,7 +89,7 @@ fn repeated_reassignment_three_documents() {
     println!("문서1 페이지 수: {}", document.pages().len());
     document = engine.open_document(&sample("KKZ000160_01.pdf")).expect("2 열기 실패");
     println!("문서2 페이지 수: {}", document.pages().len());
-    document = engine.open_document(&sample("BZR001088_01.pdf")).expect("3 열기 실패");
+    document = engine.open_document(&sample("BZR001088_01-mod.pdf")).expect("3 열기 실패");
     println!("문서3 페이지 수: {}", document.pages().len());
     println!("반복 전환 완료 — 크래시 없음");
 }

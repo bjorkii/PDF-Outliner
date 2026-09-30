@@ -1441,13 +1441,13 @@ impl PdfViewerApp {
                     self.render_inflight.remove(&(page, target_width));
                     // 썸네일로 맡긴 것이면 뷰어 캐시가 아니라 썸네일 캐시에 넣는다. 뷰어 캐시는
                     // 쪽마다 배율 하나만 들고 있어서, 여기 넣으면 보고 있던 큰 텍스처를 밀어낸다.
-                    if target_width == crate::thumbnails::THUMB_WIDTH && self.thumbnails.is_waiting(page) {
+                    if self.thumbnails.is_waiting(page, target_width) {
                         let texture = ctx.load_texture(
-                            format!("pdf_thumb_{page}"),
+                            format!("pdf_thumb_{page}_{target_width}"),
                             image,
                             egui::TextureOptions::LINEAR,
                         );
-                        self.thumbnails.insert(page, texture);
+                        self.thumbnails.insert(page, texture, target_width);
                         continue;
                     }
                     // 늦게 도착한 옛 배율 결과가 이미 들어온 현재 배율 텍스처를 덮어쓰지 않게
@@ -1480,9 +1480,7 @@ impl PdfViewerApp {
                         continue;
                     }
                     self.render_inflight.remove(&(page, target_width));
-                    if target_width == crate::thumbnails::THUMB_WIDTH {
-                        self.thumbnails.give_up(page);
-                    }
+                    self.thumbnails.give_up(page, target_width);
                     if let Some(message) = error {
                         crate::trace::record(format_args!(
                             "렌더 실패 p{page} w{target_width}: {message}"

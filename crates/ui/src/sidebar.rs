@@ -42,6 +42,90 @@ struct RenderOutcome {
     rename: Option<(Uuid, String)>,
 }
 
+/// 엑셀 시트 탭이나 브라우저 탭처럼 보이는 탭 줄(2026-10-01 요청).
+///
+/// **고른 탭만 아래 테두리를 끊어 본문과 이어지게 그린다.** 이것이 눌린 단추가 아니라 탭으로
+/// 읽히게 하는 핵심이다. `selectable_label`은 배경색만 바꾸므로 단추처럼 보였다. egui에 탭 위젯은
+/// 없어서 직접 그린다 — 칸을 잡고, 안 고른 탭 → 아래 가로줄 → 고른 탭 순으로 얹으면 고른 탭의
+/// 바탕이 그 아래 가로줄을 덮어 본문과 이어진다.
+fn tab_bar(ui: &mut egui::Ui, current: &mut crate::app::SidebarTab) {
+    use crate::app::SidebarTab;
+
+    const HEIGHT: f32 = 27.0;
+    const PAD_X: f32 = 15.0;
+    const GAP: f32 = 3.0;
+    const LEFT: f32 = 8.0;
+    /// 위 두 모서리만 둥글린다 — 아래는 본문과 이어져야 한다.
+    const RADIUS: f32 = 7.0;
+
+    let tabs = [(SidebarTab::Bookmarks, "북마크"), (SidebarTab::Thumbnails, "썸네일")];
+    let (strip, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEIGHT), Sense::hover());
+    if !ui.is_rect_visible(strip) {
+        return;
+    }
+
+    let visuals = ui.visuals().clone();
+    let border = visuals.widgets.noninteractive.bg_stroke.color;
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let rounding = egui::Rounding { nw: RADIUS, ne: RADIUS, sw: 0.0, se: 0.0 };
+
+    // 칸을 먼저 다 잡아 둔다. 그려야 할 순서와 자리를 정하는 순서가 다르기 때문이다.
+    let mut placed = Vec::with_capacity(tabs.len());
+    let mut x = strip.left() + LEFT;
+    for (tab, label) in tabs {
+        let galley = ui.painter().layout_no_wrap(label.to_string(), font.clone(), egui::Color32::PLACEHOLDER);
+        let rect = egui::Rect::from_min_size(egui::pos2(x, strip.top()), egui::vec2(galley.size().x + PAD_X * 2.0, HEIGHT));
+        x = rect.right() + GAP;
+        let response = ui.interact(rect, ui.id().with(("sidebar_tab", label)), Sense::click());
+        if response.clicked() {
+            *current = tab;
+        }
+        placed.push((tab, galley, rect, response));
+    }
+
+    let painter = ui.painter().clone();
+    let mut draw = |tab: &SidebarTab,
+                    galley: &std::sync::Arc<egui::Galley>,
+                    rect: egui::Rect,
+                    hovered: bool| {
+        let active = *current == *tab;
+        let fill = if active {
+            visuals.panel_fill
+        } else if hovered {
+            visuals.widgets.hovered.bg_fill
+        } else {
+            visuals.faint_bg_color
+        };
+        painter.rect_filled(rect, rounding, fill);
+        painter.rect_stroke(rect, rounding, egui::Stroke::new(1.0_f32, border));
+        if active {
+            // 아래 테두리만 지운다 — 본문과 이어져 보이도록.
+            painter.line_segment(
+                [egui::pos2(rect.left() + 1.0, rect.bottom()), egui::pos2(rect.right() - 1.0, rect.bottom())],
+                egui::Stroke::new(2.0_f32, fill),
+            );
+        }
+        let color = if active { visuals.strong_text_color() } else { visuals.weak_text_color() };
+        let pos = egui::pos2(rect.center().x - galley.size().x / 2.0, rect.center().y - galley.size().y / 2.0);
+        painter.galley(pos, galley.clone(), color);
+    };
+
+    for (tab, galley, rect, response) in &placed {
+        if *current != *tab {
+            draw(tab, galley, *rect, response.hovered());
+        }
+    }
+    painter.line_segment(
+        [egui::pos2(strip.left(), strip.bottom()), egui::pos2(strip.right(), strip.bottom())],
+        egui::Stroke::new(1.0_f32, border),
+    );
+    for (tab, galley, rect, response) in &placed {
+        if *current == *tab {
+            draw(tab, galley, *rect, response.hovered());
+        }
+    }
+}
+
 pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
     let panel_response = egui::SidePanel::left("bookmarks_sidebar")
         .resizable(true)
@@ -51,19 +135,9 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             // 탭 줄 — 북마크와 썸네일을 오간다(예약 7). 아래 헤더의 +/-/Undo/Redo는 북마크에만
             // 쓰는 것이라 탭이 그 위에 있어야 말이 된다. 썸네일 탭이면 여기서 끝낸다 — 북마크
             // 쪽의 드래그 상태를 읽지도 쓰지도 않아야 그 상태가 어긋나지 않는다.
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.add_space(4.0);
-                for (tab, label) in
-                    [(crate::app::SidebarTab::Bookmarks, "북마크"), (crate::app::SidebarTab::Thumbnails, "썸네일")]
-                {
-                    if ui.selectable_label(app.sidebar_tab == tab, label).clicked() {
-                        app.sidebar_tab = tab;
-                    }
-                }
-            });
-            ui.add_space(4.0);
-            ui.separator();
+            ui.add_space(6.0);
+            tab_bar(ui, &mut app.sidebar_tab);
+            ui.add_space(8.0);
             if app.sidebar_tab == crate::app::SidebarTab::Thumbnails {
                 crate::thumbnails::show(ui, app);
                 return;
