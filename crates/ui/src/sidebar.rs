@@ -84,7 +84,7 @@ fn tab_bar(ui: &mut egui::Ui, current: &mut crate::app::SidebarTab) {
     }
 
     let painter = ui.painter().clone();
-    let mut draw = |tab: &SidebarTab,
+    let draw = |tab: &SidebarTab,
                     galley: &std::sync::Arc<egui::Galley>,
                     rect: egui::Rect,
                     hovered: bool| {
@@ -105,7 +105,14 @@ fn tab_bar(ui: &mut egui::Ui, current: &mut crate::app::SidebarTab) {
                 egui::Stroke::new(2.0_f32, fill),
             );
         }
-        let color = if active { visuals.strong_text_color() } else { visuals.weak_text_color() };
+        // 마우스를 올리면 바탕이 회색으로 짙어지므로 흐린 글자는 묻힌다(2026-10-01 리포트).
+        let color = if active {
+            visuals.strong_text_color()
+        } else if hovered {
+            visuals.text_color()
+        } else {
+            visuals.weak_text_color()
+        };
         let pos = egui::pos2(rect.center().x - galley.size().x / 2.0, rect.center().y - galley.size().y / 2.0);
         painter.galley(pos, galley.clone(), color);
     };

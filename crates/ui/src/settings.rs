@@ -74,6 +74,17 @@ pub struct Colors {
     pub other_box: Palette,
     /// 지금 가리키거나 고른 상자.
     pub focus_box: Palette,
+    /// 썸네일 탭에서 지금 보고 있는 쪽을 두르는 테두리.
+    ///
+    /// 북마크 선택과 따로 두는 이유: macOS 미리보기가 쓰는 파란 테두리를 기본으로 하고 싶은데,
+    /// 북마크 선택은 보라가 기본이다. `serde(default)`를 붙여 두어야 이 항목이 없던 시절에 저장된
+    /// 설정을 읽을 때 나머지 색까지 초기화되지 않는다.
+    #[serde(default = "default_thumbnail_selection")]
+    pub thumbnail_selection: Palette,
+}
+
+fn default_thumbnail_selection() -> Palette {
+    Palette::Blue
 }
 
 impl Default for Colors {
@@ -84,6 +95,7 @@ impl Default for Colors {
             ocr_box: Palette::Blue,
             other_box: Palette::Red,
             focus_box: Palette::Green,
+            thumbnail_selection: default_thumbnail_selection(),
         }
     }
 }
@@ -95,7 +107,7 @@ pub struct ColorRow {
     pub pick: fn(&mut Colors) -> &mut Palette,
 }
 
-pub const COLOR_ROWS: [ColorRow; 5] = [
+pub const COLOR_ROWS: [ColorRow; 6] = [
     ColorRow {
         label: "북마크/뷰어 포커스 테두리",
         hint: "지금 키보드 입력을 받는 영역을 둘러싸는 테두리입니다.",
@@ -105,6 +117,11 @@ pub const COLOR_ROWS: [ColorRow; 5] = [
         label: "북마크 선택",
         hint: "사이드바에서 고른 북마크의 배경입니다.",
         pick: |c| &mut c.bookmark_selection,
+    },
+    ColorRow {
+        label: "썸네일 선택",
+        hint: "썸네일 탭에서 지금 보고 있는 쪽을 두르는 테두리입니다.",
+        pick: |c| &mut c.thumbnail_selection,
     },
     ColorRow {
         label: "OCR 텍스트 박스",
