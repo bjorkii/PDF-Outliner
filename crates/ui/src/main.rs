@@ -26,6 +26,7 @@ mod settings;
 mod search_panel;
 mod status_bar;
 mod texture_cache;
+mod thumbnails;
 mod toolbar;
 mod trace;
 mod viewer_panel;

@@ -48,6 +48,27 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
         .default_width(240.0)
         .min_width(90.0)
         .show(ctx, |ui| {
+            // 탭 줄 — 북마크와 썸네일을 오간다(예약 7). 아래 헤더의 +/-/Undo/Redo는 북마크에만
+            // 쓰는 것이라 탭이 그 위에 있어야 말이 된다. 썸네일 탭이면 여기서 끝낸다 — 북마크
+            // 쪽의 드래그 상태를 읽지도 쓰지도 않아야 그 상태가 어긋나지 않는다.
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                for (tab, label) in
+                    [(crate::app::SidebarTab::Bookmarks, "북마크"), (crate::app::SidebarTab::Thumbnails, "썸네일")]
+                {
+                    if ui.selectable_label(app.sidebar_tab == tab, label).clicked() {
+                        app.sidebar_tab = tab;
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            ui.separator();
+            if app.sidebar_tab == crate::app::SidebarTab::Thumbnails {
+                crate::thumbnails::show(ui, app);
+                return;
+            }
+
             let drag_id = Id::new("bookmark_drag_state");
             let mut drag_state = ctx
                 .data_mut(|d| d.get_temp::<DragState>(drag_id))

@@ -398,6 +398,10 @@ pub struct PdfViewerApp {
     pub ocr_overlay: crate::ocr_overlay::OcrOverlay,
     /// 사용자가 고른 색. 다음 실행에도 남는다(`COLORS_KEY`).
     pub colors: crate::settings::Colors,
+    /// 사이드바에서 지금 보고 있는 탭.
+    pub sidebar_tab: SidebarTab,
+    /// 썸네일 탭이 쓰는 미리보기 텍스처(뷰어 텍스처와 따로 둔다 — `thumbnails` 모듈 문서).
+    pub thumbnails: crate::thumbnails::Thumbnails,
     /// 설정 창이 떠 있는가.
     pub settings_open: bool,
     /// 파일 하나를 만들고 끝나는 작업(북마크 내보내기)의 결과 알림 — "저장 위치 열기" 버튼 자리.
@@ -553,6 +557,8 @@ impl PdfViewerApp {
             ocr_job: None,
             ocr_overlay: crate::ocr_overlay::OcrOverlay::default(),
             colors,
+            sidebar_tab: SidebarTab::default(),
+            thumbnails: crate::thumbnails::Thumbnails::default(),
             settings_open: false,
             saved_file_notice: None,
             ocr_removal_confirm: None,
@@ -851,6 +857,7 @@ impl PdfViewerApp {
                 self.document = Some(document);
                 self.compute_page_sizes();
                 self.page_textures.clear();
+                self.thumbnails.clear();
                 // 다른 문서의 쪽을 잰 결과가 남아 있으면 안 된다.
                 self.ocr_overlay.invalidate();
                 self.notify_render_worker_document(&path);
@@ -1432,6 +1439,17 @@ impl PdfViewerApp {
                         continue;
                     }
                     self.render_inflight.remove(&(page, target_width));
+                    // 썸네일로 맡긴 것이면 뷰어 캐시가 아니라 썸네일 캐시에 넣는다. 뷰어 캐시는
+                    // 쪽마다 배율 하나만 들고 있어서, 여기 넣으면 보고 있던 큰 텍스처를 밀어낸다.
+                    if target_width == crate::thumbnails::THUMB_WIDTH && self.thumbnails.is_waiting(page) {
+                        let texture = ctx.load_texture(
+                            format!("pdf_thumb_{page}"),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.thumbnails.insert(page, texture);
+                        continue;
+                    }
                     // 늦게 도착한 옛 배율 결과가 이미 들어온 현재 배율 텍스처를 덮어쓰지 않게
                     // 한다 — 그런 결과는 텍스처로 만들지도 않는다.
                     let current = self.last_target_width;
@@ -1462,6 +1480,9 @@ impl PdfViewerApp {
                         continue;
                     }
                     self.render_inflight.remove(&(page, target_width));
+                    if target_width == crate::thumbnails::THUMB_WIDTH {
+                        self.thumbnails.give_up(page);
+                    }
                     if let Some(message) = error {
                         crate::trace::record(format_args!(
                             "렌더 실패 p{page} w{target_width}: {message}"
@@ -1921,6 +1942,15 @@ impl PdfViewerApp {
                 });
             }
 
+            // 썸네일 탭이 보이고 사이드바가 포커스면 위/아래 = 쪽 이동(뷰어가 바로 따라간다,
+            // 예약 7). 북마크 탭일 때는 예전대로 sidebar.rs가 트리 이동에 쓴다.
+            if self.focus_area == FocusArea::Sidebar && self.sidebar_tab == SidebarTab::Thumbnails {
+                let (down, up) = ctx.input(|i| (i.key_pressed(Key::ArrowDown), i.key_pressed(Key::ArrowUp)));
+                if down || up {
+                    self.go_to_page_delta(if down { 1 } else { -1 });
+                }
+            }
+
             // 검색 결과 목록이 포커스일 때 위/아래 = 결과 선택 이동(뷰어가 그 페이지로 따라감).
             // 분리 창에 OS 포커스가 있을 때의 키는 그 창이 따로 처리한다(search_panel).
             if self.focus_area == FocusArea::SearchResults {
@@ -2315,6 +2345,14 @@ pub(crate) fn modal_open(app: &PdfViewerApp) -> bool {
         || app.settings_open
         || app.rename_input.is_some()
         || app.search_no_results
+}
+
+/// 사이드바의 탭.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidebarTab {
+    #[default]
+    Bookmarks,
+    Thumbnails,
 }
 
 /// 팝업창 본문에 안쪽 여백을 준다.
