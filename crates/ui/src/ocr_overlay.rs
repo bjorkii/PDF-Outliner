@@ -51,6 +51,10 @@ const CACHE_PAGES: usize = 8;
 /// 원본을 가리는 기본값(%). 스캔 글자가 비칠 정도로 덮는다.
 pub const DEFAULT_VEIL: u8 = 69;
 
+/// 화살표로 옮길 때 "같은 줄"로 볼 겹침 기준 — 고른 상자의 높이(가로 이동일 때) 대비 비율.
+/// 이만큼 겹친 상자가 하나라도 있으면 그 안에서만 고른다.
+const OVERLAP_RATE: f64 = 0.5;
+
 impl Default for OcrOverlay {
     fn default() -> Self {
         Self {
@@ -91,57 +95,70 @@ impl OcrOverlay {
     /// 고른 낱말에서 화살표 방향으로 이웃 낱말로 옮긴다.
     ///
     /// **방향은 화면 기준으로 받는다** — `down`이 양수면 화면 아래쪽이다. 낱말 좌표는 PDF 사용자
-    /// 공간이라 y가 위로 커지므로 안에서 뒤집는다. 부르는 쪽이 이 차이를 신경 쓰지 않게 하려는
-    /// 것이다(처음에 그대로 넘겼다가 위아래가 뒤바뀌었다).
+    /// 공간이라 y가 위로 커지므로 안에서 뒤집는다.
     ///
-    /// **고르는 규칙**(2026-09-30 개선): 중심점 사이의 거리로 고르면 옆줄로 튀거나 가까운 낱말을
-    /// 건너뛴다 — 넓은 낱말은 중심이 멀어 지고, 좁은 낱말은 딴 줄에 있어도 이긴다. 그래서
+    /// **고르는 규칙**(2026-09-30 사용자 지정). 오른쪽 화살표를 예로 들면:
     ///
-    /// 1. **상자 가장자리 사이의 틈**으로 거리를 잰다(중심이 아니라).
-    /// 2. 움직이는 축과 **직각 방향으로 겹치는지**를 먼저 본다. 좌우로 갈 때 세로로 겹치면 같은
-    ///    줄이고, 위아래로 갈 때 가로로 겹치면 같은 단이다. 겹치지 않는 것에는 큰 벌점을 줘서,
-    ///    같은 줄에 후보가 하나라도 있으면 그쪽이 반드시 이긴다.
+    /// 1. **두 모서리가 모두 오른쪽에 있는 상자**만 후보다(`PX1 < NX1` 그리고 `PX2 < NX2`).
+    ///    없으면 아무 일도 하지 않는다. 한쪽 모서리만 넘은 상자를 받으면 크게 감싸는 상자나
+    ///    겹쳐 있는 상자로 튀어 버린다.
+    /// 2. 그중 **세로로 겹치는**(`Overlap > 0`) 상자만 남긴다. 하나도 없으면 아무 일도 하지
+    ///    않는다 — 같은 줄이 아닌 곳으로 건너뛰지 않는다는 뜻이다.
+    /// 3. 남은 것 가운데 **겹침이 기준치 이상인 것**(`Overlap >= OVERLAP_RATE × Bp의 높이`)을
+    ///    먼저 본다. 그런 상자가 있으면 그 안에서만 고른다.
+    /// 4. 마지막으로 **중앙점 사이의 거리가 가장 짧은 것**을 고른다. 거리가 같으면 겹침이 큰 쪽.
+    ///
+    /// 위아래 화살표는 축만 바꿔 같은 규칙을 쓴다(넘김 판정은 y, 겹침 판정은 x).
     ///
     /// `/Rotate`가 걸린 쪽에서는 화면 방향과 사용자 공간 축이 어긋나 화살표가 돌아간 방향으로
     /// 움직인다. 쓰기 어려울 정도는 아니라 지금은 그대로 둔다.
     pub fn move_selection(&self, right: f64, down: f64) -> bool {
-        /// 줄(또는 단)이 다를 때의 벌점. 어떤 틈보다도 커서 같은 줄이 늘 이긴다.
-        const OFF_LINE: f64 = 1.0e6;
-        /// 가장자리가 살짝 겹쳐 있어도 "그 방향에 있다"고 보는 여유(pt).
-        const SLACK: f64 = 1.0;
-
         let Some((page, index)) = self.selected.get() else { return false };
         let cache = self.cache.borrow();
         let Some(words) = cache.get(&page) else { return false };
         let Some(from) = words.get(index) else { return false };
         let (dx, dy) = (right, -down);
 
-        // 움직이는 축(0=가로, 1=세로)과 그 방향(+1/-1).
+        // 움직이는 축(0=가로, 1=세로)과 그 방향(+1/-1). 겹침은 직각 축에서 잰다.
         let (axis, sign) = if dx != 0.0 { (0usize, dx.signum()) } else { (1usize, dy.signum()) };
         let cross = 1 - axis;
-        // `[low, high]` 꼴로 꺼낸다. bounds는 [left, bottom, right, top]이다.
         let span = |w: &Word, a: usize| if a == 0 { (w.bounds[0], w.bounds[2]) } else { (w.bounds[1], w.bounds[3]) };
+        let center = |w: &Word| {
+            let (x0, x1) = span(w, 0);
+            let (y0, y1) = span(w, 1);
+            ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+        };
+
         let (from_low, from_high) = span(from, axis);
         let (from_c_low, from_c_high) = span(from, cross);
+        let threshold = OVERLAP_RATE * (from_c_high - from_c_low);
+        let (fx, fy) = center(from);
 
         let best = words
             .iter()
             .enumerate()
             .filter(|(i, _)| *i != index)
             .filter_map(|(i, w)| {
+                // 1. 두 모서리가 모두 그 방향으로 넘어가 있어야 한다.
                 let (low, high) = span(w, axis);
-                // 그 방향으로 넘어간 만큼(상자 가장자리 사이의 틈). 음수면 아직 안 넘어간 것이다.
-                let gap = if sign > 0.0 { low - from_high } else { from_low - high };
-                if gap < -SLACK {
+                let ahead = if sign > 0.0 { low > from_low && high > from_high } else { low < from_low && high < from_high };
+                if !ahead {
                     return None;
                 }
-                // 직각 방향으로 겹치면 같은 줄·같은 단이다.
+                // 2. 직각 축에서 겹쳐야 한다.
                 let (c_low, c_high) = span(w, cross);
                 let overlap = c_high.min(from_c_high) - c_low.max(from_c_low);
-                let penalty = if overlap > 0.0 { 0.0 } else { OFF_LINE - overlap };
-                Some((i, gap.max(0.0) + penalty))
+                if overlap <= 0.0 {
+                    return None;
+                }
+                // 3~4. 기준치를 넘는 것을 먼저, 그다음 중앙점 거리가 짧은 것, 그다음 겹침이 큰 것.
+                let (x, y) = center(w);
+                let distance = (x - fx).hypot(y - fy);
+                Some((i, (overlap < threshold, distance, -overlap)))
             })
-            .min_by(|(_, a), (_, b)| a.total_cmp(b));
+            .min_by(|(_, a), (_, b)| {
+                a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)).then_with(|| a.2.total_cmp(&b.2))
+            });
         match best {
             Some((i, _)) => {
                 self.selected.set(Some((page, i)));
@@ -389,27 +406,58 @@ mod tests {
         assert_eq!(text(&overlay), "아주긴낱말", "같은 줄에서 가장자리가 가까운 쪽");
     }
 
-    /// 같은 줄에 후보가 없을 때만 다른 줄로 넘어간다.
+    /// 겹치지 않는 상자로는 **건너뛰지 않는다**(2026-09-30 사용자 지정). 줄 끝에서 오른쪽을
+    /// 눌러도, 다음 줄 머리로 넘어가지 않는다 — 그렇게 넘어가면 어디로 갈지 예측할 수 없다.
     #[test]
-    fn it_leaves_the_line_only_when_nothing_is_left_on_it() {
+    fn it_never_jumps_to_a_box_that_does_not_overlap() {
         let overlay = OcrOverlay { on: true, ..Default::default() };
         overlay.cache.borrow_mut().insert(
             1,
             vec![
                 word(100.0, 100.0, 110.0, 110.0, "줄끝"),
+                // 다음 줄 머리 — 가로로도 세로로도 겹치지 않는다.
                 word(0.0, 80.0, 10.0, 90.0, "다음줄머리"),
             ],
         );
-        let text = |o: &OcrOverlay| {
-            let (page, index) = o.selected().unwrap();
-            o.cache.borrow()[&page][index].text.clone()
-        };
         overlay.select(Some((1, 0)));
-        // 오른쪽에는 아무것도 없다.
-        assert!(!overlay.move_selection(1.0, 0.0));
-        // 아래로는 줄이 겹치지 않아도 유일한 후보라 넘어간다.
+        assert!(!overlay.move_selection(1.0, 0.0), "오른쪽에 겹치는 상자가 없다");
+        assert!(!overlay.move_selection(0.0, 1.0), "아래에도 가로로 겹치는 상자가 없다");
+        assert_eq!(overlay.selected(), Some((1, 0)), "고른 것이 그대로여야 한다");
+    }
+
+    /// 아래 화살표는 가로로 겹치는 상자로만 간다 — 바로 밑에 있는 것.
+    #[test]
+    fn down_goes_to_the_box_right_below() {
+        let overlay = OcrOverlay { on: true, ..Default::default() };
+        overlay.cache.borrow_mut().insert(
+            1,
+            vec![
+                word(20.0, 100.0, 40.0, 110.0, "기준"),
+                word(22.0, 80.0, 42.0, 90.0, "바로밑"),   // 가로로 크게 겹친다
+                word(80.0, 80.0, 100.0, 90.0, "멀리밑"),  // 겹치지 않는다
+            ],
+        );
+        overlay.select(Some((1, 0)));
         assert!(overlay.move_selection(0.0, 1.0));
-        assert_eq!(text(&overlay), "다음줄머리");
+        assert_eq!(overlay.selected(), Some((1, 1)));
+    }
+
+    /// 기준치(높이의 50%)를 넘게 겹친 상자가 있으면, 더 가깝더라도 살짝만 겹친 상자에는 가지
+    /// 않는다. 위첨자나 쉼표처럼 줄에 살짝 걸친 것으로 튀는 것을 막는다.
+    #[test]
+    fn a_well_overlapped_box_beats_a_closer_sliver() {
+        let overlay = OcrOverlay { on: true, ..Default::default() };
+        overlay.cache.borrow_mut().insert(
+            1,
+            vec![
+                word(0.0, 100.0, 10.0, 120.0, "기준"),      // 높이 20, 기준치는 10
+                word(11.0, 118.0, 16.0, 124.0, "윗첨자"),   // 겹침 2 — 더 가깝지만 살짝만 걸쳤다
+                word(20.0, 100.0, 40.0, 120.0, "같은줄"),   // 겹침 20
+            ],
+        );
+        overlay.select(Some((1, 0)));
+        assert!(overlay.move_selection(1.0, 0.0));
+        assert_eq!(overlay.selected(), Some((1, 2)), "기준치를 넘게 겹친 쪽으로 가야 한다");
     }
 
     /// 살짝 겹쳐 있는 이웃도 그 방향에 있는 것으로 본다(OCR 상자는 자주 겹친다).
