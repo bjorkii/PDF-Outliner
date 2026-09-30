@@ -66,10 +66,12 @@ const LABEL_HEIGHT: f32 = 16.0;
 /// 줄 사이 여백. 줄 높이가 그림 높이를 따라가므로 이 값이 곧 눈에 보이는 간격이다.
 const ROW_GAP: f32 = 14.0;
 
-/// 선택 테두리 두께와 모서리 둥글기 — macOS 미리보기의 썸네일 표시를 따랐다.
-const SELECT_STROKE: f32 = 4.0;
-const HOVER_STROKE: f32 = 2.0;
+/// 선택 표시 — macOS 미리보기의 썸네일 표시를 따랐다. 테두리를 두르는 것이 아니라 **쪽 번호까지
+/// 함께 감싸는 둥근 판**을 깔고 그 위에 종이와 번호를 얹는다. 종이 둘레에 이만큼 색이 보인다.
+const SELECT_PAD: f32 = 4.0;
+/// 종이와 선택 판의 모서리 둥글기.
 const CORNER: f32 = 5.0;
+const SELECT_CORNER: f32 = 8.0;
 
 /// 캐시 한 칸 — 텍스처와 그것을 그릴 때 쓴 폭.
 struct Thumb {
@@ -104,7 +106,7 @@ impl Layout {
             let size = sizes.get(index).copied().unwrap_or_default();
             let image = fit(egui::vec2(width, cap), page_ratio(size));
             tops.push(y);
-            y += image.y + LABEL_GAP + LABEL_HEIGHT + ROW_GAP;
+            y += SELECT_PAD + image.y + LABEL_GAP + LABEL_HEIGHT + ROW_GAP;
             images.push(image);
         }
         tops.push(y);
@@ -370,21 +372,38 @@ fn row(
     let page = index as u32 + 1;
     let rect = egui::Rect::from_min_size(
         egui::pos2(content.left(), content.top() + top),
-        egui::vec2(content.width(), image.y + LABEL_GAP + LABEL_HEIGHT + ROW_GAP),
+        egui::vec2(content.width(), SELECT_PAD + image.y + LABEL_GAP + LABEL_HEIGHT + ROW_GAP),
     );
     if !ui.is_rect_visible(rect) {
         return None;
     }
     let response = ui.interact(rect, ui.id().with(("thumbnail", index)), egui::Sense::click());
-    let image_rect = egui::Rect::from_min_size(egui::pos2(rect.center().x - image.x / 2.0, rect.top()), image);
+    // 줄 맨 위 `SELECT_PAD`는 선택 판이 종이 위로 나오는 몫이다 — 비워 두지 않으면 앞 줄을 덮는다.
+    let image_rect =
+        egui::Rect::from_min_size(egui::pos2(rect.center().x - image.x / 2.0, rect.top() + SELECT_PAD), image);
 
     // 텍스처 상태만 꺼내 두고 캐시 빌림을 끝낸다.
     let cached: Option<(egui::TextureId, i32)> =
         app.thumbnails.cache.get(&page).map(|thumb| (thumb.texture.id(), thumb.width));
 
-    // 그림자 — 흰 종이가 배경에서 떠 보이게(미리보기 앱과 같은 인상).
-    ui.painter()
-        .rect_filled(image_rect.translate(egui::vec2(0.0, 1.5)), CORNER, egui::Color32::from_black_alpha(30));
+    let accent = app.colors.thumbnail_selection.stroke();
+    let is_current = page == app.current_page;
+    // 선택 판은 종이와 쪽 번호를 **함께** 감싼다. 종이 위아래옆으로 `SELECT_PAD`만큼 색이 보이고,
+    // 번호 자리는 판 안쪽이라 번호가 그 색 위에 얹힌다.
+    let plate = egui::Rect::from_min_max(
+        egui::pos2(image_rect.left() - SELECT_PAD, image_rect.top() - SELECT_PAD),
+        egui::pos2(image_rect.right() + SELECT_PAD, image_rect.bottom() + LABEL_GAP + LABEL_HEIGHT),
+    );
+    if is_current {
+        ui.painter().rect_filled(plate, SELECT_CORNER, accent);
+    } else if response.hovered() {
+        // 고르면 어떻게 되는지 미리 보여 준다.
+        ui.painter().rect_filled(plate, SELECT_CORNER, accent.gamma_multiply(0.18));
+    } else {
+        // 흰 종이가 배경에서 떠 보이게(미리보기 앱과 같은 인상). 선택 판 위에서는 탁해 보여서 뺀다.
+        ui.painter()
+            .rect_filled(image_rect.translate(egui::vec2(0.0, 1.5)), CORNER, egui::Color32::from_black_alpha(30));
+    }
 
     match cached {
         Some((id, _)) => {
@@ -408,29 +427,20 @@ fn row(
         app.request_page_texture(ui.ctx(), page, render_width);
     }
 
-    let accent = app.colors.thumbnail_selection.stroke();
-    let is_current = page == app.current_page;
-    if is_current {
-        // 종이 바깥에 굵게 두른다 — 안쪽에 그리면 그림을 가린다. 미리보기 앱의 표시와 같은 인상.
-        let ring = image_rect.expand(SELECT_STROKE / 2.0 + 1.0);
-        ui.painter().rect_stroke(ring, CORNER + 3.0, egui::Stroke::new(SELECT_STROKE, accent));
-    } else {
+    // 종이 가장자리. 선택 판 위에서는 판 색이 이미 테두리 노릇을 한다.
+    if !is_current {
         ui.painter()
             .rect_stroke(image_rect, CORNER, egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(40)));
-        if response.hovered() {
-            let ring = image_rect.expand(HOVER_STROKE / 2.0 + 1.0);
-            ui.painter().rect_stroke(ring, CORNER + 2.0, egui::Stroke::new(HOVER_STROKE, accent.gamma_multiply(0.5)));
-        }
     }
 
-    // 쪽 번호는 그림 아랫변에서 늘 같은 거리에 찍는다.
+    // 쪽 번호는 그림 아랫변에서 늘 같은 거리에 찍는다. 고른 쪽은 선택 판 위에 얹히므로 흰 글자다.
     let label_pos = egui::pos2(rect.center().x, image_rect.bottom() + LABEL_GAP + LABEL_HEIGHT / 2.0);
     ui.painter().text(
         label_pos,
         egui::Align2::CENTER_CENTER,
         page.to_string(),
         egui::FontId::proportional(12.0),
-        if is_current { accent } else { ui.visuals().text_color() },
+        if is_current { app.colors.thumbnail_selection.on_stroke() } else { ui.visuals().text_color() },
     );
 
     response.clicked().then_some(page)
@@ -544,7 +554,7 @@ mod tests {
         let median = median_ratio(&sizes);
         let layout = Layout::build(200.0, &sizes, sizes.len() as u32, median);
 
-        let expected = LABEL_GAP + LABEL_HEIGHT + ROW_GAP;
+        let expected = SELECT_PAD + LABEL_GAP + LABEL_HEIGHT + ROW_GAP;
         for index in 0..sizes.len() {
             let gap = layout.height_of(index) - layout.images[index].y;
             assert!((gap - expected).abs() < 1e-3, "{index}번째 줄의 간격이 {gap}으로 어긋난다");
