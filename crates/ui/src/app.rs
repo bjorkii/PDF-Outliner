@@ -442,7 +442,7 @@ impl PdfViewerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let engine = create_engine();
         let status_message = if engine.is_none() {
-            Some("pdfium 라이브러리를 찾지 못했습니다. PDF를 열 수 없습니다.".to_string())
+            Some("PDF 처리 라이브러리를 찾지 못했습니다. 앱을 다시 설치해 주세요.".to_string())
         } else {
             None
         };

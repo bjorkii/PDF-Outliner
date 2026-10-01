@@ -308,12 +308,13 @@ pub fn run_worker_process() -> i32 {
     let job: Job = match serde_json::from_str(&input) {
         Ok(job) => job,
         Err(err) => {
-            emit(Event::Failed(format!("작업 요청 해석 실패: {err}")));
+            eprintln!("작업 요청 해석 실패: {err}");
+            emit(Event::Failed("내부 오류로 작업을 시작하지 못했습니다. 앱을 다시 실행해도 증상이 계속되면 앱을 재설치해 주세요.".to_string()));
             return 1;
         }
     };
     let Some(engine) = crate::app::create_engine() else {
-        emit(Event::Failed("pdfium 라이브러리를 찾지 못했습니다.".to_string()));
+        emit(Event::Failed("PDF 처리 라이브러리를 찾지 못했습니다. 앱을 다시 설치해 주세요.".to_string()));
         return 2;
     };
     let result = match &job {
@@ -412,7 +413,6 @@ fn probe_text_kinds(engine: PdfEngine, pdf: &Path, emit: &mut dyn FnMut(Event)) 
 }
 
 fn run_export(engine: PdfEngine, job: &ExportJob, emit: &mut dyn FnMut(Event)) -> anyhow::Result<ExportReport> {
-    use anyhow::Context;
     let document = engine.open_document(&job.pdf).map_err(|e| open_error_message(e, Action::Export))?;
     let pages = document.pages();
     let page_count = pages.len() as usize;
@@ -423,7 +423,10 @@ fn run_export(engine: PdfEngine, job: &ExportJob, emit: &mut dyn FnMut(Event)) -
     let partial = first > 1 || last < page_count;
 
     let file = std::fs::File::create(&job.temp_output)
-        .with_context(|| format!("임시 파일을 만들 수 없음: {}", job.temp_output.display()))?;
+        .map_err(|e| {
+            eprintln!("임시 파일을 만들지 못함: {e}");
+            anyhow::anyhow!("파일 경로가 변경되어 작업을 진행할 수 없습니다: {}", job.temp_output.display())
+        })?;
     let writer = BufWriter::with_capacity(1 << 20, file);
     let mut output = match job.format {
         ExportFormat::Hocr => {
@@ -481,9 +484,15 @@ fn run_export(engine: PdfEngine, job: &ExportJob, emit: &mut dyn FnMut(Event)) -
         .into_inner()
         .map_err(|e| e.into_error())?
         .sync_all()
-        .context("임시 파일 기록 실패")?;
+        .map_err(|e| {
+            eprintln!("임시 파일을 기록하지 못함: {e}");
+            anyhow::anyhow!("파일 경로가 변경되어 작업을 진행할 수 없습니다: {}", job.temp_output.display())
+        })?;
     std::fs::rename(&job.temp_output, &job.output)
-        .with_context(|| format!("결과 파일로 옮기지 못함: {}", job.output.display()))?;
+        .map_err(|e| {
+            eprintln!("결과 파일로 옮기지 못함: {e}");
+            anyhow::anyhow!("파일 경로가 변경되어 작업을 진행할 수 없습니다: {}", job.output.display())
+        })?;
     Ok(report)
 }
 
@@ -559,8 +568,11 @@ pub(crate) fn open_for_edit(
     pdf: &Path,
     action: Action,
 ) -> anyhow::Result<(Document, pdf_ocr::preflight::Preflight, bool)> {
-    use anyhow::{bail, Context};
-    let raw = std::fs::read(pdf).with_context(|| format!("파일을 읽을 수 없음: {}", pdf.display()))?;
+    use anyhow::bail;
+    let raw = std::fs::read(pdf).map_err(|e| {
+        eprintln!("원본을 읽지 못함: {e}");
+        anyhow::anyhow!("파일 경로가 변경되어 작업을 진행할 수 없습니다: {}", pdf.display())
+    })?;
     // 구조를 못 읽는 것과 쪽 수가 어긋나는 것은 사용자에게 같은 사정이다 — 한 문구로 합쳤다
     // (2026-10-01 md 확정). 어느 쪽이었는지는 stderr로 가른다.
     let doc = Document::load_mem(&raw).map_err(|e| {
@@ -629,7 +641,7 @@ fn run_removal(
     action: Action,
     emit: &mut dyn FnMut(Event),
 ) -> anyhow::Result<RemovalReport> {
-    use anyhow::{bail, Context};
+    use anyhow::bail;
     use std::collections::BTreeSet;
     emit(Event::Stage("분석 중".to_string()));
     let mode = pdf_ocr::remove::Mode::Standard;
@@ -681,15 +693,27 @@ fn run_removal(
             );
         }
         if let Some((page, reason)) = still.first() {
-            bail!("되돌린 {}쪽이 원본과 같지 않습니다({reason}). 원본을 건드리지 않았습니다.", page + 1);
+            eprintln!("되돌린 뒤에도 p.{}이 원본과 다름: {reason}", page + 1);
+            bail!("OCR 전체 삭제에 실패했습니다. 원본은 유지됩니다.");
         }
     }
 
     // 결과 파일 전체 구조 확인: 두 라이브러리로 다시 열리고 페이지 수가 같아야 한다.
-    let reopened = Document::load(temp_output).map_err(|e| anyhow::anyhow!("결과 파일을 다시 읽지 못함: {e}"))?;
-    let pdfium_pages = engine.open_document(temp_output).context("결과 파일을 pdfium으로 열지 못함")?.pages().len() as usize;
+    let reopened = Document::load(temp_output).map_err(|e| {
+        eprintln!("결과 파일을 lopdf로 다시 읽지 못함: {e}");
+        anyhow::anyhow!("처리 과정에서 결함이 발생하여 중단하고 원본을 유지합니다.")
+    })?;
+    let pdfium_pages = engine
+        .open_document(temp_output)
+        .map_err(|e| {
+            eprintln!("결과 파일을 pdfium으로 열지 못함: {e}");
+            anyhow::anyhow!("처리 과정에서 결함이 발생하여 중단하고 원본을 유지합니다.")
+        })?
+        .pages()
+        .len() as usize;
     if reopened.get_pages().len() != report.analysis.pages || pdfium_pages != report.analysis.pages {
-        bail!("결과 파일의 페이지 수가 원본과 다릅니다. 원본을 건드리지 않았습니다.");
+        eprintln!("결과 파일 쪽 수 불일치: lopdf {}쪽, pdfium {pdfium_pages}쪽, 원본 {}쪽", reopened.get_pages().len(), report.analysis.pages);
+        bail!("처리 과정에서 결함이 발생하여 중단하고 원본을 유지합니다.");
     }
     report.pages_changed = planned.iter().filter(|i| !reverted.contains(i)).count();
     if report.pages_changed == 0 {
@@ -874,10 +898,12 @@ pub(crate) fn verify_pages(
     check_visible_text: bool,
     emit: &mut dyn FnMut(Event),
 ) -> anyhow::Result<Vec<(usize, String)>> {
-    use anyhow::Context;
     use pdf_engine::verify::{compare_with, snapshot};
     let before = engine.open_document(original).map_err(|e| open_error_message(e, Action::Remove))?;
-    let after = engine.open_document(result).context("결과 파일을 pdfium으로 열지 못함")?;
+    let after = engine.open_document(result).map_err(|e| {
+        eprintln!("결과 파일을 pdfium으로 열지 못함: {e}");
+        anyhow::anyhow!("처리 과정에서 결함이 발생하여 중단하고 원본을 유지합니다.")
+    })?;
     let mut failures = Vec::new();
     for (done, &index) in pages.iter().enumerate() {
         let outcome = (|| -> anyhow::Result<Result<(), String>> {

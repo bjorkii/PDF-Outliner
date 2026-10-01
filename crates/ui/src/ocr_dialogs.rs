@@ -292,7 +292,12 @@ impl OcrJob {
     fn spawn(ctx: &egui::Context, title: String, job: &Job, kind: JobKind, temp_output: Option<PathBuf>) -> Self {
         let (worker, phase) = match WorkerHandle::spawn(job, ctx) {
             Ok(worker) => (Some(worker), JobPhase::Running { done: 0, total: 0 }),
-            Err(err) => (None, JobPhase::Failed(format!("작업 프로세스를 시작하지 못했습니다: {err}"))),
+            Err(err) => {
+                // 원인은 모두 앱 쪽에 있다(실행 파일이 옮겨짐, 보안 소프트웨어가 막음, 자원 부족).
+                // 문서와 무관하므로 수치는 stderr로만 남긴다.
+                eprintln!("작업 프로세스를 시작하지 못함: {err}");
+                (None, JobPhase::Failed(INTERNAL_ERROR.to_string()))
+            }
         };
         static NEXT_SALT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let salt = NEXT_SALT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -411,7 +416,7 @@ fn poll_events(app: &mut PdfViewerApp) {
             WorkerPoll::Event(Event::TextKinds { .. } | Event::PageTextMap { .. }) => {}
             WorkerPoll::Event(Event::Failed(message)) => job.fail(message),
             // 끝 이벤트 없이 출력이 끝남 — 작업 프로세스가 죽었다.
-            WorkerPoll::Closed => job.fail("작업 프로세스가 예기치 않게 끝났습니다(panic.log 확인).".to_string()),
+            WorkerPoll::Closed => job.fail("작업 프로세스가 예기치 않게 끝났습니다. 로그파일을 확인하세요.".to_string()),
         }
     }
 }
@@ -663,6 +668,12 @@ fn finish_removal(
     Ok((describe_removal(report), Some(backup)))
 }
 
+/// 작업을 시작조차 못했을 때. 원인이 모두 앱 쪽에 있어 문서를 바꿔도 달라지지 않는다.
+const INTERNAL_ERROR: &str =
+    "내부 오류로 작업을 시작하지 못했습니다. 앱을 다시 실행해도 증상이 계속되면 앱을 재설치해 주세요.";
+/// 작업 도중 파일이 사라졌거나 폴더가 없어졌을 때.
+const PATH_GONE: &str = "파일 경로가 변경되어 작업을 진행할 수 없습니다.";
+
 /// 원본을 백업으로 복사하고 임시 파일로 바꾼 뒤 다시 연다. **만든 백업의 경로** 또는 실패
 /// 이유(원본은 그대로).
 ///
@@ -675,24 +686,33 @@ fn swap_in_result(
     status: &str,
     action: &str,
 ) -> Result<PathBuf, String> {
-    let temp = temp.ok_or("결과 파일 경로가 없습니다.")?;
-    // 쓰기가 권한 문제로 막히는 가장 흔한 원인은 그 파일을 다른 앱이 붙잡고 있는 것이다
-    // (Windows는 열린 파일의 교체를 막는다). 원인을 짚어 주지 않으면 사용자가 손쓸 데가 없다.
-    let write_blocked = |err: &std::io::Error| -> Option<String> {
-        matches!(err.kind(), std::io::ErrorKind::PermissionDenied)
-            .then(|| format!("파일이 다른 앱에서 열려 있어서 {action}. 원본은 바뀌지 않았습니다."))
-    };
+    let temp = temp.ok_or_else(|| PATH_GONE.to_string())?;
     // 이름에 시각이 들어가므로 늘 새 백업을 만든다 — 이전 백업은 그대로 남는다.
     let backup = crate::app::backup_path(pdf, &crate::app::backup_stamp());
     if let Err(err) = std::fs::copy(pdf, &backup) {
+        // **여기서는 "다른 앱이 열어 두었다"고 말하지 않는다.** 백업은 원본 *옆에 새 파일 하나를
+        // 만드는* 일이라, 다른 앱이 그 PDF를 열고 있어도 복사는 된다. 막혔다면 그 폴더에 쓸 수
+        // 없다는 뜻이다(2026-10-01 확정).
+        eprintln!("원본 백업 실패: {err}");
         let _ = std::fs::remove_file(temp);
-        return Err(write_blocked(&err)
-            .unwrap_or_else(|| format!("원본 백업 실패({err}). 원본은 바뀌지 않았습니다.")));
+        return Err(
+            "원본 백업에 실패하여 작업을 중단했습니다. 원본은 유지됩니다. 디스크 여유 공간과 폴더 쓰기 권한을 확인해 주세요."
+                .to_string(),
+        );
     }
     if let Err(err) = std::fs::rename(temp, pdf) {
+        // 교체는 **원본 파일을 통째로 갈아 끼우는** 일이라, 다른 앱이 그 PDF를 열고 있으면 막힌다
+        // (Windows). 그 경우만 원인을 짚어 준다.
+        eprintln!("결과 파일을 원본 자리에 넣지 못함: {err}");
         let _ = std::fs::remove_file(temp);
-        return Err(write_blocked(&err)
-            .unwrap_or_else(|| format!("파일 교체 실패({err}). 원본은 바뀌지 않았습니다.")));
+        // 아무 일도 일어나지 않았으므로 방금 만든 백업도 치운다 — 영문 모를 사본만 남으면 안 된다.
+        let _ = std::fs::remove_file(&backup);
+        return Err(match err.kind() {
+            std::io::ErrorKind::PermissionDenied => {
+                format!("파일이 다른 앱에서 열려 있어서 {action}. 원본은 유지됩니다.")
+            }
+            _ => "결과 파일 생성에 실패했습니다. 원본은 유지됩니다.".to_string(),
+        });
     }
     if app.current_file.as_deref() == Some(pdf) {
         app.reload_current_document();
