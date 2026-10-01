@@ -561,7 +561,12 @@ pub(crate) fn open_for_edit(
 ) -> anyhow::Result<(Document, pdf_ocr::preflight::Preflight, bool)> {
     use anyhow::{bail, Context};
     let raw = std::fs::read(pdf).with_context(|| format!("파일을 읽을 수 없음: {}", pdf.display()))?;
-    let doc = Document::load_mem(&raw).map_err(|e| anyhow::anyhow!("PDF 구조를 읽지 못했습니다(손상 가능): {e}"))?;
+    // 구조를 못 읽는 것과 쪽 수가 어긋나는 것은 사용자에게 같은 사정이다 — 한 문구로 합쳤다
+    // (2026-10-01 md 확정). 어느 쪽이었는지는 stderr로 가른다.
+    let doc = Document::load_mem(&raw).map_err(|e| {
+        eprintln!("PDF 구조를 읽지 못함: {e}");
+        anyhow::anyhow!("PDF 구조가 손상된 것으로 확인되어 작업을 진행할 수 없습니다.")
+    })?;
     let preflight = pdf_ocr::preflight::Preflight::inspect(&doc, &raw);
     drop(raw);
     if preflight.encrypted {
@@ -575,7 +580,7 @@ pub(crate) fn open_for_edit(
         // (2026-10-01 지정). 진단이 필요할 때를 위해 수치는 stderr로 남긴다 — pdfium이 세는 쪽
         // 수와 PDF 페이지 트리가 주장하는 쪽 수다.
         eprintln!("쪽 수 불일치: pdfium {pdfium_pages}쪽, 페이지 트리 {}쪽", preflight.page_count);
-        bail!("PDF 구조가 손상된 것으로 보여 작업을 진행할 수 없습니다.");
+        bail!("PDF 구조가 손상된 것으로 확인되어 작업을 진행할 수 없습니다.");
     }
     let compact = pdf_ocr::save::uses_object_streams(&doc) && !preflight.pdfa.as_deref().is_some_and(|p| p.starts_with('1'));
     Ok((doc, preflight, compact))
