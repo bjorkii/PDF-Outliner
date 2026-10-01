@@ -1076,6 +1076,13 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 if !any_text_in_range {
                     ui.colored_label(ui.visuals().error_fg_color, "• hOCR에 해당 범위로 가져올 정보가 없습니다.");
                 }
+                // 두 범위의 쪽수는 `sync`가 늘 맞춰 준다. 그래도 눌러서 넘어가지 못하게 막아 둔다 —
+                // 어긋난 채로 진행하면 뒤쪽 쪽이 조용히 빠진다(2026-10-01 리포트).
+                let lengths_match =
+                    dialog.hocr_last.saturating_sub(dialog.hocr_first) == dialog.pdf_last.saturating_sub(dialog.pdf_first);
+                if !lengths_match {
+                    ui.colored_label(ui.visuals().error_fg_color, "• 두 범위의 쪽수가 다릅니다.");
+                }
                 bullet(ui, "원본PDF는 같은 위치에 백업됩니다.");
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -1086,6 +1093,7 @@ fn show_import_dialog(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     // 틀릴 수 있어, "이 PDF의 hOCR이 아닌 것 같다"는 경우에도 사용자가 눌러 볼
                     // 수 있어야 한다. 실제로 맞지 않으면 페이지마다 이유가 결과에 남는다.
                     let allowed = !insert.is_empty()
+                        && lengths_match
                         && any_text_in_range
                         && dialog.analysis.duplicate_page_numbers.is_empty()
                         && (!dialog.analysis.signed || dialog.signature_ack);
@@ -1163,24 +1171,43 @@ fn option_group(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)
 /// 값이 실제로 바뀌었으면 `true`.
 fn page_field(ui: &mut egui::Ui, salt: &str, value: &mut usize, max: usize, size: f32) -> bool {
     let id = egui::Id::new(("ocr_page_field", salt));
-    let focused = ui.memory(|m| m.has_focus(id));
-    // 편집 중일 때만 치던 글자를 보여 준다. 그 밖에는 늘 값 자체를 보여 준다.
-    let mut text = ui
-        .data_mut(|d| d.get_temp::<String>(id))
-        .filter(|_| focused)
-        .unwrap_or_else(|| value.to_string());
+    // **치던 글자는 포커스로 거르지 않는다.** 칸을 떠나는 프레임에는 이미 포커스가 없어서, 거르면
+    // 방금 친 글자를 버리고 옛 값을 도로 확정한다(2026-10-01 리포트: "끝페이지를 고치고 시작페이지로
+    // 옮기면 원래대로 돌아간다"). 대신 아래에서 **쓸 일이 없을 때 지운다**.
+    let stored = ui.data_mut(|d| d.get_temp::<String>(id));
+    let had_buffer = stored.is_some();
+    let mut text = stored.unwrap_or_else(|| value.to_string());
 
-    let response = ui.add(
-        egui::TextEdit::singleline(&mut text)
-            .id(id)
-            .font(egui::FontId::proportional(size))
-            .horizontal_align(egui::Align::Center)
-            .desired_width(size * 2.2)
-            .char_limit(6),
-    );
-    // 칸을 처음 누른 순간 글자를 모두 고른 상태로 둔다 — 바로 새 번호를 쳐서 덮어쓸 수 있어야
-    // 한다(`DragValue`가 하던 일이고, 북마크 제목 편집도 같은 규칙이다).
-    if response.gained_focus() {
+    // 테두리를 또렷하게 — 밝은 테마에서 기본 테두리는 바탕과 구분이 안 된다(2026-10-01 요청).
+    // `scope`로 감싸 이 칸에만 먹인다. 칸의 id는 우리가 지정하므로 `scope`가 늘려 놓는 자동 id는
+    // 상관없다(`page_field` 문서).
+    let response = ui
+        .scope(|ui| {
+            let line = if ui.visuals().dark_mode {
+                egui::Color32::from_gray(160)
+            } else {
+                egui::Color32::from_gray(80)
+            };
+            let stroke = egui::Stroke::new(1.0_f32, line);
+            let widgets = &mut ui.visuals_mut().widgets;
+            widgets.inactive.bg_stroke = stroke;
+            widgets.hovered.bg_stroke = stroke;
+            widgets.active.bg_stroke = stroke;
+            ui.add(
+                egui::TextEdit::singleline(&mut text)
+                    .id(id)
+                    .font(egui::FontId::proportional(size))
+                    .horizontal_align(egui::Align::Center)
+                    .desired_width(size * 2.2)
+                    .char_limit(6),
+            )
+        })
+        .inner;
+
+    // 칸을 누른 순간 글자를 모두 고른 상태로 둔다 — 바로 새 번호를 쳐서 덮어쓸 수 있어야 한다
+    // (`DragValue`가 하던 일이고, 북마크 제목 편집도 같은 규칙이다).
+    let select_all = response.gained_focus() || (response.has_focus() && !had_buffer && !response.changed());
+    if select_all {
         if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {
             let all = egui::text::CCursorRange::two(
                 egui::text::CCursor::new(0),
@@ -1190,12 +1217,21 @@ fn page_field(ui: &mut egui::Ui, salt: &str, value: &mut usize, max: usize, size
             egui::TextEdit::store_state(ui.ctx(), id, state);
         }
     }
-    if response.has_focus() {
+    // **포커스를 받은 그 프레임에는 담아 두지 않는다.** 다른 칸의 확정으로 이 칸의 값이 방금 바뀔
+    // 수 있는데(창이 범위 칸들을 서로 맞춘다), 그 보정은 줄을 다 그린 **뒤에** 일어난다. 그 프레임의
+    // 글자를 굳히면 보정이 묻힌다 — 다음 프레임에 값을 다시 읽어 담는다(2026-10-01 리포트:
+    // "hOCR 범위를 고치고 PDF 끝페이지를 누르면 자동 반영이 안 된다").
+    if response.has_focus() && !response.gained_focus() {
         ui.data_mut(|d| d.insert_temp(id, text.clone()));
     }
 
     let enter = response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
     if !response.lost_focus() && !enter {
+        // 포커스와 무관한 프레임이면 남은 글자를 지운다 — 창을 닫았다 다시 열었을 때 옛 글자가
+        // 되살아나지 않게.
+        if !response.has_focus() && had_buffer {
+            ui.data_mut(|d| d.remove::<String>(id));
+        }
         return false;
     }
     ui.data_mut(|d| d.remove::<String>(id));
@@ -2153,5 +2189,106 @@ mod page_field_tests {
 
         type_and_commit("900", &mut value, &mut rect);
         assert_eq!(value, 48, "문서 끝을 넘는 값이 그대로 들어갔다");
+    }
+}
+
+/// 칸 사이를 오갈 때 값이 되돌아가거나 자동 보정이 묻히지 않아야 한다(2026-10-01 리포트).
+#[cfg(test)]
+mod page_field_focus_tests {
+    use super::page_field;
+
+    /// 한 줄에 칸 넷을 놓고 한 프레임을 돌린다. `sync`는 첫 칸이 확정될 때 넷째 칸을 고치는,
+    /// 가져오기 창의 "두 범위를 서로 맞춘다"와 같은 몸짓이다.
+    struct Row {
+        ctx: egui::Context,
+        values: [usize; 4],
+        rects: [egui::Rect; 4],
+    }
+
+    impl Row {
+        fn new() -> Self {
+            Self { ctx: egui::Context::default(), values: [1, 2, 10, 11], rects: [egui::Rect::NOTHING; 4] }
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 200.0))),
+                events,
+                ..Default::default()
+            };
+            let values = &mut self.values;
+            let rects = &mut self.rects;
+            let _ = self.ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let mut edited = None;
+                    ui.horizontal(|ui| {
+                        for (index, salt) in ["a", "b", "c", "d"].into_iter().enumerate() {
+                            let before = ui.cursor().min.x;
+                            if page_field(ui, salt, &mut values[index], 99, 14.0) {
+                                edited = Some(index);
+                            }
+                            rects[index] = egui::Rect::from_min_max(
+                                egui::pos2(before, ui.min_rect().top()),
+                                egui::pos2(ui.cursor().min.x, ui.min_rect().bottom()),
+                            );
+                            ui.add_space(12.0);
+                        }
+                    });
+                    // 첫 칸을 고치면 넷째 칸이 따라온다 — 줄을 **다 그린 뒤**에 일어난다.
+                    if edited == Some(0) {
+                        values[3] = values[0] + 7;
+                    }
+                });
+            });
+        }
+
+        fn click(&mut self, index: usize) {
+            let pos = self.rects[index].center();
+            self.frame(vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+            ]);
+        }
+
+        fn settle(&mut self) {
+            for _ in 0..3 {
+                self.frame(vec![]);
+            }
+        }
+    }
+
+    /// 칸을 고치고 **앞쪽** 칸을 누르면, 고친 값이 그대로 남아야 한다. 떠나는 프레임에는 이미
+    /// 포커스가 없어서, 그때 치던 글자를 버리면 옛 값이 되살아난다.
+    #[test]
+    fn a_value_survives_clicking_an_earlier_field() {
+        let mut row = Row::new();
+        row.settle();
+
+        row.click(3);
+        row.frame(vec![egui::Event::Text("26".into())]);
+        row.click(0);
+        row.settle();
+        assert_eq!(row.values[3], 26, "앞 칸을 누르자 고친 값이 되돌아갔다");
+    }
+
+    /// 칸을 고치고 **뒤쪽** 칸을 누르면, 그 확정으로 따라 바뀐 값이 묻히지 않아야 한다. 뒤쪽 칸은
+    /// 보정이 일어나기 전의 글자를 담아 두면 안 된다.
+    #[test]
+    fn an_automatic_adjustment_is_not_swallowed_by_the_next_field() {
+        let mut row = Row::new();
+        row.settle();
+
+        row.click(0);
+        row.frame(vec![egui::Event::Text("5".into())]);
+        row.click(3); // 보정이 일어나는 바로 그 프레임에 넷째 칸이 포커스를 받는다
+        row.settle();
+        assert_eq!(row.values[0], 5);
+        assert_eq!(row.values[3], 12, "따라 바뀐 값이 옛 글자에 덮였다");
+
+        // 그 상태에서 넷째 칸을 떠나도 보정된 값이 유지된다.
+        row.click(1);
+        row.settle();
+        assert_eq!(row.values[3], 12, "칸을 떠나면서 옛 값으로 되돌아갔다");
     }
 }
