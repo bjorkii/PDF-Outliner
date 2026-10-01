@@ -571,10 +571,11 @@ pub(crate) fn open_for_edit(
     }
     let pdfium_pages = engine.open_document(pdf).map_err(|e| open_error_message(e, action))?.pages().len() as usize;
     if pdfium_pages != preflight.page_count {
-        bail!(
-            "PDF 구조가 손상된 것으로 보입니다(페이지 수 불일치: 화면 {pdfium_pages}쪽, 구조 {}쪽). 원본을 건드리지 않았습니다.",
-            preflight.page_count
-        );
+        // 쪽 수가 왜 어긋났는지는 사용자가 어쩔 수 있는 일이 아니라 화면에 적지 않는다
+        // (2026-10-01 지정). 진단이 필요할 때를 위해 수치는 stderr로 남긴다 — pdfium이 세는 쪽
+        // 수와 PDF 페이지 트리가 주장하는 쪽 수다.
+        eprintln!("쪽 수 불일치: pdfium {pdfium_pages}쪽, 페이지 트리 {}쪽", preflight.page_count);
+        bail!("PDF 구조가 손상된 것으로 보여 작업을 진행할 수 없습니다.");
     }
     let compact = pdf_ocr::save::uses_object_streams(&doc) && !preflight.pdfa.as_deref().is_some_and(|p| p.starts_with('1'));
     Ok((doc, preflight, compact))
