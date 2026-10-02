@@ -18,8 +18,31 @@ const MENU_WIDTH: f32 = 186.0;
 /// 파일 메뉴의 가로폭 — 최근 파일 목록(파일명 + 상위 폴더 경로 두 줄)에 맞춘다.
 const RECENT_FILE_WIDTH: f32 = 320.0;
 
-/// 아이콘 버튼 한 변 크기 — 옆의 ➖/➕ 텍스트 버튼과 높이가 어울리게 잡은 값.
-const ICON_BUTTON_SIZE: f32 = 22.0;
+/// 툴바 항목 하나의 높이(pt).
+///
+/// **글자 버튼과 아이콘 버튼이 같은 값을 쓴다.** 전에는 아이콘만 22, 글자 버튼은 egui 기본 18이라
+/// 한 줄 안에서 서로 어긋나 보였다(2026-10-02 리포트: "아이콘은 위아래로 더 길어").
+const ITEM_HEIGHT: f32 = 22.0;
+
+/// 아이콘 버튼 한 변 크기 — 정사각형이라 높이와 같다.
+const ICON_BUTTON_SIZE: f32 = ITEM_HEIGHT;
+
+/// 툴바 한 줄. **줄 높이를 먼저 못박는다.**
+///
+/// egui의 가로 레이아웃은 그 줄의 높이를 미리 모른다. 각 항목을 "지금까지의 줄 높이" 안에서 가운데
+/// 맞추는데, 더 큰 항목이 **나중에** 들어오면 줄은 커지지만 이미 놓인 것은 내려오지 않는다
+/// (`egui::Layout::next_frame_ignore_wrap`의 "for horizontal layouts we always want to expand down").
+/// 그래서 큰 항목 **앞**에 놓인 것만 위로 뜬다 — 2026-10-02 리포트의 "'파일'에서 '+'까지는 윗쪽으로
+/// 치우쳤다"가 이것이고, 그 뒤의 `단축키`는 멀쩡했다(실측: 중심 11 대 13).
+///
+/// 높이를 먼저 정해 두면 `Align::Center`가 모든 항목을 같은 높이 안에서 가운데로 놓는다. 그러려면
+/// **ITEM_HEIGHT가 가장 큰 항목보다 작지 않아야 한다** — 더 큰 것이 들어오면 그것만 다시 어긋난다.
+/// `interact_size.y`도 같이 올려서 글자 버튼·입력칸·슬라이더가 모두 이 높이를 바닥값으로 쓰게 한다.
+fn toolbar_row<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.spacing_mut().interact_size.y = ITEM_HEIGHT;
+    let row = egui::vec2(ui.available_width(), ITEM_HEIGHT);
+    ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(egui::Align::Center), add).inner
+}
 
 /// 커스텀 벡터 아이콘을 그리는 버튼. `egui::Button`은 텍스트(WidgetText)만 받고 임의
 /// 도형을 못 그리므로, 사이드바 폴드 아이콘(sidebar.rs)과 같은 방식으로 직접 rect를
@@ -235,7 +258,7 @@ fn menu_item(ui: &mut egui::Ui, label: &str, enabled: bool, tooltip: &str) -> bo
 
 pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-        ui.horizontal(|ui| {
+        toolbar_row(ui, |ui| {
             let has_file = app.current_file.is_some();
             // 답해야 하는 창이 떠 있으면 메뉴를 잠근다 — 그 창을 두고 다른 기능을 고르면 시스템
             // 다이얼로그가 겹쳐 떴다(2026-09-29 리포트).
@@ -816,5 +839,75 @@ pub fn handle_scroll_zoom(ctx: &egui::Context, viewport: &mut ViewportState) {
     if scroll_delta != 0.0 {
         let factor = 1.0 + (scroll_delta * 0.001);
         viewport.zoom_by(factor);
+    }
+}
+
+
+/// 툴바 한 줄 안의 세로 정렬(2026-10-02 리포트).
+#[cfg(test)]
+mod row_alignment_tests {
+    use super::{icon_button, toolbar_row, ICON_BUTTON_SIZE, ITEM_HEIGHT};
+
+    /// 한 줄에 글자 버튼과 아이콘 버튼을 섞어 놓고 각 항목의 자리를 잰다.
+    fn measure(fixed: bool) -> Vec<egui::Rect> {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 600.0))),
+            ..Default::default()
+        };
+        let mut rects = Vec::new();
+        let _ = ctx.run(input, |ctx| {
+            egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+                let body = |ui: &mut egui::Ui, rects: &mut Vec<egui::Rect>| {
+                    rects.push(ui.button("파일").rect);
+                    rects.push(ui.button("➕").rect);
+                    rects.push(icon_button(ui, |_, _, _| {}).rect);
+                    rects.push(ui.button("단축키").rect);
+                };
+                if fixed {
+                    toolbar_row(ui, |ui| body(ui, &mut rects));
+                } else {
+                    // 고치기 전의 모습 — 시험이 실제로 무언가를 잡고 있는지 확인하는 대조군.
+                    ui.horizontal(|ui| body(ui, &mut rects));
+                }
+            });
+        });
+        rects
+    }
+
+    /// 모든 항목이 같은 높이로, 같은 세로 중심에 놓인다.
+    #[test]
+    fn every_item_shares_one_height_and_centre() {
+        let rects = measure(true);
+        let centre = rects[0].center().y;
+        for (index, rect) in rects.iter().enumerate() {
+            assert!(
+                (rect.center().y - centre).abs() < 0.01,
+                "{index}번째 항목의 세로 중심이 {}로 어긋났다(기준 {centre})",
+                rect.center().y
+            );
+            assert!(
+                (rect.height() - ITEM_HEIGHT).abs() < 0.01,
+                "{index}번째 항목의 높이가 {}다(기준 {ITEM_HEIGHT})",
+                rect.height()
+            );
+        }
+    }
+
+    /// 대조군: 줄 높이를 못박지 않으면 **큰 항목 앞의 것만** 위로 뜬다. 이 시험이 깨지면 egui가
+    /// 그 동작을 바꾼 것이니, 위 고침이 아직 필요한지 다시 보면 된다.
+    #[test]
+    fn without_a_fixed_height_the_earlier_items_drift_up() {
+        let rects = measure(false);
+        let (text, icon) = (rects[0].center().y, rects[2].center().y);
+        assert!(icon > text, "아이콘보다 앞선 글자 버튼이 위로 뜨지 않았다({text} vs {icon})");
+        // 아이콘 뒤에 놓인 것은 이미 커진 줄 안에서 제대로 가운데에 온다.
+        assert!((rects[3].center().y - icon).abs() < 0.01);
+    }
+
+    /// 아이콘 버튼은 정사각형이고 줄 높이와 같다.
+    #[test]
+    fn the_icon_button_matches_the_row_height() {
+        assert_eq!(ICON_BUTTON_SIZE, ITEM_HEIGHT);
     }
 }
