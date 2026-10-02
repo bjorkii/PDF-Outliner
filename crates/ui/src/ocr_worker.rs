@@ -989,7 +989,7 @@ pub(crate) fn open_error_message(err: anyhow::Error, action: Action) -> anyhow::
             return password_protected(action)
         }
         Some(PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::FormatError)) => {
-            ("형식이 손상된 파일", "파일 형식이 손상돼 있어서")
+            ("손상된 파일", "파일이 손상돼 있어서")
         }
         Some(PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::FileError)) => {
             ("읽을 수 없는 파일", "파일을 찾거나 읽을 수 없어서")

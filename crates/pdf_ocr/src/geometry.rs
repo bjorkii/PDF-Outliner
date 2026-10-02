@@ -199,7 +199,7 @@ impl PageFrame {
         let (sx, sy) = (w / width_px, h / height_px);
         if (sx / sy - 1.0).abs() > tolerance {
             bail!(
-                "가로세로 비율 불일치: 페이지 {:.1}×{:.1}pt, hOCR {}×{}px",
+                "페이지 종횡비 불일치: 페이지 {:.1}×{:.1}pt, hOCR {}×{}px",
                 w,
                 h,
                 width_px,

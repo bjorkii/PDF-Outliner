@@ -532,7 +532,8 @@ fn edit_stream(bytes: &[u8], operations: &[Operation], removals: &BTreeMap<usize
             _ => String::new(),
         };
         if needs_advance(operations, removals, index) {
-            let advance = advance.ok_or("글자 폭을 계산할 수 없는 폰트(지운 텍스트 뒤에 같은 줄 텍스트가 이어짐)")?;
+            // 폭을 모르면 지운 자리만큼 뒤 글자가 당겨져 줄이 틀어진다 — 그 쪽은 그대로 둔다.
+            let advance = advance.ok_or("글자 폭을 계산할 수 없는 폰트가 있어 삭제 후 레이아웃이 깨짐")?;
             let n = tj_number_for_advance(advance, font_size, horizontal_scaling)
                 .ok_or("크기 0 폰트의 이동량을 보존할 수 없음")?;
             if !replacement.is_empty() {
