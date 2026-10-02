@@ -295,7 +295,7 @@ impl OcrJob {
             Err(err) => {
                 // 원인은 모두 앱 쪽에 있다(실행 파일이 옮겨짐, 보안 소프트웨어가 막음, 자원 부족).
                 // 문서와 무관하므로 수치는 stderr로만 남긴다.
-                eprintln!("작업 프로세스를 시작하지 못함: {err}");
+                crate::crash_log::note("app", format!("작업 프로세스를 시작하지 못함: {err}"));
                 (None, JobPhase::Failed(INTERNAL_ERROR.to_string()))
             }
         };
@@ -693,7 +693,7 @@ fn swap_in_result(
         // **여기서는 "다른 앱이 열어 두었다"고 말하지 않는다.** 백업은 원본 *옆에 새 파일 하나를
         // 만드는* 일이라, 다른 앱이 그 PDF를 열고 있어도 복사는 된다. 막혔다면 그 폴더에 쓸 수
         // 없다는 뜻이다(2026-10-01 확정).
-        eprintln!("원본 백업 실패: {err}");
+        crate::crash_log::note("app", format!("원본 백업 실패: {err}"));
         let _ = std::fs::remove_file(temp);
         return Err(
             "원본 백업에 실패하여 작업을 중단했습니다. 원본은 유지됩니다. 디스크 여유 공간과 폴더 쓰기 권한을 확인해 주세요."
@@ -703,7 +703,7 @@ fn swap_in_result(
     if let Err(err) = std::fs::rename(temp, pdf) {
         // 교체는 **원본 파일을 통째로 갈아 끼우는** 일이라, 다른 앱이 그 PDF를 열고 있으면 막힌다
         // (Windows). 그 경우만 원인을 짚어 준다.
-        eprintln!("결과 파일을 원본 자리에 넣지 못함: {err}");
+        crate::crash_log::note("app", format!("결과 파일을 원본 자리에 넣지 못함: {err}"));
         let _ = std::fs::remove_file(temp);
         // 아무 일도 일어나지 않았으므로 방금 만든 백업도 치운다 — 영문 모를 사본만 남으면 안 된다.
         let _ = std::fs::remove_file(&backup);

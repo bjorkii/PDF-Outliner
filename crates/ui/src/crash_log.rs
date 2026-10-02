@@ -51,6 +51,22 @@ pub fn install(process: &'static str) {
     }));
 }
 
+/// 패닉이 아닌 진단 한 줄을 같은 파일에 남긴다.
+///
+/// **stderr만으로는 사용자에게 닿지 않는다.** Windows는 `windows_subsystem = "windows"`라 콘솔이
+/// 아예 없어 stderr가 그대로 버려지고, macOS에서 .app으로 띄우면 시스템 통합 로그로 들어가
+/// Console.app을 열어야 보인다(2026-10-02 질문). 화면 문구에서 덜어 낸 자세한 사정은 여기로 와야
+/// 설정 창의 "로그파일 위치 열기"로 바로 닿는다. 터미널에서 띄운 경우를 위해 stderr에도 그대로 쓴다.
+///
+/// 작업 프로세스와 앱이 같은 파일에 덧붙이지만, 한 줄씩 append로 쓰므로 서로 섞이지 않는다.
+pub fn note(process: &str, message: impl std::fmt::Display) {
+    eprintln!("{process}: {message}");
+    let Some(path) = log_path() else { return };
+    let unix_secs =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
+    let _ = append_entry(&path, &format!("[unix {unix_secs}] {process} {message}\n"), MAX_LOG_BYTES);
+}
+
 /// 파일이 `max_bytes` 이상이면 `<파일명>.1`로 옮긴(이전 백업은 덮어씀) 뒤 `entry`를 덧붙인다.
 pub fn append_entry(path: &Path, entry: &str, max_bytes: u64) -> io::Result<()> {
     if let Some(dir) = path.parent() {

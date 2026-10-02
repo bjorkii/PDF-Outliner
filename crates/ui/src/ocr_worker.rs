@@ -30,6 +30,9 @@ pub const WORKER_FLAG: &str = "--ocr-worker";
 /// hOCR 좌표 환산 해상도(가상 DPI).
 pub const HOCR_DPI: f64 = 300.0;
 
+/// 로그에 찍히는 작업 프로세스 이름(`crash_log::note`). `main.rs`의 패닉 꼬리표와 같게 맞춘다.
+pub(crate) const WORKER_LOG: &str = "ocr-worker";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Job {
     Export(ExportJob),
@@ -257,7 +260,9 @@ impl WorkerHandle {
                         }
                         ctx.request_repaint();
                     }
-                    Err(err) => eprintln!("ocr-worker 응답 해석 실패: {err}: {line}"),
+                    Err(err) => {
+                        crate::crash_log::note("app", format!("작업 프로세스 응답을 읽지 못함: {err}: {line}"))
+                    }
                 }
             }
             ctx.request_repaint(); // 종료 감지
@@ -294,7 +299,7 @@ impl Drop for WorkerHandle {
 pub fn run_worker_process() -> i32 {
     let mut input = String::new();
     if let Err(err) = io::stdin().read_to_string(&mut input) {
-        eprintln!("ocr-worker: 요청 읽기 실패: {err}");
+        crate::crash_log::note(WORKER_LOG, format!("요청 읽기 실패: {err}"));
         return 1;
     }
     let mut output = io::stdout().lock();
@@ -308,7 +313,7 @@ pub fn run_worker_process() -> i32 {
     let job: Job = match serde_json::from_str(&input) {
         Ok(job) => job,
         Err(err) => {
-            eprintln!("작업 요청 해석 실패: {err}");
+            crate::crash_log::note(WORKER_LOG, format!("작업 요청 해석 실패: {err}"));
             emit(Event::Failed("내부 오류로 작업을 시작하지 못했습니다. 앱을 다시 실행해도 증상이 계속되면 앱을 재설치해 주세요.".to_string()));
             return 1;
         }
@@ -424,7 +429,7 @@ fn run_export(engine: PdfEngine, job: &ExportJob, emit: &mut dyn FnMut(Event)) -
 
     let file = std::fs::File::create(&job.temp_output)
         .map_err(|e| {
-            eprintln!("임시 파일을 만들지 못함: {e}");
+            crate::crash_log::note(WORKER_LOG, format!("임시 파일을 만들지 못함: {e}"));
             anyhow::anyhow!("파일 경로가 변경되어 작업을 진행할 수 없습니다: {}", job.temp_output.display())
         })?;
     let writer = BufWriter::with_capacity(1 << 20, file);
@@ -485,12 +490,12 @@ fn run_export(engine: PdfEngine, job: &ExportJob, emit: &mut dyn FnMut(Event)) -
         .map_err(|e| e.into_error())?
         .sync_all()
         .map_err(|e| {
-            eprintln!("임시 파일을 기록하지 못함: {e}");
+            crate::crash_log::note(WORKER_LOG, format!("임시 파일을 기록하지 못함: {e}"));
             anyhow::anyhow!("파일 경로가 변경되어 작업을 진행할 수 없습니다: {}", job.temp_output.display())
         })?;
     std::fs::rename(&job.temp_output, &job.output)
         .map_err(|e| {
-            eprintln!("결과 파일로 옮기지 못함: {e}");
+            crate::crash_log::note(WORKER_LOG, format!("결과 파일로 옮기지 못함: {e}"));
             anyhow::anyhow!("파일 경로가 변경되어 작업을 진행할 수 없습니다: {}", job.output.display())
         })?;
     Ok(report)
@@ -570,13 +575,13 @@ pub(crate) fn open_for_edit(
 ) -> anyhow::Result<(Document, pdf_ocr::preflight::Preflight, bool)> {
     use anyhow::bail;
     let raw = std::fs::read(pdf).map_err(|e| {
-        eprintln!("원본을 읽지 못함: {e}");
+        crate::crash_log::note(WORKER_LOG, format!("원본을 읽지 못함: {e}"));
         anyhow::anyhow!("파일 경로가 변경되어 작업을 진행할 수 없습니다: {}", pdf.display())
     })?;
     // 구조를 못 읽는 것과 쪽 수가 어긋나는 것은 사용자에게 같은 사정이다 — 한 문구로 합쳤다
     // (2026-10-01 md 확정). 어느 쪽이었는지는 stderr로 가른다.
     let doc = Document::load_mem(&raw).map_err(|e| {
-        eprintln!("PDF 구조를 읽지 못함: {e}");
+        crate::crash_log::note(WORKER_LOG, format!("PDF 구조를 읽지 못함: {e}"));
         anyhow::anyhow!("PDF 구조가 손상된 것으로 확인되어 작업을 진행할 수 없습니다.")
     })?;
     let preflight = pdf_ocr::preflight::Preflight::inspect(&doc, &raw);
@@ -591,7 +596,7 @@ pub(crate) fn open_for_edit(
         // 쪽 수가 왜 어긋났는지는 사용자가 어쩔 수 있는 일이 아니라 화면에 적지 않는다
         // (2026-10-01 지정). 진단이 필요할 때를 위해 수치는 stderr로 남긴다 — pdfium이 세는 쪽
         // 수와 PDF 페이지 트리가 주장하는 쪽 수다.
-        eprintln!("쪽 수 불일치: pdfium {pdfium_pages}쪽, 페이지 트리 {}쪽", preflight.page_count);
+        crate::crash_log::note(WORKER_LOG, format!("쪽 수 불일치: pdfium {pdfium_pages}쪽, 페이지 트리 {}쪽", preflight.page_count));
         bail!("PDF 구조가 손상된 것으로 확인되어 작업을 진행할 수 없습니다.");
     }
     let compact = pdf_ocr::save::uses_object_streams(&doc) && !preflight.pdfa.as_deref().is_some_and(|p| p.starts_with('1'));
@@ -669,11 +674,14 @@ fn run_removal(
 
     let mut reverted: BTreeSet<usize> = BTreeSet::new();
     if !failures.is_empty() {
-        // 진단용(stderr) — 어떤 페이지가 왜 되돌려지는지.
-        eprintln!(
-            "ocr-worker: 검증 실패 {}쪽 — {:?}",
-            failures.len(),
-            failures.iter().take(10).map(|(i, why)| (i + 1, why.as_str())).collect::<Vec<_>>()
+        // 진단용 — 어떤 페이지가 왜 되돌려지는지.
+        crate::crash_log::note(
+            WORKER_LOG,
+            format!(
+                "검증 실패 {}쪽 — {:?}",
+                failures.len(),
+                failures.iter().take(10).map(|(i, why)| (i + 1, why.as_str())).collect::<Vec<_>>()
+            ),
         );
         let failed: BTreeSet<usize> = failures.iter().map(|(i, _)| *i).collect();
         pdf_ocr::save::restore(&mut doc, dropped);
@@ -687,32 +695,35 @@ fn run_removal(
         let again: Vec<usize> = reverted.iter().copied().collect();
         let still = verify_pages(engine, pdf, temp_output, &again, &no_layer, true, emit)?;
         if !still.is_empty() {
-            eprintln!(
-                "ocr-worker: 되돌린 뒤에도 다른 페이지 {:?}",
-                still.iter().take(10).map(|(i, why)| (i + 1, why.as_str())).collect::<Vec<_>>()
+            crate::crash_log::note(
+                WORKER_LOG,
+                format!(
+                    "되돌린 뒤에도 다른 페이지 {:?}",
+                    still.iter().take(10).map(|(i, why)| (i + 1, why.as_str())).collect::<Vec<_>>()
+                ),
             );
         }
         if let Some((page, reason)) = still.first() {
-            eprintln!("되돌린 뒤에도 p.{}이 원본과 다름: {reason}", page + 1);
+            crate::crash_log::note(WORKER_LOG, format!("되돌린 뒤에도 p.{}이 원본과 다름: {reason}", page + 1));
             bail!("OCR 전체 삭제에 실패했습니다. 원본은 유지됩니다.");
         }
     }
 
     // 결과 파일 전체 구조 확인: 두 라이브러리로 다시 열리고 페이지 수가 같아야 한다.
     let reopened = Document::load(temp_output).map_err(|e| {
-        eprintln!("결과 파일을 lopdf로 다시 읽지 못함: {e}");
+        crate::crash_log::note(WORKER_LOG, format!("결과 파일을 lopdf로 다시 읽지 못함: {e}"));
         anyhow::anyhow!("처리 과정에서 결함이 발생하여 중단하고 원본을 유지합니다.")
     })?;
     let pdfium_pages = engine
         .open_document(temp_output)
         .map_err(|e| {
-            eprintln!("결과 파일을 pdfium으로 열지 못함: {e}");
+            crate::crash_log::note(WORKER_LOG, format!("결과 파일을 pdfium으로 열지 못함: {e}"));
             anyhow::anyhow!("처리 과정에서 결함이 발생하여 중단하고 원본을 유지합니다.")
         })?
         .pages()
         .len() as usize;
     if reopened.get_pages().len() != report.analysis.pages || pdfium_pages != report.analysis.pages {
-        eprintln!("결과 파일 쪽 수 불일치: lopdf {}쪽, pdfium {pdfium_pages}쪽, 원본 {}쪽", reopened.get_pages().len(), report.analysis.pages);
+        crate::crash_log::note(WORKER_LOG, format!("결과 파일 쪽 수 불일치: lopdf {}쪽, pdfium {pdfium_pages}쪽, 원본 {}쪽", reopened.get_pages().len(), report.analysis.pages));
         bail!("처리 과정에서 결함이 발생하여 중단하고 원본을 유지합니다.");
     }
     report.pages_changed = planned.iter().filter(|i| !reverted.contains(i)).count();
@@ -901,7 +912,7 @@ pub(crate) fn verify_pages(
     use pdf_engine::verify::{compare_with, snapshot};
     let before = engine.open_document(original).map_err(|e| open_error_message(e, Action::Remove))?;
     let after = engine.open_document(result).map_err(|e| {
-        eprintln!("결과 파일을 pdfium으로 열지 못함: {e}");
+        crate::crash_log::note(WORKER_LOG, format!("결과 파일을 pdfium으로 열지 못함: {e}"));
         anyhow::anyhow!("처리 과정에서 결함이 발생하여 중단하고 원본을 유지합니다.")
     })?;
     let mut failures = Vec::new();

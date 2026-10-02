@@ -154,7 +154,7 @@ fn load_hocr(files: &[PathBuf]) -> anyhow::Result<(Vec<HocrPage>, bool, usize, u
         // 읽지 못하는 것과 규격에 안 맞는 것은 사용자에게 같은 사정이다 — 한 문구로 합쳤다
         // (2026-10-01 md 확정). 어느 쪽이었는지는 stderr로 가른다.
         let spec_error = |detail: String| {
-            eprintln!("hOCR을 쓸 수 없음({}): {detail}", file.display());
+            crate::crash_log::note(crate::ocr_worker::WORKER_LOG, format!("hOCR을 쓸 수 없음({}): {detail}", file.display()));
             anyhow::anyhow!("hOCR 파일이 규격을 충족하지 못합니다.")
         };
         let bytes = std::fs::read(file).map_err(|e| spec_error(e.to_string()))?;
@@ -450,7 +450,7 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
         let still = verify_pages(engine, &job.pdf, &job.temp_output, &again, &HashMap::new(), true, emit)?;
         if let Some((page, reason)) = still.first() {
             // 삭제 쪽과 같은 자리의 같은 문구인데(2026-10-01 md 확정) 작업 이름만 다르다.
-            eprintln!("되돌린 뒤에도 p.{}이 원본과 다름: {reason}", page + 1);
+            crate::crash_log::note(crate::ocr_worker::WORKER_LOG, format!("되돌린 뒤에도 p.{}이 원본과 다름: {reason}", page + 1));
             bail!("OCR 가져오기에 실패했습니다. 원본은 유지됩니다.");
         }
     }
@@ -461,11 +461,11 @@ pub fn run(engine: PdfEngine, job: &ImportJob, emit: &mut dyn FnMut(Event)) -> a
     report.size_after = std::fs::metadata(&job.temp_output).map(|m| m.len()).unwrap_or(0);
     // 결과 파일 구조 확인.
     let reopened = Document::load(&job.temp_output).map_err(|e| {
-        eprintln!("결과 파일을 다시 읽지 못함: {e}");
+        crate::crash_log::note(crate::ocr_worker::WORKER_LOG, format!("결과 파일을 다시 읽지 못함: {e}"));
         anyhow::anyhow!("처리 과정에서 결함이 발생하여 중단하고 원본을 유지합니다.")
     })?;
     if reopened.get_pages().len() != page_ids.len() {
-        eprintln!("결과 파일 쪽 수 불일치: {}쪽, 원본 {}쪽", reopened.get_pages().len(), page_ids.len());
+        crate::crash_log::note(crate::ocr_worker::WORKER_LOG, format!("결과 파일 쪽 수 불일치: {}쪽, 원본 {}쪽", reopened.get_pages().len(), page_ids.len()));
         bail!("처리 과정에서 결함이 발생하여 중단하고 원본을 유지합니다.");
     }
     Ok(report)
