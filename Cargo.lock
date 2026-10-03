@@ -4282,6 +4282,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "ttf-parser",
  "unicode-normalization",
  "uuid",
  "winit",
