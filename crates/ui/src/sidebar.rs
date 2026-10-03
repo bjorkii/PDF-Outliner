@@ -191,8 +191,8 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             // 쪽의 드래그 상태를 읽지도 쓰지도 않아야 그 상태가 어긋나지 않는다.
             ui.add_space(6.0);
             tab_bar(ui, &mut app.sidebar_tab);
-            ui.add_space(8.0);
             if app.sidebar_tab == crate::app::SidebarTab::Thumbnails {
+                ui.add_space(8.0);
                 crate::thumbnails::show(ui, app);
                 return;
             }
@@ -219,12 +219,17 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             // 세로 중앙: 고정 높이 rect를 잡고 그 안에 Align::Center 가로 레이아웃 child를
             // 만든다 — 예전처럼 ui.horizontal을 그냥 쓰면 행 높이가 버튼 높이에 딱 맞아
             // 헤더 영역 위쪽에 붙어 보인다는 피드백.
+            // **머리 줄 둘레의 간격을 없앤다.**
+            //
+            // 눈에 보이는 여백은 머리 줄 *안쪽*이 아니라 바깥에서 온다. 앞서 머리 줄 높이만
+            // 줄였더니 안쪽은 31%가 됐는데 화면에서는 그대로였다 — 실측으로 위 15.2pt(잉크
+            // 높이의 112%), 아래 10.2pt(75%)였고, 전역 줄 간격 6pt와 탭 아래 띄움 8pt,
+            // 그리고 머리 줄이 36pt이던 시절의 균형 보정 3pt가 그 정체였다(2026-10-03).
+            //
+            // 머리 줄 안에 이미 아이콘 위아래로 여백이 있으므로, 둘레는 0으로 두고 그 안쪽
+            // 여백만 보이게 한다. 구분선을 지난 뒤 원래 간격으로 되돌린다.
+            let outer_spacing = std::mem::replace(&mut ui.spacing_mut().item_spacing.y, 0.0);
             let header_height = HEADER_HEIGHT;
-            // 아래쪽엔 item_spacing + 구분선 자체 패딩(합계 ~6pt)이 붙는데 위쪽 패널
-            // 마진은 ~1pt뿐이라, 36pt 밴드 정중앙에 놓아도 버튼이 위 테두리 쪽으로
-            // 치우쳐 보인다(스크린샷 픽셀 실측: 위 24px vs 아래 31px @2x) — 그 차이만큼
-            // 밴드를 내려 균형을 맞춘다(3pt 적용 후 재실측 29px vs 30px).
-            ui.add_space(3.0);
             let (header_rect, _) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width(), header_height),
                 Sense::hover(),
@@ -278,6 +283,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 ctx.data_mut(|d| d.insert_temp(buttons_width_id, measured));
             }
             ui.separator();
+            ui.spacing_mut().item_spacing.y = outer_spacing;
 
             let mut outcome = RenderOutcome::default();
             let current_selected = app.selected_bookmark;
@@ -1002,41 +1008,56 @@ mod viewer_press_tests {
 mod header_padding_tests {
     use super::HEADER_HEIGHT;
 
-    /// 아이콘 잉크 위아래로 남는 자리가 **잉크 높이의 30% 안팎**이어야 한다.
+    /// 아이콘 위아래로 **눈에 보이는** 빈 자리가 잉크 높이의 30% 안팎이어야 한다.
     ///
-    /// 처음에는 36pt였고 아이콘으로 바꾼 뒤 26pt로 줄였는데, 그래도 46%가 남아 휑했다
-    /// (실측 → 사용자 리포트: "위아래 여백이 70%쯤 되어 보인다"). 버튼 자체가 19pt(글자 줄
-    /// 17pt + 위아래 1pt씩)라 그보다 낮출 수는 없다.
+    /// **머리 줄 안쪽만 재면 안 된다.** 처음에 그렇게 쟀다가 안쪽은 31%인데 화면은 그대로인
+    /// 일이 있었다 — 여백의 대부분이 머리 줄 *바깥*(탭 아래 띄움, 전역 줄 간격, 옛 균형 보정)에서
+    /// 왔기 때문이다. 그래서 **탭 아랫변에서 구분선까지** 실제 쌓이는 모양 그대로 잰다.
     #[test]
-    fn the_icon_row_is_not_too_tall() {
+    fn the_space_around_the_icon_row_is_not_too_tall() {
         let ctx = egui::Context::default();
         crate::fonts::install_fonts(&ctx);
+        crate::fonts::install_style(&ctx);
         let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(300.0, 400.0))),
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 600.0))),
             ..Default::default()
         };
-        let (mut header, mut button) = (egui::Rect::NOTHING, egui::Rect::NOTHING);
+        let (mut above, mut below) = (0.0_f32, 0.0_f32);
         let _ = ctx.run(input, |ctx| {
             egui::SidePanel::left("s").show(ctx, |ui| {
-                let (rect, _) =
+                // sidebar::show가 쌓는 순서 그대로.
+                ui.add_space(6.0);
+                let mut tab = crate::app::SidebarTab::Bookmarks;
+                super::tab_bar(ui, &mut tab);
+                let tab_bottom = ui.cursor().min.y;
+
+                let outer = std::mem::replace(&mut ui.spacing_mut().item_spacing.y, 0.0);
+                let (header, _) =
                     ui.allocate_exact_size(egui::vec2(ui.available_width(), HEADER_HEIGHT), egui::Sense::hover());
-                header = rect;
                 let mut child = ui.new_child(
-                    egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    egui::UiBuilder::new().max_rect(header).layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
-                button = crate::icons::button(&mut child, crate::icons::ADD, "").rect;
+                let button = crate::icons::button(&mut child, crate::icons::ADD, "").rect;
+                let before_separator = ui.cursor().min.y;
+                ui.separator();
+                ui.spacing_mut().item_spacing.y = outer;
+
+                // 글리프 잉크는 글자 줄 높이의 0.797배다(폰트 metrics: (856-40)/1024).
+                let ink = crate::icons::SIZE * 816.0 / 1024.0;
+                let ink_top = button.center().y - ink / 2.0;
+                above = ink_top - tab_bottom;
+                below = before_separator - (ink_top + ink);
             });
         });
-        assert!(button.height() <= header.height(), "버튼이 머리 줄보다 높다");
-
-        // 글리프 잉크는 글자 줄 높이의 0.797배다(폰트 metrics: (856-40)/1024).
         let ink = crate::icons::SIZE * 816.0 / 1024.0;
-        let padding = (header.height() - ink) / 2.0;
-        let ratio = padding / ink;
-        assert!(
-            (0.25..=0.36).contains(&ratio),
-            "머리 줄 여백이 잉크 높이의 {:.0}%다 — 30% 안팎이어야 한다",
-            ratio * 100.0
-        );
+        for (name, gap) in [("위", above), ("아래", below)] {
+            let ratio = gap / ink;
+            assert!(
+                (0.20..=0.40).contains(&ratio),
+                "{name} 여백이 {gap:.1}pt — 잉크 높이의 {:.0}%다. 30% 안팎이어야 한다",
+                ratio * 100.0
+            );
+        }
+        assert!((above - below).abs() < 1.0, "위({above:.1})와 아래({below:.1})가 어긋난다");
     }
 }
