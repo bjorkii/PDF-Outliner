@@ -34,6 +34,13 @@ pub struct DragState {
     pub scroll_animation_until: Option<std::time::Instant>,
 }
 
+/// 북마크 탭 머리 줄(추가·삭제·Undo·Redo)의 높이(pt).
+///
+/// 아이콘 버튼은 19pt(글자 줄 17pt + 위아래 1pt씩)이므로 그보다 낮출 수 없다. 이 값이면 아이콘
+/// 잉크 위아래로 **잉크 높이의 30%쯤**이 남는다(`header_padding_tests`). 처음 36pt였고 아이콘으로
+/// 바꾼 뒤 26pt로 줄였지만 그래도 46%가 남아 휑했다(2026-10-03 리포트).
+const HEADER_HEIGHT: f32 = 22.0;
+
 /// 재귀 전체에 걸쳐 누적되는 결과. 재귀 호출마다 지역 변수를 새로 선언하면 하위 노드의
 /// 클릭이 상위 호출로 전파되지 않고 버려지는 버그가 생기므로, 하나의 구조체를 `&mut`로
 /// 재귀 전체에 그대로 넘긴다.
@@ -212,9 +219,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             // 세로 중앙: 고정 높이 rect를 잡고 그 안에 Align::Center 가로 레이아웃 child를
             // 만든다 — 예전처럼 ui.horizontal을 그냥 쓰면 행 높이가 버튼 높이에 딱 맞아
             // 헤더 영역 위쪽에 붙어 보인다는 피드백.
-            // 아이콘으로 바꾸면서 버튼이 작아졌는데 머리 줄만 36pt로 남아 휑했다(2026-10-03
-            // 리포트). 아이콘 한 변(17pt) 위아래로 조금씩만 남긴다.
-            let header_height = 26.0;
+            let header_height = HEADER_HEIGHT;
             // 아래쪽엔 item_spacing + 구분선 자체 패딩(합계 ~6pt)이 붙는데 위쪽 패널
             // 마진은 ~1pt뿐이라, 36pt 밴드 정중앙에 놓아도 버튼이 위 테두리 쪽으로
             // 치우쳐 보인다(스크린샷 픽셀 실측: 위 24px vs 아래 31px @2x) — 그 차이만큼
@@ -989,5 +994,49 @@ mod viewer_press_tests {
     fn an_unknown_viewer_rect_is_not_a_press() {
         let inside = viewer().center();
         assert!(!judge(vec![egui::Event::PointerMoved(inside), press(inside, true)], None));
+    }
+}
+
+/// 북마크 탭 머리 줄의 여백(2026-10-03 리포트).
+#[cfg(test)]
+mod header_padding_tests {
+    use super::HEADER_HEIGHT;
+
+    /// 아이콘 잉크 위아래로 남는 자리가 **잉크 높이의 30% 안팎**이어야 한다.
+    ///
+    /// 처음에는 36pt였고 아이콘으로 바꾼 뒤 26pt로 줄였는데, 그래도 46%가 남아 휑했다
+    /// (실측 → 사용자 리포트: "위아래 여백이 70%쯤 되어 보인다"). 버튼 자체가 19pt(글자 줄
+    /// 17pt + 위아래 1pt씩)라 그보다 낮출 수는 없다.
+    #[test]
+    fn the_icon_row_is_not_too_tall() {
+        let ctx = egui::Context::default();
+        crate::fonts::install_fonts(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(300.0, 400.0))),
+            ..Default::default()
+        };
+        let (mut header, mut button) = (egui::Rect::NOTHING, egui::Rect::NOTHING);
+        let _ = ctx.run(input, |ctx| {
+            egui::SidePanel::left("s").show(ctx, |ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(ui.available_width(), HEADER_HEIGHT), egui::Sense::hover());
+                header = rect;
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                button = crate::icons::button(&mut child, crate::icons::ADD, "").rect;
+            });
+        });
+        assert!(button.height() <= header.height(), "버튼이 머리 줄보다 높다");
+
+        // 글리프 잉크는 글자 줄 높이의 0.797배다(폰트 metrics: (856-40)/1024).
+        let ink = crate::icons::SIZE * 816.0 / 1024.0;
+        let padding = (header.height() - ink) / 2.0;
+        let ratio = padding / ink;
+        assert!(
+            (0.25..=0.36).contains(&ratio),
+            "머리 줄 여백이 잉크 높이의 {:.0}%다 — 30% 안팎이어야 한다",
+            ratio * 100.0
+        );
     }
 }
