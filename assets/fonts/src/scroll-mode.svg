@@ -1,0 +1,15 @@
+<!-- PDF Outliner 전용 아이콘: 연속 스크롤 모드.
+     Phosphor file(U+E230)과 같은 규격 — 테두리 상자 x 48~208 / y 32~224, 모서리 r8,
+     접힌 모서리 56×56, 둥근 끝·꺾임. 획 두께는 Phosphor Light에 맞춘 12.
+     위아래 변을 긋지 않아 지면이 바깥으로 이어지는 것을 나타낸다. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <rect width="256" height="256" fill="none"/>
+  <!-- file(페이지모드)과 같은 테두리 상자 안에 둔다: x 48~208, y 32~224, 획 8, 모서리 8, 접힘 56×56.
+       위아래 변을 긋지 않아 "지면이 이어진다"를 나타낸다. -->
+  <path d="M48,32V104a8,8,0,0,0,8,8H200a8,8,0,0,0,8-8V32"
+        fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-width="12"/>
+  <path d="M48,224V152a8,8,0,0,1,8-8h96l56,56v24"
+        fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-width="12"/>
+  <polyline points="152 144 152 200 208 200"
+        fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-width="12"/>
+</svg>

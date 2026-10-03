@@ -61,8 +61,15 @@ fn tab_bar(ui: &mut egui::Ui, current: &mut crate::app::SidebarTab) {
     const LEFT: f32 = 8.0;
     /// 위 두 모서리만 둥글린다 — 아래는 본문과 이어져야 한다.
     const RADIUS: f32 = 7.0;
+    /// 탭 아이콘 크기. 옆 글자보다 조금 커야 눈에 같은 무게로 보인다.
+    const ICON_SIZE: f32 = 15.0;
+    /// 아이콘과 글자 사이.
+    const ICON_GAP: f32 = 5.0;
 
-    let tabs = [(SidebarTab::Bookmarks, "북마크"), (SidebarTab::Thumbnails, "썸네일")];
+    let tabs = [
+        (SidebarTab::Bookmarks, crate::icons::TAB_BOOKMARKS, "북마크"),
+        (SidebarTab::Thumbnails, crate::icons::TAB_THUMBNAILS, "썸네일"),
+    ];
     let (strip, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEIGHT), Sense::hover());
     if !ui.is_rect_visible(strip) {
         return;
@@ -76,22 +83,27 @@ fn tab_bar(ui: &mut egui::Ui, current: &mut crate::app::SidebarTab) {
     // 칸을 먼저 다 잡아 둔다. 그려야 할 순서와 자리를 정하는 순서가 다르기 때문이다.
     let mut placed = Vec::with_capacity(tabs.len());
     let mut x = strip.left() + LEFT;
-    for (tab, label) in tabs {
+    for (tab, icon, label) in tabs {
+        // 아이콘과 글자를 한 줄로 재어 둔다 — 탭 폭을 그 합으로 잡는다.
+        let icon_font = egui::FontId::new(ICON_SIZE, egui::FontFamily::Name(crate::fonts::ICON_FAMILY.into()));
+        let icon_galley = ui.painter().layout_no_wrap(icon.to_string(), icon_font, egui::Color32::PLACEHOLDER);
         let galley = ui.painter().layout_no_wrap(label.to_string(), font.clone(), egui::Color32::PLACEHOLDER);
-        let rect = egui::Rect::from_min_size(egui::pos2(x, strip.top()), egui::vec2(galley.size().x + PAD_X * 2.0, HEIGHT));
+        let inner = icon_galley.size().x + ICON_GAP + galley.size().x;
+        let rect = egui::Rect::from_min_size(egui::pos2(x, strip.top()), egui::vec2(inner + PAD_X * 2.0, HEIGHT));
         x = rect.right() + GAP;
         let response = ui.interact(rect, ui.id().with(("sidebar_tab", label)), Sense::click());
         if response.clicked() {
             *current = tab;
         }
-        placed.push((tab, galley, rect, response));
+        placed.push((tab, icon_galley, galley, rect, response));
     }
 
     let painter = ui.painter().clone();
     let draw = |tab: &SidebarTab,
-                    galley: &std::sync::Arc<egui::Galley>,
-                    rect: egui::Rect,
-                    hovered: bool| {
+                icon_galley: &std::sync::Arc<egui::Galley>,
+                galley: &std::sync::Arc<egui::Galley>,
+                rect: egui::Rect,
+                hovered: bool| {
         let active = *current == *tab;
         let fill = if active {
             visuals.panel_fill
@@ -117,22 +129,33 @@ fn tab_bar(ui: &mut egui::Ui, current: &mut crate::app::SidebarTab) {
         } else {
             visuals.weak_text_color()
         };
-        let pos = egui::pos2(rect.center().x - galley.size().x / 2.0, rect.center().y - galley.size().y / 2.0);
-        painter.galley(pos, galley.clone(), color);
+        // 아이콘 + 글자를 한 덩어리로 보고 칸 가운데에 놓는다.
+        let inner = icon_galley.size().x + ICON_GAP + galley.size().x;
+        let left = rect.center().x - inner / 2.0;
+        painter.galley(
+            egui::pos2(left, rect.center().y - icon_galley.size().y / 2.0),
+            icon_galley.clone(),
+            color,
+        );
+        painter.galley(
+            egui::pos2(left + icon_galley.size().x + ICON_GAP, rect.center().y - galley.size().y / 2.0),
+            galley.clone(),
+            color,
+        );
     };
 
-    for (tab, galley, rect, response) in &placed {
+    for (tab, icon_galley, galley, rect, response) in &placed {
         if *current != *tab {
-            draw(tab, galley, *rect, response.hovered());
+            draw(tab, icon_galley, galley, *rect, response.hovered());
         }
     }
     painter.line_segment(
         [egui::pos2(strip.left(), strip.bottom()), egui::pos2(strip.right(), strip.bottom())],
         egui::Stroke::new(1.0_f32, border),
     );
-    for (tab, galley, rect, response) in &placed {
+    for (tab, icon_galley, galley, rect, response) in &placed {
         if *current == *tab {
-            draw(tab, galley, *rect, response.hovered());
+            draw(tab, icon_galley, galley, *rect, response.hovered());
         }
     }
 }
@@ -214,7 +237,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 let buttons_start_x = ui.cursor().min.x;
 
                 if ui
-                    .button("+")
+                    .add(egui::Button::new(crate::icons::text(crate::icons::ADD)))
                     .on_hover_text("추가 (Cmd+B). 선택된 항목의 하위에, 선택이 없으면 최상위에 넣습니다.")
                     .clicked()
                 {
@@ -223,7 +246,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
 
                 let delete_enabled = app.selected_bookmark.is_some();
                 if ui
-                    .add_enabled(delete_enabled, egui::Button::new("-"))
+                    .add_enabled(delete_enabled, egui::Button::new(crate::icons::text(crate::icons::REMOVE)))
                     .on_hover_text("삭제 (Delete)")
                     .clicked()
                 {
@@ -232,7 +255,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
 
                 let undo_enabled = !app.bookmark_undo_stack.is_empty();
                 if ui
-                    .add_enabled(undo_enabled, egui::Button::new("Undo"))
+                    .add_enabled(undo_enabled, egui::Button::new(crate::icons::text(crate::icons::UNDO)))
                     .on_hover_text("실행취소 (Cmd+Z)")
                     .clicked()
                 {
@@ -241,7 +264,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
 
                 let redo_enabled = !app.bookmark_redo_stack.is_empty();
                 if ui
-                    .add_enabled(redo_enabled, egui::Button::new("Redo"))
+                    .add_enabled(redo_enabled, egui::Button::new(crate::icons::text(crate::icons::REDO)))
                     .on_hover_text("다시 실행 (Cmd+Shift+Z)")
                     .clicked()
                 {

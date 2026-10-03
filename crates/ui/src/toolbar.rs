@@ -24,9 +24,6 @@ const RECENT_FILE_WIDTH: f32 = 320.0;
 /// 한 줄 안에서 서로 어긋나 보였다(2026-10-02 리포트: "아이콘은 위아래로 더 길어").
 const ITEM_HEIGHT: f32 = 22.0;
 
-/// 아이콘 버튼 한 변 크기 — 정사각형이라 높이와 같다.
-const ICON_BUTTON_SIZE: f32 = ITEM_HEIGHT;
-
 /// 툴바 한 줄. **줄 높이를 먼저 못박는다.**
 ///
 /// egui의 가로 레이아웃은 그 줄의 높이를 미리 모른다. 각 항목을 "지금까지의 줄 높이" 안에서 가운데
@@ -44,94 +41,33 @@ fn toolbar_row<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R 
     ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(egui::Align::Center), add).inner
 }
 
-/// 커스텀 벡터 아이콘을 그리는 버튼. `egui::Button`은 텍스트(WidgetText)만 받고 임의
-/// 도형을 못 그리므로, 사이드바 폴드 아이콘(sidebar.rs)과 같은 방식으로 직접 rect를
-/// 할당하고 그 위에 수동으로 그린다 — `ui.style().interact(&response)`로 실제 버튼과
-/// 동일한 hover/눌림 배경·테두리를 얻어 다른 버튼들과 시각적으로 어울리게 한다.
-fn icon_button(
-    ui: &mut egui::Ui,
-    draw: impl FnOnce(&egui::Painter, egui::Rect, egui::Color32),
-) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE), egui::Sense::click());
-    if ui.is_rect_visible(rect) {
-        let visuals = ui.style().interact(&response);
-        ui.painter()
-            .rect(rect, visuals.rounding, visuals.weak_bg_fill, visuals.bg_stroke);
-        draw(ui.painter(), rect.shrink(4.0), visuals.fg_stroke.color);
-    }
-    response
+/// 아이콘 하나짜리 버튼. 글자 버튼과 같은 여백·높이를 쓴다(`toolbar_row`).
+fn icon_button(ui: &mut egui::Ui, icon: char, tip: &str) -> egui::Response {
+    ui.add(egui::Button::new(crate::icons::text(icon))).on_hover_text(tip)
 }
 
-/// "폭 맞춤"(페이지 너비를 뷰어 폭에 맞춤) — 문서 사각형 좌우로
-/// 바깥을 향한 화살표를 그려 "폭에 맞춘다"는 뜻을 표현한다. flat/simple 스타일
-/// (2026-07-18 요청).
-fn draw_fit_width_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
-    let stroke = egui::Stroke::new(1.3_f32, color);
-    let page = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width() * 0.42, rect.height()));
-    painter.rect_stroke(page, 1.0, stroke);
-
-    let mid_y = rect.center().y;
-    let arrow_len = rect.width() * 0.26;
-    let head = 2.6;
-    for sign in [-1.0_f32, 1.0] {
-        let start_x = if sign < 0.0 { page.left() } else { page.right() };
-        let tip = egui::pos2(start_x + sign * arrow_len, mid_y);
-        painter.line_segment([egui::pos2(start_x, mid_y), tip], stroke);
-        painter.line_segment([tip, tip + egui::vec2(-sign * head, -head)], stroke);
-        painter.line_segment([tip, tip + egui::vec2(-sign * head, head)], stroke);
-    }
+/// 잠글 수 있는 아이콘 버튼.
+fn icon_button_enabled(ui: &mut egui::Ui, enabled: bool, icon: char, tip: &str) -> egui::Response {
+    ui.add_enabled(enabled, egui::Button::new(crate::icons::text(icon))).on_hover_text(tip)
 }
 
-/// "쪽 맞춤"(페이지 전체가 뷰어 안에 들어오게 맞춤) — 카메라 뷰파인더처럼 네 모서리에
-/// 꺾쇠를 그리고 그 안에 작은 페이지 사각형을 둬 "전체가 프레임 안에 들어온다"는 뜻을
-/// 표현한다. flat/simple 스타일(2026-07-18 요청).
-fn draw_fit_page_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
-    let stroke = egui::Stroke::new(1.3_f32, color);
-    let arm = rect.width().min(rect.height()) * 0.34;
-    let corners: [(egui::Pos2, egui::Vec2, egui::Vec2); 4] = [
-        (rect.left_top(), egui::vec2(arm, 0.0), egui::vec2(0.0, arm)),
-        (rect.right_top(), egui::vec2(-arm, 0.0), egui::vec2(0.0, arm)),
-        (rect.left_bottom(), egui::vec2(arm, 0.0), egui::vec2(0.0, -arm)),
-        (rect.right_bottom(), egui::vec2(-arm, 0.0), egui::vec2(0.0, -arm)),
-    ];
-    for (corner, dx, dy) in corners {
-        painter.line_segment([corner, corner + dx], stroke);
-        painter.line_segment([corner, corner + dy], stroke);
-    }
-    let page = rect.shrink2(egui::vec2(rect.width() * 0.24, rect.height() * 0.14));
-    painter.rect_stroke(page, 1.0, egui::Stroke::new(1.1_f32, color));
-}
-
-/// "쪽 단위 보기"(현재 모드 표시용) — 페이지 한 장. flat/simple 스타일.
-fn draw_single_page_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
-    let stroke = egui::Stroke::new(1.3_f32, color);
-    let page = egui::Rect::from_center_size(
-        rect.center(),
-        egui::vec2(rect.width() * 0.62, rect.height() * 0.92),
-    );
-    painter.rect_stroke(page, 1.0, stroke);
-}
-
-/// "연속 스크롤 보기"(현재 모드 표시용) — 세로로 이어지는 페이지 두 장(위/아래는 화면
-/// 밖으로 이어지는 느낌으로 개방). flat/simple 스타일 — 사용자 확인 완료(2026-07-18).
-fn draw_continuous_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
-    let stroke = egui::Stroke::new(1.3_f32, color);
-    let page_w = rect.width() * 0.62;
-    let left = rect.center().x - page_w / 2.0;
-    let right = rect.center().x + page_w / 2.0;
-    let gap = rect.height() * 0.12;
-    let mid = rect.center().y;
-    // 위 페이지: 상단 열림(위로 계속 이어짐을 암시) — 좌/우 변 + 아래 변만.
-    let top_bottom = mid - gap / 2.0;
-    painter.line_segment([egui::pos2(left, rect.top()), egui::pos2(left, top_bottom)], stroke);
-    painter.line_segment([egui::pos2(right, rect.top()), egui::pos2(right, top_bottom)], stroke);
-    painter.line_segment([egui::pos2(left, top_bottom), egui::pos2(right, top_bottom)], stroke);
-    // 아래 페이지: 하단 열림 — 좌/우 변 + 위 변만.
-    let bottom_top = mid + gap / 2.0;
-    painter.line_segment([egui::pos2(left, bottom_top), egui::pos2(left, rect.bottom())], stroke);
-    painter.line_segment([egui::pos2(right, bottom_top), egui::pos2(right, rect.bottom())], stroke);
-    painter.line_segment([egui::pos2(left, bottom_top), egui::pos2(right, bottom_top)], stroke);
+/// 메뉴 머리(파일·북마크·OCR) — **평소에는 바탕을 칠하지 않고 마우스를 올렸을 때만 테두리**를
+/// 두른다(2026-10-03 요청). egui의 기본 버튼은 가만히 있어도 옅은 음영을 깔아서, 글자 메뉴가 셋
+/// 나란히 있으면 툴바가 지저분해 보였다.
+fn menu_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
+    ui.scope(|ui| {
+        let line = ui.visuals().widgets.inactive.fg_stroke.color.gamma_multiply(0.45);
+        let widgets = &mut ui.visuals_mut().widgets;
+        for state in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active] {
+            state.weak_bg_fill = egui::Color32::TRANSPARENT;
+            state.bg_fill = egui::Color32::TRANSPARENT;
+            state.bg_stroke = egui::Stroke::NONE;
+        }
+        widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, line);
+        widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, line);
+        ui.add_enabled(enabled, egui::Button::new(label))
+    })
+    .inner
 }
 
 /// 한 번에 하나만 열리게 하는 열쇠 — 열려 있는 메뉴의 `id`를 담는다. 메뉴마다 따로
@@ -159,7 +95,7 @@ fn hover_menu<R>(
 ) -> Option<R> {
     let active: Option<String> = ui.ctx().data(|d| d.get_temp(active_menu_id())).unwrap_or_default();
     let mut open = active.as_deref() == Some(id);
-    let button = ui.add_enabled(enabled, egui::Button::new(label));
+    let button = menu_button(ui, label, enabled);
     if enabled && (button.hovered() || button.clicked()) {
         open = true;
     }
@@ -449,7 +385,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     overflow_menu(ui, app, plan);
                     ui.separator();
                 }
-                if ui.button("설정").on_hover_text("색과 로그 파일 위치를 정합니다.").clicked() {
+                if icon_button(ui, crate::icons::SETTINGS, "설정: 색과 단축키").clicked() {
                     app.settings_open = true;
                 }
                 ui.separator();
@@ -532,24 +468,30 @@ fn label_width(ui: &egui::Ui, text: &str) -> f32 {
     text_width(ui, text, egui::TextStyle::Body)
 }
 
+/// 아이콘 버튼 하나의 폭.
+///
+/// 아이콘 글리프는 **폭이 em과 같아서**(`icons` 시험이 못박는다) 글자 크기가 곧 폭이다. 폰트를
+/// 뒤져 재지 않아도 된다.
+fn icon_button_width(ui: &egui::Ui) -> f32 {
+    crate::icons::SIZE + 2.0 * ui.spacing().button_padding.x
+}
+
 fn zoom_width(ui: &egui::Ui) -> f32 {
-    button_width(ui, "➖") + button_width(ui, "➕")
-        + label_width(ui, "1000%")
-        + ICON_BUTTON_SIZE * 2.0
-        + ui.spacing().item_spacing.x * 5.0
+    icon_button_width(ui) * 4.0 + label_width(ui, "1000%") + ui.spacing().item_spacing.x * 5.0
 }
 
 fn page_width(ui: &egui::Ui, app: &PdfViewerApp) -> f32 {
-    button_width(ui, "◀")
-        + button_width(ui, "▶")
+    // ◀ ▶ 와 앞뒤로 오가기 둘 — 아이콘 버튼 넷.
+    icon_button_width(ui) * 4.0
         + page_field_width(ui, app.total_pages)
         + ui.spacing().button_padding.x * 2.0
         + label_width(ui, &format!("/ {}", app.total_pages))
-        + ui.spacing().item_spacing.x * 4.0
+        + ui.spacing().item_spacing.x * 6.0
+        + 6.0
 }
 
 fn search_width(ui: &egui::Ui) -> f32 {
-    button_width(ui, "▶") + button_width(ui, "◀") + button_width(ui, "🔍")
+    icon_button_width(ui) * 3.0
         + label_width(ui, "999 / 999")
         + SEARCH_FIELD_WIDTH
         + ui.spacing().item_spacing.x * 5.0
@@ -567,12 +509,12 @@ fn page_field_width(ui: &egui::Ui, total_pages: u32) -> f32 {
 /// 확대/축소와 보기 모드. 트랙패드 핀치·마우스 휠 줌과 별개로, 비전문 사용자를 위한
 /// 명시적 버튼 병행 배치. 버튼은 고정 단계표로 움직인다(ViewportState::ZOOM_STEPS 참고).
 fn zoom_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
-    if ui.button("➖").on_hover_text("축소").clicked() {
+    if icon_button(ui, crate::icons::ZOOM_OUT, "축소").clicked() {
         app.viewport.zoom_out();
     }
     ui.label(format!("{:.0}%", app.viewport.zoom * 100.0))
         .on_hover_text("100% = 페이지 실제 크기 (PDF 1pt = 화면 1pt)");
-    if ui.button("➕").on_hover_text("확대").clicked() {
+    if icon_button(ui, crate::icons::ZOOM_IN, "확대").clicked() {
         app.viewport.zoom_in();
     }
     // 쪽 맞춤/폭 맞춤 통합 토글(2026-07-18 요청) — 아이콘은 "누르면 무엇이 되는지"를
@@ -580,16 +522,10 @@ fn zoom_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     // 전에는 "줌이 100%인가"로 갈랐는데, 배율이 실제 크기 기준이 되면서 100%와 폭 맞춤이
     // 더는 같은 뜻이 아니다. 수동 줌 상태에서는 쪽 맞춤으로 돌아가는 길을 권한다.
     if app.viewport.fit == FitMode::Page {
-        if icon_button(ui, draw_fit_width_icon)
-            .on_hover_text("폭 맞춤: 페이지 폭을 뷰어 폭에")
-            .clicked()
-        {
+        if icon_button(ui, crate::icons::FIT_WIDTH, "폭 맞춤: 페이지 폭을 뷰어 폭에").clicked() {
             app.viewport.fit = FitMode::Width;
         }
-    } else if icon_button(ui, draw_fit_page_icon)
-        .on_hover_text("쪽 맞춤: 페이지 전체가 보이게")
-        .clicked()
-    {
+    } else if icon_button(ui, crate::icons::FIT_PAGE, "쪽 맞춤: 페이지 전체가 보이게").clicked() {
         app.viewport.fit = FitMode::Page;
     }
 
@@ -597,9 +533,9 @@ fn zoom_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     // 위와 달리 "현재 모드"를 아이콘으로 보여준다(사용자 명세: 연속 모드에서는
     // 연속 스크롤 아이콘, 다시 누르거나 C를 누르면 쪽 단위 아이콘으로 변경).
     let mode_response = if app.continuous_scroll {
-        icon_button(ui, draw_continuous_icon).on_hover_text("연속 스크롤 보기 중. 누르면 쪽 단위 (C)")
+        icon_button(ui, crate::icons::SCROLL_MODE, "연속 스크롤 보기 중. 누르면 쪽 단위 (C)")
     } else {
-        icon_button(ui, draw_single_page_icon).on_hover_text("쪽 단위 보기 중. 누르면 연속 스크롤 (C)")
+        icon_button(ui, crate::icons::PAGE_MODE, "쪽 단위 보기 중. 누르면 연속 스크롤 (C)")
     };
     if mode_response.clicked() {
         app.toggle_continuous_scroll();
@@ -608,7 +544,7 @@ fn zoom_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
 
 /// 페이지 이동(◀ 현재쪽 / 전체쪽 ▶).
 fn page_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
-    if ui.button("◀").on_hover_text("이전 페이지").clicked() {
+    if icon_button(ui, crate::icons::PREV_PAGE, "이전 페이지").clicked() {
         let prev = app.current_page.saturating_sub(1).max(1);
         app.go_to_page(prev);
     }
@@ -629,9 +565,22 @@ fn page_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     }
     ui.label(format!("/ {}", app.total_pages));
 
-    if ui.button("▶").on_hover_text("다음 페이지").clicked() {
+    if icon_button(ui, crate::icons::NEXT_PAGE, "다음 페이지").clicked() {
         let next = (app.current_page + 1).min(app.total_pages.max(1));
         app.go_to_page(next);
+    }
+
+    // 앞뒤로 오간 자리(Cmd+[ / Cmd+]) — 페이지 번호 칸 **오른쪽**에 둔다(2026-10-03 요청).
+    // 쪽을 하나씩 넘기는 ◀▶와는 성격이 다른 일이라 사이를 조금 띄운다.
+    ui.add_space(6.0);
+    let modifier = modifier_label();
+    if icon_button_enabled(ui, app.can_navigate_back(), crate::icons::HISTORY_BACK,
+                           &format!("이전에 보던 자리로 ({modifier}+[)")).clicked() {
+        app.navigate_back();
+    }
+    if icon_button_enabled(ui, app.can_navigate_forward(), crate::icons::HISTORY_FORWARD,
+                           &format!("다시 앞으로 ({modifier}+])")).clicked() {
+        app.navigate_forward();
     }
 }
 
@@ -643,7 +592,7 @@ fn search_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     let searching = app.search_running.is_some();
 
     let next_response = ui
-        .add_enabled(has_results, egui::Button::new("▶"))
+        .add_enabled(has_results, egui::Button::new(crate::icons::text(crate::icons::NEXT_HIT)))
         .on_hover_text("다음 결과 (Enter)");
     if next_response.clicked() {
         app.search_next();
@@ -661,7 +610,7 @@ fn search_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
         ui.label(format!("{} / {}", app.search_current_index + 1, app.search_matches.len()));
     }
     if ui
-        .add_enabled(has_results, egui::Button::new("◀"))
+        .add_enabled(has_results, egui::Button::new(crate::icons::text(crate::icons::PREV_HIT)))
         .on_hover_text("이전 결과")
         .clicked()
     {
@@ -671,7 +620,7 @@ fn search_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
         ui.spinner();
     }
     if ui
-        .add_enabled(!searching, egui::Button::new("🔍"))
+        .add_enabled(!searching, egui::Button::new(crate::icons::text(crate::icons::SEARCH)))
         .on_hover_text("검색 실행 (Enter)")
         .clicked()
     {
@@ -846,11 +795,13 @@ pub fn handle_scroll_zoom(ctx: &egui::Context, viewport: &mut ViewportState) {
 /// 툴바 한 줄 안의 세로 정렬(2026-10-02 리포트).
 #[cfg(test)]
 mod row_alignment_tests {
-    use super::{icon_button, toolbar_row, ICON_BUTTON_SIZE, ITEM_HEIGHT};
+    use super::{icon_button, toolbar_row, ITEM_HEIGHT};
 
     /// 한 줄에 글자 버튼과 아이콘 버튼을 섞어 놓고 각 항목의 자리를 잰다.
     fn measure(fixed: bool) -> Vec<egui::Rect> {
         let ctx = egui::Context::default();
+        // 아이콘 버튼이 아이콘 폰트 가족을 쓴다 — 등록하지 않으면 egui가 패닉한다.
+        crate::fonts::install_fonts(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 600.0))),
             ..Default::default()
@@ -861,7 +812,7 @@ mod row_alignment_tests {
                 let body = |ui: &mut egui::Ui, rects: &mut Vec<egui::Rect>| {
                     rects.push(ui.button("파일").rect);
                     rects.push(ui.button("➕").rect);
-                    rects.push(icon_button(ui, |_, _, _| {}).rect);
+                    rects.push(icon_button(ui, crate::icons::PAGE_MODE, "").rect);
                     rects.push(ui.button("단축키").rect);
                 };
                 if fixed {
@@ -905,9 +856,14 @@ mod row_alignment_tests {
         assert!((rects[3].center().y - icon).abs() < 0.01);
     }
 
-    /// 아이콘 버튼은 정사각형이고 줄 높이와 같다.
+    /// 아이콘 버튼도 다른 항목과 같은 높이여야 한다 — 아이콘 글리프가 줄 높이보다 크면 그것만
+    /// 어긋난다(`toolbar_row` 문서).
     #[test]
-    fn the_icon_button_matches_the_row_height() {
-        assert_eq!(ICON_BUTTON_SIZE, ITEM_HEIGHT);
+    fn the_icon_fits_inside_the_row() {
+        assert!(
+            crate::icons::SIZE < ITEM_HEIGHT,
+            "아이콘 글자 크기({})가 줄 높이({ITEM_HEIGHT})보다 크다",
+            crate::icons::SIZE
+        );
     }
 }

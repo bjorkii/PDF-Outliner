@@ -29,29 +29,35 @@ pub fn install_style(ctx: &egui::Context) {
     });
 }
 
-pub fn install_korean_font(ctx: &egui::Context) {
+/// 아이콘 글리프를 담은 폰트 가족 이름. `crate::icons`가 이 이름으로 글자를 그린다.
+pub const ICON_FAMILY: &str = "icons";
+
+/// Phosphor Light에 우리 글리프를 더한 사본(`assets/fonts/NOTICE.md`, `scripts/build_icon_font.py`).
+/// 앱에 품고 나가므로 사용자 PC에 이 폰트가 깔려 있을 필요가 없다.
+const ICON_FONT: &[u8] = include_bytes!("../../../assets/fonts/Phosphor-Custom-Light.ttf");
+
+/// 아이콘 폰트와 한글 폰트를 한 번에 등록한다.
+///
+/// **둘을 따로 `set_fonts`로 넣으면 안 된다** — 나중 호출이 앞의 것을 통째로 덮는다.
+///
+/// 아이콘은 **따로 둔 가족**으로 등록한다. 본문 폰트의 대체 사슬에 끼워 넣어도 글리프는 나오지만,
+/// 가족을 나누면 아이콘 크기를 글자 크기와 **따로** 정할 수 있다(`icons::text`). 툴바에서 글자와
+/// 아이콘의 광학 크기를 맞추려면 그 손잡이가 필요하다.
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+    fonts.font_data.insert("icons".to_owned(), FontData::from_static(ICON_FONT));
+    fonts.families.insert(FontFamily::Name(ICON_FAMILY.into()), vec!["icons".to_owned()]);
+
+    // 한글: egui 기본 폰트(Hack/Ubuntu-Light)에 한글 글리프가 없어 빈 사각형(tofu)이 된다. OS에
+    // 깔린 폰트를 찾아 기본 폰트 **뒤에** 붙이면, 라틴 문자는 기본 폰트가 그대로 담당하고 한글만
+    // 이쪽이 보완한다.
     for path in CANDIDATES {
-        if let Ok(bytes) = std::fs::read(path) {
-            let mut fonts = FontDefinitions::default();
-            fonts
-                .font_data
-                .insert("korean".to_owned(), FontData::from_owned(bytes));
-
-            // 기존 기본 폰트 뒤에 fallback으로 추가: 라틴 문자는 기본 폰트가 그대로 담당하고,
-            // 기본 폰트에 없는 한글 글리프만 이 폰트가 보완한다.
-            fonts
-                .families
-                .entry(FontFamily::Proportional)
-                .or_default()
-                .push("korean".to_owned());
-            fonts
-                .families
-                .entry(FontFamily::Monospace)
-                .or_default()
-                .push("korean".to_owned());
-
-            ctx.set_fonts(fonts);
-            return;
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        fonts.font_data.insert("korean".to_owned(), FontData::from_owned(bytes));
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            fonts.families.entry(family).or_default().push("korean".to_owned());
         }
+        break;
     }
+    ctx.set_fonts(fonts);
 }

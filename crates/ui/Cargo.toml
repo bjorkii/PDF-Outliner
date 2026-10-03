@@ -34,6 +34,9 @@ notify = "6"
 
 [dev-dependencies]
 tempfile = "=3.14.0"
+# 아이콘 글리프가 폰트에 실제로 들어 있는지 확인하는 시험용(icons.rs). egui가 쓰는 것과 같은
+# 파서라 버전을 맞춰 하나로 유니파이된다.
+ttf-parser = "0.25"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

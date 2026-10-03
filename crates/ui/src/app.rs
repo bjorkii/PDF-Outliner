@@ -1760,6 +1760,16 @@ impl PdfViewerApp {
         self.set_current_page(clamped);
     }
 
+    /// 뒤로 갈 자리가 남아 있는가 — 툴바 버튼을 잠글지 정하는 데 쓴다.
+    pub fn can_navigate_back(&self) -> bool {
+        !self.page_back_history.is_empty()
+    }
+
+    /// 앞으로 갈 자리가 남아 있는가.
+    pub fn can_navigate_forward(&self) -> bool {
+        !self.page_forward_history.is_empty()
+    }
+
     /// Cmd+[ — 웹브라우저 뒤로가기. 히스토리가 비어있으면 아무 일도 안 한다.
     pub fn navigate_back(&mut self) {
         if let Some(prev) = self.page_back_history.pop() {

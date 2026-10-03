@@ -128,18 +128,15 @@ fn contents(ui: &mut egui::Ui, app: &mut PdfViewerApp, detached: bool) {
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             // × = 검색 모드 해제(결과·뷰어 하이라이트·검색어까지 지우고 패널을 닫음).
-            if header_icon_button(ui, false, draw_close_icon)
-                .on_hover_text("검색 끝내기 (결과·하이라이트 지움)")
+            if header_icon_button(ui, false, crate::icons::CLOSE, "검색 끝내기 (결과·하이라이트 지움)")
                 .clicked()
             {
                 app.search_query.clear();
                 app.clear_search();
             }
             let hint = if detached { "메인 창에 다시 붙이기" } else { "별도 창으로 분리 (항상 위)" };
-            if header_icon_button(ui, detached, draw_pin_icon)
-                .on_hover_text(hint)
-                .clicked()
-            {
+            let pin = if detached { crate::icons::FLOATING } else { crate::icons::DOCKED };
+            if header_icon_button(ui, detached, pin, hint).clicked() {
                 app.search_panel_detached = !detached;
             }
         });
@@ -360,64 +357,10 @@ fn offset_to_reveal(row: usize, row_height: f32, offset: f32, view_height: f32) 
 const HEADER_ICON_SIZE: f32 = 18.0;
 
 /// 머리글 아이콘 버튼. `active`면 눌린(선택된) 배경으로 그린다. 툴바 아이콘 버튼과 같은
-/// 방식(직접 rect를 잡고 벡터로 그림 — toolbar.rs `icon_button` 참고).
-fn header_icon_button(
-    ui: &mut egui::Ui,
-    active: bool,
-    draw: impl FnOnce(&egui::Painter, egui::Rect, Color32, bool),
-) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(HEADER_ICON_SIZE, HEADER_ICON_SIZE), Sense::click());
-    if ui.is_rect_visible(rect) {
-        let visuals = ui.style().interact_selectable(&response, active);
-        ui.painter()
-            .rect(rect, visuals.rounding, visuals.weak_bg_fill, visuals.bg_stroke);
-        draw(ui.painter(), rect.shrink(4.0), visuals.fg_stroke.color, active);
-    }
-    response
-}
-
-/// 세로로 선 압정 — 위 머리(가로로 넓은 캡), 몸통, 받침(넓은 가로선), 아래로 곧은 바늘.
-/// 예전의 "기울어진 큰 원 + 대각선 바늘"은 돋보기(검색)로 착각된다는 피드백(2026-09-14).
-/// 분리 상태(`active`)면 머리·몸통을 채워 "꽂혀 있음"을 표시한다.
-fn draw_pin_icon(painter: &egui::Painter, area: egui::Rect, color: Color32, active: bool) {
-    let stroke = egui::Stroke::new(1.3_f32, color);
-    let (center_x, width, height) = (area.center().x, area.width(), area.height());
-    let cap = egui::Rect::from_min_max(
-        egui::pos2(center_x - width * 0.26, area.top()),
-        egui::pos2(center_x + width * 0.26, area.top() + height * 0.16),
-    );
-    let body = egui::Rect::from_min_max(
-        egui::pos2(center_x - width * 0.14, cap.bottom()),
-        egui::pos2(center_x + width * 0.14, area.top() + height * 0.52),
-    );
-    if active {
-        painter.rect_filled(cap, 0.5, color);
-        painter.rect_filled(body, 0.0, color);
-    } else {
-        painter.rect_stroke(cap, 0.5, stroke);
-        painter.rect_stroke(body, 0.0, stroke);
-    }
-    let collar_y = body.bottom();
-    painter.line_segment(
-        [
-            egui::pos2(center_x - width * 0.36, collar_y),
-            egui::pos2(center_x + width * 0.36, collar_y),
-        ],
-        stroke,
-    );
-    painter.line_segment(
-        [egui::pos2(center_x, collar_y), egui::pos2(center_x, area.bottom())],
-        stroke,
-    );
-}
-
-/// × — 핀과 같은 크기 영역에 벡터로 그린다(글자 ×는 글꼴 크기를 따라가 핀과 크기가 어긋났음).
-fn draw_close_icon(painter: &egui::Painter, area: egui::Rect, color: Color32, _active: bool) {
-    let stroke = egui::Stroke::new(1.3_f32, color);
-    let area = area.shrink(1.0);
-    painter.line_segment([area.left_top(), area.right_bottom()], stroke);
-    painter.line_segment([area.right_top(), area.left_bottom()], stroke);
+/// 머리 줄의 아이콘 버튼. 고른 상태(`active`)면 눌린 것처럼 바탕을 칠한다.
+fn header_icon_button(ui: &mut egui::Ui, active: bool, icon: char, tip: &str) -> egui::Response {
+    let text = crate::icons::sized(icon, HEADER_ICON_SIZE - 3.0);
+    ui.add(egui::Button::new(text).selected(active)).on_hover_text(tip)
 }
 
 #[cfg(test)]
