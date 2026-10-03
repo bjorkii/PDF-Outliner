@@ -78,6 +78,55 @@ pub fn text(icon: char) -> egui::RichText {
     sized(icon, SIZE)
 }
 
+/// 아이콘 버튼 — **바탕을 칠하지 않고 마우스를 올렸을 때만 테두리**를 두르며, 글리프 좌우에
+/// 여백을 두지 않는다(2026-10-03 요청).
+///
+/// 여백이 생기던 두 군데를 모두 막는다.
+/// - `button_padding.x`: 버튼 테두리와 글자 사이.
+/// - `interact_size.x`: egui 버튼의 **최소 폭**이고 기본값이 40이다. 아이콘 글리프는 17pt뿐이라
+///   이 값이 양옆에 11pt씩을 밀어 넣고 있었다. 이쪽이 눈에 보이던 여백의 대부분이다.
+pub fn button(ui: &mut egui::Ui, icon: char, tip: &str) -> egui::Response {
+    flat(ui, icon, true, false).on_hover_text(tip)
+}
+
+/// 잠글 수 있는 아이콘 버튼.
+pub fn button_enabled(ui: &mut egui::Ui, enabled: bool, icon: char, tip: &str) -> egui::Response {
+    flat(ui, icon, enabled, false).on_hover_text(tip)
+}
+
+/// 켜고 끄는 아이콘 버튼. 켜져 있으면 테두리를 늘 두른다 — 바탕을 칠하지 않기로 했으니
+/// "지금 켜져 있다"를 보일 길이 테두리뿐이다.
+pub fn toggle(ui: &mut egui::Ui, selected: bool, icon: char, tip: &str) -> egui::Response {
+    flat(ui, icon, true, selected).on_hover_text(tip)
+}
+
+fn flat(ui: &mut egui::Ui, icon: char, enabled: bool, selected: bool) -> egui::Response {
+    ui.scope(|ui| {
+        let visuals = ui.visuals();
+        let line = visuals.widgets.inactive.fg_stroke.color.gamma_multiply(0.45);
+        let strong = visuals.widgets.active.fg_stroke.color.gamma_multiply(0.7);
+
+        ui.spacing_mut().button_padding.x = 0.0;
+        ui.spacing_mut().interact_size.x = 0.0;
+
+        let widgets = &mut ui.visuals_mut().widgets;
+        for state in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active, &mut widgets.open] {
+            state.weak_bg_fill = egui::Color32::TRANSPARENT;
+            state.bg_fill = egui::Color32::TRANSPARENT;
+            state.bg_stroke = egui::Stroke::NONE;
+        }
+        let hover = egui::Stroke::new(1.0_f32, line);
+        widgets.hovered.bg_stroke = hover;
+        widgets.active.bg_stroke = hover;
+        if selected {
+            widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, strong);
+            widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, strong);
+        }
+        ui.add_enabled(enabled, egui::Button::new(text(icon)))
+    })
+    .inner
+}
+
 /// 크기를 직접 정해 그릴 때.
 pub fn sized(icon: char, size: f32) -> egui::RichText {
     egui::RichText::new(icon).font(egui::FontId::new(

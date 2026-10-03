@@ -128,15 +128,13 @@ fn contents(ui: &mut egui::Ui, app: &mut PdfViewerApp, detached: bool) {
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             // × = 검색 모드 해제(결과·뷰어 하이라이트·검색어까지 지우고 패널을 닫음).
-            if header_icon_button(ui, false, crate::icons::CLOSE, "검색 끝내기 (결과·하이라이트 지움)")
-                .clicked()
-            {
+            if crate::icons::button(ui, crate::icons::CLOSE, "검색 끝내기 (결과·하이라이트 지움)").clicked() {
                 app.search_query.clear();
                 app.clear_search();
             }
             let hint = if detached { "메인 창에 다시 붙이기" } else { "별도 창으로 분리 (항상 위)" };
             let pin = if detached { crate::icons::FLOATING } else { crate::icons::DOCKED };
-            if header_icon_button(ui, detached, pin, hint).clicked() {
+            if crate::icons::toggle(ui, detached, pin, hint).clicked() {
                 app.search_panel_detached = !detached;
             }
         });
@@ -351,16 +349,6 @@ fn offset_to_reveal(row: usize, row_height: f32, offset: f32, view_height: f32) 
     } else {
         None
     }
-}
-
-/// 머리글 아이콘 버튼 한 변(pt) — 핀과 ×를 같은 크기로 맞춘다(2026-09-14 요청).
-const HEADER_ICON_SIZE: f32 = 18.0;
-
-/// 머리글 아이콘 버튼. `active`면 눌린(선택된) 배경으로 그린다. 툴바 아이콘 버튼과 같은
-/// 머리 줄의 아이콘 버튼. 고른 상태(`active`)면 눌린 것처럼 바탕을 칠한다.
-fn header_icon_button(ui: &mut egui::Ui, active: bool, icon: char, tip: &str) -> egui::Response {
-    let text = crate::icons::sized(icon, HEADER_ICON_SIZE - 3.0);
-    ui.add(egui::Button::new(text).selected(active)).on_hover_text(tip)
 }
 
 #[cfg(test)]

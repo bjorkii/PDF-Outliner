@@ -212,7 +212,9 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
             // 세로 중앙: 고정 높이 rect를 잡고 그 안에 Align::Center 가로 레이아웃 child를
             // 만든다 — 예전처럼 ui.horizontal을 그냥 쓰면 행 높이가 버튼 높이에 딱 맞아
             // 헤더 영역 위쪽에 붙어 보인다는 피드백.
-            let header_height = 36.0;
+            // 아이콘으로 바꾸면서 버튼이 작아졌는데 머리 줄만 36pt로 남아 휑했다(2026-10-03
+            // 리포트). 아이콘 한 변(17pt) 위아래로 조금씩만 남긴다.
+            let header_height = 26.0;
             // 아래쪽엔 item_spacing + 구분선 자체 패딩(합계 ~6pt)이 붙는데 위쪽 패널
             // 마진은 ~1pt뿐이라, 36pt 밴드 정중앙에 놓아도 버튼이 위 테두리 쪽으로
             // 치우쳐 보인다(스크린샷 픽셀 실측: 위 24px vs 아래 31px @2x) — 그 차이만큼
@@ -236,36 +238,32 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 ui.add_space(((header_rect.width() - known_width) / 2.0).max(0.0));
                 let buttons_start_x = ui.cursor().min.x;
 
-                if ui
-                    .add(egui::Button::new(crate::icons::text(crate::icons::ADD)))
-                    .on_hover_text("추가 (Cmd+B). 선택된 항목의 하위에, 선택이 없으면 최상위에 넣습니다.")
-                    .clicked()
+                if crate::icons::button(
+                    ui,
+                    crate::icons::ADD,
+                    "추가 (Cmd+B). 선택된 항목의 하위에, 선택이 없으면 최상위에 넣습니다.",
+                )
+                .clicked()
                 {
                     add_new_bookmark(app, &mut drag_state);
                 }
 
                 let delete_enabled = app.selected_bookmark.is_some();
-                if ui
-                    .add_enabled(delete_enabled, egui::Button::new(crate::icons::text(crate::icons::REMOVE)))
-                    .on_hover_text("삭제 (Delete)")
+                if crate::icons::button_enabled(ui, delete_enabled, crate::icons::REMOVE, "삭제 (Delete)")
                     .clicked()
                 {
                     app.delete_selected_bookmark();
                 }
 
                 let undo_enabled = !app.bookmark_undo_stack.is_empty();
-                if ui
-                    .add_enabled(undo_enabled, egui::Button::new(crate::icons::text(crate::icons::UNDO)))
-                    .on_hover_text("실행취소 (Cmd+Z)")
+                if crate::icons::button_enabled(ui, undo_enabled, crate::icons::UNDO, "실행취소 (Cmd+Z)")
                     .clicked()
                 {
                     app.undo_bookmarks();
                 }
 
                 let redo_enabled = !app.bookmark_redo_stack.is_empty();
-                if ui
-                    .add_enabled(redo_enabled, egui::Button::new(crate::icons::text(crate::icons::REDO)))
-                    .on_hover_text("다시 실행 (Cmd+Shift+Z)")
+                if crate::icons::button_enabled(ui, redo_enabled, crate::icons::REDO, "다시 실행 (Cmd+Shift+Z)")
                     .clicked()
                 {
                     app.redo_bookmarks();

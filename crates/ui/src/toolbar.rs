@@ -41,16 +41,6 @@ fn toolbar_row<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R 
     ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(egui::Align::Center), add).inner
 }
 
-/// 아이콘 하나짜리 버튼. 글자 버튼과 같은 여백·높이를 쓴다(`toolbar_row`).
-fn icon_button(ui: &mut egui::Ui, icon: char, tip: &str) -> egui::Response {
-    ui.add(egui::Button::new(crate::icons::text(icon))).on_hover_text(tip)
-}
-
-/// 잠글 수 있는 아이콘 버튼.
-fn icon_button_enabled(ui: &mut egui::Ui, enabled: bool, icon: char, tip: &str) -> egui::Response {
-    ui.add_enabled(enabled, egui::Button::new(crate::icons::text(icon))).on_hover_text(tip)
-}
-
 /// 메뉴 머리(파일·북마크·OCR) — **평소에는 바탕을 칠하지 않고 마우스를 올렸을 때만 테두리**를
 /// 두른다(2026-10-03 요청). egui의 기본 버튼은 가만히 있어도 옅은 음영을 깔아서, 글자 메뉴가 셋
 /// 나란히 있으면 툴바가 지저분해 보였다.
@@ -385,7 +375,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     overflow_menu(ui, app, plan);
                     ui.separator();
                 }
-                if icon_button(ui, crate::icons::SETTINGS, "설정: 색과 단축키").clicked() {
+                if crate::icons::button(ui, crate::icons::SETTINGS, "설정: 색과 단축키").clicked() {
                     app.settings_open = true;
                 }
                 ui.separator();
@@ -471,9 +461,9 @@ fn label_width(ui: &egui::Ui, text: &str) -> f32 {
 /// 아이콘 버튼 하나의 폭.
 ///
 /// 아이콘 글리프는 **폭이 em과 같아서**(`icons` 시험이 못박는다) 글자 크기가 곧 폭이다. 폰트를
-/// 뒤져 재지 않아도 된다.
-fn icon_button_width(ui: &egui::Ui) -> f32 {
-    crate::icons::SIZE + 2.0 * ui.spacing().button_padding.x
+/// 뒤져 재지 않아도 된다. `icons::button`이 좌우 여백을 0으로 두므로 더할 것도 없다.
+fn icon_button_width(_ui: &egui::Ui) -> f32 {
+    crate::icons::SIZE
 }
 
 fn zoom_width(ui: &egui::Ui) -> f32 {
@@ -509,12 +499,12 @@ fn page_field_width(ui: &egui::Ui, total_pages: u32) -> f32 {
 /// 확대/축소와 보기 모드. 트랙패드 핀치·마우스 휠 줌과 별개로, 비전문 사용자를 위한
 /// 명시적 버튼 병행 배치. 버튼은 고정 단계표로 움직인다(ViewportState::ZOOM_STEPS 참고).
 fn zoom_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
-    if icon_button(ui, crate::icons::ZOOM_OUT, "축소").clicked() {
+    if crate::icons::button(ui, crate::icons::ZOOM_OUT, "축소").clicked() {
         app.viewport.zoom_out();
     }
     ui.label(format!("{:.0}%", app.viewport.zoom * 100.0))
         .on_hover_text("100% = 페이지 실제 크기 (PDF 1pt = 화면 1pt)");
-    if icon_button(ui, crate::icons::ZOOM_IN, "확대").clicked() {
+    if crate::icons::button(ui, crate::icons::ZOOM_IN, "확대").clicked() {
         app.viewport.zoom_in();
     }
     // 쪽 맞춤/폭 맞춤 통합 토글(2026-07-18 요청) — 아이콘은 "누르면 무엇이 되는지"를
@@ -522,10 +512,10 @@ fn zoom_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     // 전에는 "줌이 100%인가"로 갈랐는데, 배율이 실제 크기 기준이 되면서 100%와 폭 맞춤이
     // 더는 같은 뜻이 아니다. 수동 줌 상태에서는 쪽 맞춤으로 돌아가는 길을 권한다.
     if app.viewport.fit == FitMode::Page {
-        if icon_button(ui, crate::icons::FIT_WIDTH, "폭 맞춤: 페이지 폭을 뷰어 폭에").clicked() {
+        if crate::icons::button(ui, crate::icons::FIT_WIDTH, "폭 맞춤: 페이지 폭을 뷰어 폭에").clicked() {
             app.viewport.fit = FitMode::Width;
         }
-    } else if icon_button(ui, crate::icons::FIT_PAGE, "쪽 맞춤: 페이지 전체가 보이게").clicked() {
+    } else if crate::icons::button(ui, crate::icons::FIT_PAGE, "쪽 맞춤: 페이지 전체가 보이게").clicked() {
         app.viewport.fit = FitMode::Page;
     }
 
@@ -533,9 +523,9 @@ fn zoom_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     // 위와 달리 "현재 모드"를 아이콘으로 보여준다(사용자 명세: 연속 모드에서는
     // 연속 스크롤 아이콘, 다시 누르거나 C를 누르면 쪽 단위 아이콘으로 변경).
     let mode_response = if app.continuous_scroll {
-        icon_button(ui, crate::icons::SCROLL_MODE, "연속 스크롤 보기 중. 누르면 쪽 단위 (C)")
+        crate::icons::button(ui, crate::icons::SCROLL_MODE, "연속 스크롤 보기 중. 누르면 쪽 단위 (C)")
     } else {
-        icon_button(ui, crate::icons::PAGE_MODE, "쪽 단위 보기 중. 누르면 연속 스크롤 (C)")
+        crate::icons::button(ui, crate::icons::PAGE_MODE, "쪽 단위 보기 중. 누르면 연속 스크롤 (C)")
     };
     if mode_response.clicked() {
         app.toggle_continuous_scroll();
@@ -544,7 +534,7 @@ fn zoom_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
 
 /// 페이지 이동(◀ 현재쪽 / 전체쪽 ▶).
 fn page_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
-    if icon_button(ui, crate::icons::PREV_PAGE, "이전 페이지").clicked() {
+    if crate::icons::button(ui, crate::icons::PREV_PAGE, "이전 페이지").clicked() {
         let prev = app.current_page.saturating_sub(1).max(1);
         app.go_to_page(prev);
     }
@@ -565,7 +555,7 @@ fn page_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     }
     ui.label(format!("/ {}", app.total_pages));
 
-    if icon_button(ui, crate::icons::NEXT_PAGE, "다음 페이지").clicked() {
+    if crate::icons::button(ui, crate::icons::NEXT_PAGE, "다음 페이지").clicked() {
         let next = (app.current_page + 1).min(app.total_pages.max(1));
         app.go_to_page(next);
     }
@@ -574,11 +564,11 @@ fn page_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     // 쪽을 하나씩 넘기는 ◀▶와는 성격이 다른 일이라 사이를 조금 띄운다.
     ui.add_space(6.0);
     let modifier = modifier_label();
-    if icon_button_enabled(ui, app.can_navigate_back(), crate::icons::HISTORY_BACK,
+    if crate::icons::button_enabled(ui, app.can_navigate_back(), crate::icons::HISTORY_BACK,
                            &format!("이전에 보던 자리로 ({modifier}+[)")).clicked() {
         app.navigate_back();
     }
-    if icon_button_enabled(ui, app.can_navigate_forward(), crate::icons::HISTORY_FORWARD,
+    if crate::icons::button_enabled(ui, app.can_navigate_forward(), crate::icons::HISTORY_FORWARD,
                            &format!("다시 앞으로 ({modifier}+])")).clicked() {
         app.navigate_forward();
     }
@@ -591,9 +581,8 @@ fn search_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     let has_results = !app.search_matches.is_empty();
     let searching = app.search_running.is_some();
 
-    let next_response = ui
-        .add_enabled(has_results, egui::Button::new(crate::icons::text(crate::icons::NEXT_HIT)))
-        .on_hover_text("다음 결과 (Enter)");
+    let next_response =
+        crate::icons::button_enabled(ui, has_results, crate::icons::NEXT_HIT, "다음 결과 (Enter)");
     if next_response.clicked() {
         app.search_next();
     }
@@ -609,21 +598,14 @@ fn search_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     if has_results {
         ui.label(format!("{} / {}", app.search_current_index + 1, app.search_matches.len()));
     }
-    if ui
-        .add_enabled(has_results, egui::Button::new(crate::icons::text(crate::icons::PREV_HIT)))
-        .on_hover_text("이전 결과")
-        .clicked()
+    if crate::icons::button_enabled(ui, has_results, crate::icons::PREV_HIT, "이전 결과").clicked()
     {
         app.search_previous();
     }
     if searching {
         ui.spinner();
     }
-    if ui
-        .add_enabled(!searching, egui::Button::new(crate::icons::text(crate::icons::SEARCH)))
-        .on_hover_text("검색 실행 (Enter)")
-        .clicked()
-    {
+    if crate::icons::button_enabled(ui, !searching, crate::icons::SEARCH, "검색 실행 (Enter)").clicked() {
         app.execute_search();
     }
 
@@ -795,7 +777,7 @@ pub fn handle_scroll_zoom(ctx: &egui::Context, viewport: &mut ViewportState) {
 /// 툴바 한 줄 안의 세로 정렬(2026-10-02 리포트).
 #[cfg(test)]
 mod row_alignment_tests {
-    use super::{icon_button, toolbar_row, ITEM_HEIGHT};
+    use super::{toolbar_row, ITEM_HEIGHT};
 
     /// 한 줄에 글자 버튼과 아이콘 버튼을 섞어 놓고 각 항목의 자리를 잰다.
     fn measure(fixed: bool) -> Vec<egui::Rect> {
@@ -812,7 +794,7 @@ mod row_alignment_tests {
                 let body = |ui: &mut egui::Ui, rects: &mut Vec<egui::Rect>| {
                     rects.push(ui.button("파일").rect);
                     rects.push(ui.button("➕").rect);
-                    rects.push(icon_button(ui, crate::icons::PAGE_MODE, "").rect);
+                    rects.push(crate::icons::button(ui, crate::icons::PAGE_MODE, "").rect);
                     rects.push(ui.button("단축키").rect);
                 };
                 if fixed {
@@ -856,14 +838,4 @@ mod row_alignment_tests {
         assert!((rects[3].center().y - icon).abs() < 0.01);
     }
 
-    /// 아이콘 버튼도 다른 항목과 같은 높이여야 한다 — 아이콘 글리프가 줄 높이보다 크면 그것만
-    /// 어긋난다(`toolbar_row` 문서).
-    #[test]
-    fn the_icon_fits_inside_the_row() {
-        assert!(
-            crate::icons::SIZE < ITEM_HEIGHT,
-            "아이콘 글자 크기({})가 줄 높이({ITEM_HEIGHT})보다 크다",
-            crate::icons::SIZE
-        );
-    }
 }
