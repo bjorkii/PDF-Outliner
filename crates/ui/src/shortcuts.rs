@@ -91,7 +91,9 @@ impl Scope {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    /// 겹침 시험의 실패 메시지에만 쓴다.
+    #[cfg(test)]
+    fn label(self) -> &'static str {
         match self {
             Scope::Global => "어디서나",
             Scope::Sidebar => "북마크 목록",

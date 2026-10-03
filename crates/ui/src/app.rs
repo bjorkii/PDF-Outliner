@@ -404,6 +404,8 @@ pub struct PdfViewerApp {
     pub settings_tab: crate::settings::Tab,
     /// 단축키를 고치는 중인 줄(설정 창). 창을 닫으면 비운다.
     pub settings_editor: crate::settings::ShortcutEditor,
+    /// 설정 창을 왼쪽·위쪽 변으로 줄일 때 반대쪽 변을 붙잡아 두는 상태(`raw_input_hook`).
+    pub settings_pin: crate::settings::EdgePin,
     /// 사이드바에서 지금 보고 있는 탭.
     pub sidebar_tab: SidebarTab,
     /// 썸네일 탭이 쓰는 미리보기 텍스처(뷰어 텍스처와 따로 둔다 — `thumbnails` 모듈 문서).
@@ -580,6 +582,7 @@ impl PdfViewerApp {
             shortcuts,
             settings_tab: crate::settings::Tab::default(),
             settings_editor: crate::settings::ShortcutEditor::default(),
+            settings_pin: crate::settings::EdgePin::default(),
             viewer_rect: None,
             settings_open: false,
             saved_file_notice: None,
@@ -2397,7 +2400,7 @@ pub(crate) fn window_body<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) 
 }
 
 /// 본문 여백. 창 자체 여백(egui 기본 6)에 더해진다.
-const BODY_PADDING: f32 = 14.0;
+pub(crate) const BODY_PADDING: f32 = 14.0;
 
 /// 팝업창을 Esc로 닫는다 — 눌렸으면 **소비**해서 다음 창이 같은 Esc로 함께 닫히지 않게 한다
 /// (창은 위에서 아래로 검사하므로 먼저 검사한 창이 받는다). 사용자 요청 2026-09-27.
@@ -2664,6 +2667,9 @@ impl eframe::App for PdfViewerApp {
     /// 상태에 빠졌다(사용자 리포트, 2026-07-17). 이 앱에서 Tab의 의미는 사이드바<->뷰어
     /// 전환 딱 하나다: 텍스트 입력 중엔 아무 일도 하지 않고, 그 외엔 전환.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if self.settings_open {
+            self.settings_pin.clamp_pointer(ctx, raw_input);
+        }
         let mut toggle = false;
         raw_input.events.retain(|event| {
             if let egui::Event::Key {

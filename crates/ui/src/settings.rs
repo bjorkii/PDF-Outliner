@@ -144,10 +144,16 @@ const DEFAULT_WIDTH: f32 = 560.0;
 const DEFAULT_HEIGHT: f32 = 520.0;
 /// 창을 아무리 줄여도 본문은 이만큼은 보인다.
 const BODY_MIN: f32 = 160.0;
+/// 창 크기 조정의 하한(제목 띠와 창 여백을 뺀 안쪽 크기). **내용이 이보다 크면 안 된다** — 그러면
+/// 창이 내용에 밀려 하한보다 커지고, 왼쪽·위쪽 변을 붙잡는 계산(`EdgePin`)이 어긋난다.
+/// `layout_tests`가 탭마다 확인한다.
 const MIN_WIDTH: f32 = 430.0;
-const MIN_HEIGHT: f32 = 260.0;
-/// 본문 아래에 들어가는 것들이 차지하는 높이 — 띄움 10 + 구분선 6 + 띄움 6 + 여유.
-const BUTTON_ROW_EXTRA: f32 = 34.0;
+const MIN_HEIGHT: f32 = 300.0;
+/// 본문과 구분선 사이.
+const GAP_ABOVE_LINE: f32 = 10.0;
+
+/// 창의 id. 크기 조정 손잡이의 id가 여기서 나온다(`dragged_edges`).
+const WINDOW_ID: &str = "settings_window";
 
 /// 로그 보기 탭에 싣는 줄 수. 추적에 필요한 것은 늘 끝부분이다.
 const LOG_TAIL_LINES: usize = 200;
@@ -169,6 +175,98 @@ pub struct ShortcutEditor {
     pub rejected: Option<(crate::shortcuts::Action, crate::shortcuts::Conflict)>,
 }
 
+/// 왼쪽·위쪽 변으로 창을 줄일 때 **반대쪽 변을 붙잡아 둔다**(2026-10-03 리포트).
+///
+/// egui는 왼쪽 변을 끌면 창의 새 왼쪽을 포인터 자리로 바로 잡고(`window.rs::move_and_resize_window`),
+/// 크기는 따로 최소값으로 자른다. 그래서 최소 크기에 닿은 뒤에도 계속 끌면 왼쪽이 포인터를 따라가고
+/// 오른쪽 변이 그만큼 밀려 창 전체가 움직였다. 운영체제 창이라면 창 관리자가 막아 주지만, 이 창은
+/// 앱 안에 egui가 그리는 창이라 그런 도움이 없다.
+///
+/// 막는 자리는 egui에 들어가기 **전의 입력**이다. 그 변을 끄는 동안 포인터 좌표를 "반대쪽 변 −
+/// 최소 크기"보다 넘어가지 않게 묶어 두면, egui가 같은 계산을 해도 창이 최소 크기에서 멈춘다.
+/// 묶는 것은 egui가 받는 좌표뿐이고 화면의 마우스 커서는 그대로 움직인다.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EdgePin {
+    /// 지난 프레임에 그린 창의 바깥 테두리.
+    outer: Option<egui::Rect>,
+    /// 바깥 크기와 크기 조정 대상(안쪽) 크기의 차 — 제목 띠와 창 여백.
+    margin: egui::Vec2,
+    /// 끌기 시작 직전의 오른쪽 아래 꼭짓점. 끄는 동안 이 자리를 지킨다.
+    anchor: Option<egui::Pos2>,
+}
+
+impl EdgePin {
+    /// 왼쪽·위쪽 변을 끄는 중이면 이번 프레임의 포인터 좌표를 최소 크기 경계 안으로 묶는다.
+    pub fn clamp_pointer(&self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        let (left, top) = dragged_edges(ctx);
+        let Some(anchor) = self.anchor.filter(|_| left || top) else {
+            return;
+        };
+        let limit = anchor - (egui::vec2(MIN_WIDTH, MIN_HEIGHT) + self.margin);
+        for event in &mut raw.events {
+            let pos = match event {
+                egui::Event::PointerMoved(pos) | egui::Event::PointerButton { pos, .. } => pos,
+                _ => continue,
+            };
+            if left {
+                pos.x = pos.x.min(limit.x);
+            }
+            if top {
+                pos.y = pos.y.min(limit.y);
+            }
+        }
+    }
+
+    /// 창을 그린 뒤에 부른다. `before`는 이번 프레임에 그리기 전의 바깥 테두리다.
+    fn record(&mut self, ctx: &egui::Context, before: Option<egui::Rect>, outer: egui::Rect, inner: egui::Vec2) {
+        let (left, top) = dragged_edges(ctx);
+        if left || top {
+            // 끌기가 시작된 프레임에는 egui가 이미 창을 옮겨 놓았을 수 있다 — 그리기 전 자리를 쓴다.
+            if self.anchor.is_none() {
+                self.anchor = Some(before.unwrap_or(outer).max);
+            }
+        } else {
+            self.anchor = None;
+        }
+        self.outer = Some(outer);
+        self.margin = outer.size() - inner;
+    }
+}
+
+/// 설정 창의 왼쪽 변과 위쪽 변 가운데 지금 끌리고 있는 것. 꼭짓점은 두 변에 함께 속한다.
+///
+/// 손잡이 id는 egui가 정한 규칙을 그대로 따른다(`window.rs::resize_interaction`:
+/// `Id::new(layer_id).with("edge_drag").with(이름)`). egui를 올리면 이 규칙이 바뀌었는지
+/// `layout_tests::left_and_top_edges_keep_the_opposite_edge`가 잡아낸다.
+fn dragged_edges(ctx: &egui::Context) -> (bool, bool) {
+    let Some(dragged) = ctx.dragged_id() else {
+        return (false, false);
+    };
+    let layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new(WINDOW_ID));
+    let base = egui::Id::new(layer).with("edge_drag");
+    let any = |names: [&str; 3]| names.iter().any(|name| dragged == base.with(*name));
+    (any(["left", "left_top", "left_bottom"]), any(["top", "left_top", "right_top"]))
+}
+
+/// 창을 그린 결과 — 누른 버튼과, 시험에서 재어 볼 자리.
+#[derive(Debug, Clone, Copy)]
+struct Outcome {
+    close: bool,
+    open_logs: bool,
+    /// 구분선의 y.
+    line_y: f32,
+    /// 아래 버튼 줄의 자리.
+    row: egui::Rect,
+    /// 창 바깥 테두리.
+    outer: egui::Rect,
+}
+
+impl Default for Outcome {
+    fn default() -> Self {
+        Self { close: false, open_logs: false, line_y: 0.0, row: egui::Rect::NOTHING, outer: egui::Rect::NOTHING }
+    }
+}
+
 /// 설정 창. 다른 기능 창과 같은 규칙이다 — 끌어서 옮길 수 있고, Esc로 닫히고, 본문에 여백이 있다.
 ///
 /// **아래 버튼 줄은 스크롤과 무관하게 고정한다**(2026-09-30 요청). 항목이 늘어 본문이 창을 넘치면
@@ -187,95 +285,16 @@ pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
             return;
         }
     }
-    let mut close = false;
-    let mut open_logs = false;
-    egui::Window::new("설정")
-        .collapsible(false)
-        .resizable(true)
-        .default_width(DEFAULT_WIDTH)
-        // **창을 최소 크기까지 줄인 뒤에도 위·왼쪽 변을 끌면 창이 따라 움직인다.** egui가 새 자리를
-        // 포인터에서 바로 잡고(`window.rs::move_and_resize_window`) 크기만 따로 최소값으로 자르기
-        // 때문이고, 변마다 끌림을 막는 손잡이는 없다. 최소 크기를 내용에 맞춰 못박아 **어디서 멈추는지
-        // 예측 가능하게** 두는 것이 지금 할 수 있는 전부다(2026-10-03 리포트).
-        .min_width(MIN_WIDTH)
-        .min_height(MIN_HEIGHT)
-        // **pivot을 쓰지 않는다.** `CENTER_CENTER`로 두면 창이 늘 가운데를 축으로 커지고 줄어들어,
-        // 왼쪽 변을 끌면 오른쪽 변까지 따라 움직이고 위쪽 변은 아예 잡히지 않는다(2026-10-03
-        // 리포트). 기본 축(왼쪽 위)으로 두고, 처음 뜰 자리만 가운데로 계산해 준다.
-        .default_pos(ctx.screen_rect().center() - egui::vec2(DEFAULT_WIDTH, DEFAULT_HEIGHT) / 2.0)
-        .default_height(DEFAULT_HEIGHT)
-        .show(ctx, |ui| {
-            crate::app::window_body(ui, |ui| {
-                crate::tabs::bar(
-                    ui,
-                    "settings_tabs",
-                    &mut app.settings_tab,
-                    &[
-                        (Tab::Colors, crate::icons::TAB_COLORS, "색상 지정"),
-                        (Tab::Shortcuts, crate::icons::TAB_SHORTCUTS, "단축키"),
-                        (Tab::Log, crate::icons::TAB_LOG, "로그 보기"),
-                    ],
-                );
-                ui.add_space(10.0);
-                // **본문이 차지할 높이를 못박는다.**
-                //
-                // 내용에 맡기면 창이 내용을 따라 자란다. egui의 `Resize`는 요청받은 크기보다 내용이
-                // 크면 그만큼 커지고 그 크기를 기억하므로, 긴 탭(로그)을 한 번 열면 창이 화면 높이까지
-                // 늘어나 아래 버튼 줄이 잘리고, 탭을 바꿔도 그 크기가 남았다(2026-10-03 리포트).
-                //
-                // 자리를 먼저 정확히 잡고 그 안에서만 그리면 내용이 창을 밀지 못한다. 창을 세로로
-                // 늘리면 이 값이 커지므로 본문도 함께 늘어난다.
-                let reserved = ui.spacing().interact_size.y + BUTTON_ROW_EXTRA;
-                let body_height = (ui.available_height() - reserved).max(BODY_MIN);
-                let (body_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(ui.available_width(), body_height), egui::Sense::hover());
-                let mut body = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(body_rect)
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                );
-                // **스크롤은 탭마다 맡는다.** 로그 탭은 머리글(경로)을 스크롤 밖에 두어야 내려도
-                // 자리를 지킨다(2026-10-03 요청).
-                match app.settings_tab {
-                    Tab::Colors => scrolled(&mut body, |ui| color_tab(ui, &mut app.colors)),
-                    Tab::Shortcuts => scrolled(&mut body, |ui| {
-                        shortcut_tab(ui, &mut app.shortcuts, &mut app.settings_editor)
-                    }),
-                    Tab::Log => log_tab(&mut body),
-                }
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    // 탭마다 그 탭에서만 뜻이 있는 버튼을 왼쪽에 둔다.
-                    match app.settings_tab {
-                        Tab::Colors => {
-                            if ui.button("색상 초기화").clicked() {
-                                app.colors = Colors::default();
-                            }
-                        }
-                        Tab::Shortcuts => {
-                            if ui.button("단축키 초기화").clicked() {
-                                app.shortcuts.reset_all();
-                                app.settings_editor = ShortcutEditor::default();
-                            }
-                        }
-                        Tab::Log => {
-                            if ui.button("로그파일 위치 열기").clicked() {
-                                open_logs = true;
-                            }
-                        }
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("닫기").clicked() {
-                            close = true;
-                        }
-                    });
-                });
-            });
-        });
+    let outcome = window(
+        ctx,
+        &mut app.settings_tab,
+        &mut app.colors,
+        &mut app.shortcuts,
+        &mut app.settings_editor,
+        &mut app.settings_pin,
+    );
 
-    if open_logs {
+    if outcome.open_logs {
         match crate::crash_log::log_path() {
             Some(path) => {
                 if let Err(err) = crate::app::reveal_in_file_manager(&path) {
@@ -285,10 +304,130 @@ pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
             None => app.status_message = Some("로그 파일 위치를 알 수 없습니다.".to_string()),
         }
     }
-    if close {
+    if outcome.close {
         app.settings_open = false;
         app.settings_editor = ShortcutEditor::default();
     }
+}
+
+/// 창 자체. 앱 전체 없이 시험할 수 있게 쓰는 것만 받는다.
+fn window(
+    ctx: &egui::Context,
+    tab: &mut Tab,
+    colors: &mut Colors,
+    shortcuts: &mut crate::shortcuts::Shortcuts,
+    editor: &mut ShortcutEditor,
+    pin: &mut EdgePin,
+) -> Outcome {
+    let mut outcome = Outcome::default();
+    let mut inner = egui::Vec2::ZERO;
+    let shown = egui::Window::new("설정")
+        .id(egui::Id::new(WINDOW_ID))
+        .collapsible(false)
+        .resizable(true)
+        .default_width(DEFAULT_WIDTH)
+        // 최소 크기에 닿은 뒤 왼쪽·위쪽 변을 더 끌어도 창이 밀리지 않게 하는 것은 `EdgePin`이 맡는다.
+        .min_width(MIN_WIDTH)
+        .min_height(MIN_HEIGHT)
+        // **pivot을 쓰지 않는다.** `CENTER_CENTER`로 두면 창이 늘 가운데를 축으로 커지고 줄어들어,
+        // 왼쪽 변을 끌면 오른쪽 변까지 따라 움직이고 위쪽 변은 아예 잡히지 않는다(2026-10-03
+        // 리포트). 기본 축(왼쪽 위)으로 두고, 처음 뜰 자리만 가운데로 계산해 준다.
+        .default_pos(ctx.screen_rect().center() - egui::vec2(DEFAULT_WIDTH, DEFAULT_HEIGHT) / 2.0)
+        .default_height(DEFAULT_HEIGHT)
+        .show(ctx, |ui| {
+            inner = ui.max_rect().size();
+            crate::app::window_body(ui, |ui| {
+                crate::tabs::bar(
+                    ui,
+                    "settings_tabs",
+                    tab,
+                    &[
+                        (Tab::Colors, crate::icons::TAB_COLORS, "색상 지정"),
+                        (Tab::Shortcuts, crate::icons::TAB_SHORTCUTS, "단축키"),
+                        (Tab::Log, crate::icons::TAB_LOG, "로그 보기"),
+                    ],
+                );
+                ui.add_space(10.0);
+                // **탭 아래 남은 자리를 한 번에 정확히 잡고 나눈다.**
+                //
+                // 내용에 맡기면 창이 내용을 따라 자란다. egui의 `Resize`는 요청받은 크기보다 내용이
+                // 크면 그만큼 커지고 그 크기를 기억하므로, 긴 탭(로그)을 한 번 열면 창이 화면 높이까지
+                // 늘어나 아래 버튼 줄이 잘리고, 탭을 바꿔도 그 크기가 남았다(2026-10-03 리포트).
+                // 자리를 먼저 못박고 그 안에서만 그리면 내용이 창을 밀지 못한다. 창을 세로로 늘리면
+                // 본문만 함께 늘어난다.
+                //
+                // **버튼 줄은 구분선과 창 아래 테두리 사이 한가운데에 둔다**(2026-10-03 요청). 그 아래로는
+                // 본문 여백과 창 여백이 이미 있으므로, 구분선에서 버튼까지도 같은 만큼 띄운다. 그러면
+                // 버튼 줄의 아래 끝이 정확히 본문 칸의 아래 끝에 닿는다.
+                let below = crate::app::BODY_PADDING + ui.style().spacing.window_margin.bottom;
+                let row_height = button_height(ui);
+                let width = ui.available_width();
+                let rest_height =
+                    ui.available_height().max(BODY_MIN + GAP_ABOVE_LINE + below + row_height);
+                let (rest, _) = ui.allocate_exact_size(egui::vec2(width, rest_height), egui::Sense::hover());
+                let row = egui::Rect::from_min_max(
+                    egui::pos2(rest.left(), rest.bottom() - row_height),
+                    rest.right_bottom(),
+                );
+                let line_y = row.top() - below;
+                let body_rect = egui::Rect::from_min_max(rest.left_top(), egui::pos2(rest.right(), line_y - GAP_ABOVE_LINE));
+
+                let mut body = ui.new_child(
+                    egui::UiBuilder::new().max_rect(body_rect).layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                // **스크롤은 탭마다 맡는다.** 로그 탭은 머리글(경로)을 스크롤 밖에 두어야 내려도
+                // 자리를 지킨다(2026-10-03 요청).
+                match *tab {
+                    Tab::Colors => scrolled(&mut body, |ui| color_tab(ui, colors)),
+                    Tab::Shortcuts => scrolled(&mut body, |ui| shortcut_tab(ui, shortcuts, editor)),
+                    Tab::Log => log_tab(&mut body),
+                }
+
+                ui.painter().hline(rest.x_range(), line_y, ui.visuals().widgets.noninteractive.bg_stroke);
+                outcome.line_y = line_y;
+                outcome.row = row;
+
+                let mut row_ui = ui.new_child(
+                    egui::UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                // 탭마다 그 탭에서만 뜻이 있는 버튼을 왼쪽에 둔다.
+                match *tab {
+                    Tab::Colors => {
+                        if row_ui.button("색상 초기화").clicked() {
+                            *colors = Colors::default();
+                        }
+                    }
+                    Tab::Shortcuts => {
+                        if row_ui.button("단축키 초기화").clicked() {
+                            shortcuts.reset_all();
+                            *editor = ShortcutEditor::default();
+                        }
+                    }
+                    Tab::Log => {
+                        if row_ui.button("로그파일 위치 열기").clicked() {
+                            outcome.open_logs = true;
+                        }
+                    }
+                }
+                row_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("닫기").clicked() {
+                        outcome.close = true;
+                    }
+                });
+            });
+        });
+    if let Some(shown) = shown {
+        outcome.outer = shown.response.rect;
+        pin.record(ctx, pin.outer, outcome.outer, inner);
+    }
+    outcome
+}
+
+/// 글자 버튼 하나의 높이 — 글자 높이에 위아래 안쪽 여백을 더한 것과 최소 높이 중 큰 쪽(`Button`이 정하는 대로).
+fn button_height(ui: &egui::Ui) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let text = ui.fonts(|fonts| fonts.row_height(&font));
+    (text + 2.0 * ui.spacing().button_padding.y).max(ui.spacing().interact_size.y)
 }
 
 /// 본문을 세로 스크롤 영역에 담는다. **잡아 둔 자리를 그대로 채운다** — 줄어들게 두면 내용이 짧은
@@ -635,6 +774,145 @@ mod layout_tests {
         let first = widths[0];
         for (index, width) in widths.iter().enumerate() {
             assert!((width - first).abs() < 0.5, "{index}번째 갈래의 폭이 {width}로 어긋난다(기준 {first})");
+        }
+    }
+
+    /// 설정 창 하나를 헤드리스로 띄워 두고 프레임을 돌리는 도구.
+    struct Harness {
+        ctx: egui::Context,
+        tab: super::Tab,
+        colors: super::Colors,
+        shortcuts: Shortcuts,
+        editor: super::ShortcutEditor,
+        pin: super::EdgePin,
+        last: super::Outcome,
+        time: f64,
+    }
+
+    impl Harness {
+        fn new(tab: super::Tab) -> Self {
+            let ctx = egui::Context::default();
+            crate::fonts::install_fonts(&ctx);
+            crate::fonts::install_style(&ctx);
+            let mut harness = Self {
+                ctx,
+                tab,
+                colors: super::Colors::default(),
+                shortcuts: Shortcuts::default(),
+                editor: super::ShortcutEditor::default(),
+                pin: super::EdgePin::default(),
+                last: super::Outcome::default(),
+                time: 0.0,
+            };
+            // 글꼴 측정과 창 크기가 자리 잡을 때까지 몇 프레임 돌린다.
+            for _ in 0..4 {
+                harness.frame(Vec::new());
+            }
+            harness
+        }
+
+        /// 앱과 같은 순서로 한 프레임: 입력 손질(`raw_input_hook`) → 창 그리기.
+        fn frame(&mut self, events: Vec<egui::Event>) {
+            self.time += 1.0 / 60.0;
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 1000.0))),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            self.pin.clamp_pointer(&self.ctx, &mut input);
+            let mut last = self.last;
+            let _ = self.ctx.run(input, |ctx| {
+                last = super::window(
+                    ctx,
+                    &mut self.tab,
+                    &mut self.colors,
+                    &mut self.shortcuts,
+                    &mut self.editor,
+                    &mut self.pin,
+                );
+            });
+            self.last = last;
+        }
+
+        fn press(&mut self, at: egui::Pos2) {
+            self.frame(vec![egui::Event::PointerMoved(at)]);
+            self.frame(vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+
+        fn drag_to(&mut self, to: egui::Pos2) {
+            self.frame(vec![egui::Event::PointerMoved(to)]);
+        }
+
+        fn release(&mut self, at: egui::Pos2) {
+            self.frame(vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+    }
+
+    const TABS: [super::Tab; 3] = [super::Tab::Colors, super::Tab::Shortcuts, super::Tab::Log];
+
+    /// 버튼 줄은 구분선과 창 아래 테두리 사이 한가운데에 있어야 한다(2026-10-03 요청).
+    #[test]
+    fn button_row_sits_midway_between_the_line_and_the_window_bottom() {
+        for tab in TABS {
+            let harness = Harness::new(tab);
+            let o = harness.last;
+            let above = o.row.top() - o.line_y;
+            let below = o.outer.bottom() - o.row.bottom();
+            eprintln!("{tab:?}: 구분선→버튼 {above}, 버튼→창 아래 {below}, 줄 높이 {}", o.row.height());
+            assert!((above - below).abs() < 1.0, "{tab:?}: 위 {above} 대 아래 {below}");
+        }
+    }
+
+    /// 최소 크기까지 줄인 뒤에도 왼쪽·위쪽 변(과 그 꼭짓점)을 계속 끌면, **반대쪽 변은 제자리에
+    /// 있어야** 한다. 전에는 창 전체가 끄는 방향으로 밀려갔다(2026-10-03 리포트).
+    #[test]
+    fn left_and_top_edges_keep_the_opposite_edge() {
+        // (이름, 잡을 자리, 끌고 갈 방향)
+        type Grip = fn(egui::Rect) -> egui::Pos2;
+        let grips: [(&str, Grip, egui::Vec2); 4] = [
+            ("왼쪽 변", |r| egui::pos2(r.left(), r.center().y), egui::vec2(1.0, 0.0)),
+            ("위쪽 변", |r| egui::pos2(r.center().x, r.top()), egui::vec2(0.0, 1.0)),
+            ("왼쪽 위 꼭짓점", |r| r.left_top(), egui::vec2(1.0, 1.0)),
+            ("왼쪽 아래 꼭짓점", |r| r.left_bottom(), egui::vec2(1.0, -1.0)),
+        ];
+        for tab in TABS {
+            for (name, grip, direction) in grips {
+                let mut harness = Harness::new(tab);
+                let start = harness.last.outer;
+                let from = grip(start);
+                harness.press(from);
+                // 창 크기보다 훨씬 멀리, 여러 번에 나눠 끈다.
+                let mut to = from;
+                for _ in 0..30 {
+                    to += direction * 40.0;
+                    harness.drag_to(to);
+                }
+                let end = harness.last.outer;
+                harness.release(to);
+                eprintln!("{tab:?} {name}: {start:?} → {end:?}");
+                assert!(end.width() < start.width() || direction.x == 0.0, "{tab:?} {name}: 폭이 줄지 않았다");
+                assert!(end.height() < start.height() || direction.y == 0.0, "{tab:?} {name}: 높이가 줄지 않았다");
+                if direction.x > 0.0 {
+                    assert!((end.right() - start.right()).abs() < 1.0, "{tab:?} {name}: 오른쪽 변이 {}만큼 밀렸다", end.right() - start.right());
+                }
+                if direction.y > 0.0 {
+                    assert!((end.bottom() - start.bottom()).abs() < 1.0, "{tab:?} {name}: 아래 변이 {}만큼 밀렸다", end.bottom() - start.bottom());
+                }
+                if direction.y < 0.0 {
+                    assert!((end.top() - start.top()).abs() < 1.0, "{tab:?} {name}: 위 변이 {}만큼 밀렸다", end.top() - start.top());
+                }
+            }
         }
     }
 }
