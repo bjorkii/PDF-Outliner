@@ -272,7 +272,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 let batch_running = app.batch_import.as_ref().is_some_and(|j| j.is_running());
                 if menu_item(
                     ui,
-                    "폴더 일괄 적용…",
+                    "폴더 일괄 적용",
                     !batch_running,
                     "폴더 안 모든 PDF에 북마크 파일(CSV/Excel)을 적용합니다. 원본은 .backup으로 보존됩니다.",
                 ) {
@@ -296,7 +296,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                 }
                 if menu_item(
                     ui,
-                    "폴더 일괄 삭제…",
+                    "폴더 일괄 삭제",
                     true,
                     "선택하는 폴더 및 하위 폴더의 모든 PDF에서 OCR 정보를 일괄 삭제합니다. \
                      원본파일은 모두 백업되고, 세부 로그는 CSV에 기록됩니다.",

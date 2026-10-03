@@ -144,6 +144,8 @@ const DEFAULT_WIDTH: f32 = 560.0;
 const DEFAULT_HEIGHT: f32 = 520.0;
 /// 창을 아무리 줄여도 본문은 이만큼은 보인다.
 const BODY_MIN: f32 = 160.0;
+const MIN_WIDTH: f32 = 430.0;
+const MIN_HEIGHT: f32 = 260.0;
 
 /// 로그 보기 탭에 싣는 줄 수. 추적에 필요한 것은 늘 끝부분이다.
 const LOG_TAIL_LINES: usize = 200;
@@ -189,6 +191,12 @@ pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
         .collapsible(false)
         .resizable(true)
         .default_width(DEFAULT_WIDTH)
+        // **창을 최소 크기까지 줄인 뒤에도 위·왼쪽 변을 끌면 창이 따라 움직인다.** egui가 새 자리를
+        // 포인터에서 바로 잡고(`window.rs::move_and_resize_window`) 크기만 따로 최소값으로 자르기
+        // 때문이고, 변마다 끌림을 막는 손잡이는 없다. 최소 크기를 내용에 맞춰 못박아 **어디서 멈추는지
+        // 예측 가능하게** 두는 것이 지금 할 수 있는 전부다(2026-10-03 리포트).
+        .min_width(MIN_WIDTH)
+        .min_height(MIN_HEIGHT)
         // **pivot을 쓰지 않는다.** `CENTER_CENTER`로 두면 창이 늘 가운데를 축으로 커지고 줄어들어,
         // 왼쪽 변을 끌면 오른쪽 변까지 따라 움직이고 위쪽 변은 아예 잡히지 않는다(2026-10-03
         // 리포트). 기본 축(왼쪽 위)으로 두고, 처음 뜰 자리만 가운데로 계산해 준다.
@@ -211,19 +219,26 @@ pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
                 // 빼 두어야 그 줄이 밖으로 밀리지 않는다(2026-10-03 요청).
                 let reserved = ui.spacing().interact_size.y + 34.0;
                 let body_height = (ui.available_height() - reserved).max(BODY_MIN);
-                egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(body_height).show(ui, |ui| {
-                    match app.settings_tab {
-                        Tab::Colors => color_tab(ui, &mut app.colors),
-                        Tab::Shortcuts => shortcut_tab(ui, &mut app.shortcuts, &mut app.settings_editor),
-                        Tab::Log => log_tab(ui),
-                    }
-                });
+                // **스크롤은 탭마다 맡는다.** 로그 탭은 머리글(경로)을 스크롤 밖에 두어야 내려도
+                // 자리를 지킨다(2026-10-03 요청).
+                match app.settings_tab {
+                    Tab::Colors => scrolled(ui, body_height, |ui| color_tab(ui, &mut app.colors)),
+                    Tab::Shortcuts => scrolled(ui, body_height, |ui| {
+                        shortcut_tab(ui, &mut app.shortcuts, &mut app.settings_editor)
+                    }),
+                    Tab::Log => log_tab(ui, body_height),
+                }
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     // 탭마다 그 탭에서만 뜻이 있는 버튼을 왼쪽에 둔다.
                     match app.settings_tab {
+                        Tab::Colors => {
+                            if ui.button("색상 초기화").clicked() {
+                                app.colors = Colors::default();
+                            }
+                        }
                         Tab::Shortcuts => {
                             if ui.button("단축키 초기화").clicked() {
                                 app.shortcuts.reset_all();
@@ -235,7 +250,6 @@ pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
                                 open_logs = true;
                             }
                         }
-                        Tab::Colors => {}
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("닫기").clicked() {
@@ -260,6 +274,11 @@ pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
         app.settings_open = false;
         app.settings_editor = ShortcutEditor::default();
     }
+}
+
+/// 본문을 세로 스크롤 영역에 담는다. 내용이 짧으면 그만큼만 차지한다.
+fn scrolled(ui: &mut egui::Ui, height: f32, add: impl FnOnce(&mut egui::Ui)) {
+    egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(height).show(ui, add);
 }
 
 fn color_tab(ui: &mut egui::Ui, colors: &mut Colors) {
@@ -325,6 +344,10 @@ fn shortcut_tab(
 struct ColumnWidths {
     label: f32,
     binding: f32,
+    /// 수정·되돌리기 아이콘이 들어갈 자리. **고정된 기능에도 같은 너비를 잡아 둔다** — 그러지 않으면
+    /// 아이콘이 하나도 없는 갈래(일반)만 더 좁아져, 창을 줄일 때 그 상자만 따로 줄어든다
+    /// (2026-10-03 리포트).
+    actions: f32,
 }
 
 impl ColumnWidths {
@@ -351,7 +374,8 @@ impl ColumnWidths {
             .fold(0.0_f32, f32::max)
             // 고치는 중에 뜨는 안내 문구가 더 길다 — 그때 칸이 넓어졌다 좁아지지 않게 함께 잰다.
             .max(width("새 단축키를 누르세요…".to_string(), body));
-        Self { label, binding }
+        let actions = crate::icons::SIZE * 2.0 + ui.spacing().item_spacing.x;
+        Self { label, binding, actions }
     }
 }
 
@@ -363,12 +387,19 @@ fn shortcut_row(
     widths: ColumnWidths,
 ) {
     let row = ui.spacing().interact_size.y;
-    ui.add_sized([widths.label, row], egui::Label::new(action.label()).halign(egui::Align::LEFT));
+    // **칸 안에서 왼쪽으로 붙인다.** `add_sized`는 위젯을 칸 가운데에 놓으므로 그것만으로는 글자가
+    // 가운데로 몰린다(2026-10-03 리포트) — 왼쪽으로 쌓는 레이아웃을 깔고 그 안에 넣는다.
+    let left = |ui: &mut egui::Ui, width: f32, text: egui::RichText| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, row),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| ui.label(text),
+        );
+    };
+    left(ui, widths.label, egui::RichText::new(action.label()));
 
     let editing = editor.editing == Some(action);
-    let cell = |ui: &mut egui::Ui, text: egui::RichText| {
-        ui.add_sized([widths.binding, row], egui::Label::new(text).halign(egui::Align::LEFT));
-    };
+    let cell = |ui: &mut egui::Ui, text: egui::RichText| left(ui, widths.binding, text);
     if editing {
         cell(ui, egui::RichText::new("새 단축키를 누르세요…").color(ui.visuals().strong_text_color()));
     } else if let Some(fixed) = action.fixed_display() {
@@ -379,8 +410,11 @@ fn shortcut_row(
         cell(ui, text);
     }
 
-    ui.horizontal(|ui| {
-        // 고정된 기능은 수정 아이콘조차 보이지 않는다(md 확정).
+    ui.allocate_ui_with_layout(
+        egui::vec2(widths.actions, row),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+        // 고정된 기능은 수정 아이콘조차 보이지 않는다(md 확정). 자리는 그대로 잡아 둔다.
         if action.changeable() {
             let tip = if editing { "그만두기 (Esc)" } else { "단축키 바꾸기" };
             let icon = if editing { crate::icons::CLOSE } else { crate::icons::EDIT_SHORTCUT };
@@ -397,7 +431,8 @@ fn shortcut_row(
                 editor.rejected = None;
             }
         }
-    });
+        },
+    );
     ui.end_row();
 
     if let Some((rejected, conflict)) = editor.rejected {
@@ -411,36 +446,46 @@ fn shortcut_row(
 }
 
 /// 로그 보기 탭 — 패닉 기록과 작업 진단이 함께 쌓이는 파일(`crash_log`)의 끝부분을 보여 준다.
-fn log_tab(ui: &mut egui::Ui) {
+///
+/// **머리글(경로)은 스크롤 밖에 둔다** — 내려도 어느 파일을 보고 있는지 자리를 지켜야 한다.
+fn log_tab(ui: &mut egui::Ui, height: f32) {
     let Some(path) = crate::crash_log::log_path() else {
         ui.label("로그 파일 위치를 알 수 없습니다.");
         return;
     };
-    match std::fs::read_to_string(&path) {
-        Ok(text) if !text.trim().is_empty() => {
-            // 끝에서부터 보여 준다 — 방금 일어난 일이 맨 아래에 있다.
-            let tail: Vec<&str> = text.lines().rev().take(LOG_TAIL_LINES).collect();
-            let shown: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
-            ui.label(egui::RichText::new(format!("{} (마지막 {LOG_TAIL_LINES}줄)", path.display())));
-            ui.add_space(4.0);
-            egui::Frame::none()
-                .fill(ui.visuals().extreme_bg_color)
-                .inner_margin(egui::Margin::same(8.0))
-                .rounding(4.0)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    // 글자 크기는 툴바와 같게 — 로그는 읽으라고 띄우는 것이다.
-                    let size = egui::TextStyle::Button.resolve(ui.style()).size;
-                    ui.add(egui::Label::new(egui::RichText::new(shown).monospace().size(size)).wrap());
-                });
-        }
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) if !text.trim().is_empty() => text,
         Ok(_) => {
             ui.label("아직 기록된 것이 없습니다.");
+            return;
         }
         Err(err) => {
             ui.label(format!("로그 파일을 읽지 못했습니다: {err}"));
+            return;
         }
-    }
+    };
+    ui.label(egui::RichText::new(format!("{} (마지막 {LOG_TAIL_LINES}줄)", path.display())));
+    ui.add_space(4.0);
+
+    // 끝에서부터 보여 준다 — 방금 일어난 일이 맨 아래에 있다.
+    let tail: Vec<&str> = text.lines().rev().take(LOG_TAIL_LINES).collect();
+    let shown: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+    let header = ui.spacing().interact_size.y + 10.0;
+    egui::Frame::none()
+        .fill(ui.visuals().extreme_bg_color)
+        .inner_margin(egui::Margin::same(8.0))
+        .rounding(4.0)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::ScrollArea::vertical().auto_shrink([false, true]).max_height((height - header).max(80.0)).show(
+                ui,
+                |ui| {
+                    // 글자 크기는 툴바와 같게 — 로그는 읽으라고 띄우는 것이다.
+                    let size = egui::TextStyle::Button.resolve(ui.style()).size;
+                    ui.add(egui::Label::new(egui::RichText::new(shown).monospace().size(size)).wrap());
+                },
+            );
+        });
 }
 
 /// 이번 프레임에 눌린 조합. 보조키만 누른 것은 아직 조합이 아니다.
