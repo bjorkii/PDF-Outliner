@@ -2083,7 +2083,7 @@ impl PdfViewerApp {
             self.begin_rename();
         }
 
-        if self.bookmarks_dirty && self.shortcuts.pressed(ctx, crate::shortcuts::Action::SaveFile, self.focus_area) {
+        if self.bookmarks_dirty && self.shortcuts.pressed(ctx, crate::shortcuts::Action::SaveBookmarks, self.focus_area) {
             self.save_bookmarks_to_pdf();
         }
 

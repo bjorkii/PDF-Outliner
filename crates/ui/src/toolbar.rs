@@ -194,7 +194,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
 
             // ---- 파일
             hover_menu(ui, "file", "파일", free, RECENT_FILE_WIDTH, |ui| {
-                if menu_item(ui, "파일 열기…", true, "") {
+                if menu_item(ui, "파일 열기", true, "") {
                     if let Some(path) = crate::file_dialog::Dialog::new("열려는 PDF 파일 선택")
                         .prompt("열기")
                         .filter("PDF", &["pdf"])
@@ -204,10 +204,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                         app.request_open_file(path);
                     }
                 }
-                if menu_item(ui, &format!("저장  ({m}+S)"), app.bookmarks_dirty, "북마크를 PDF에 저장") {
-                    app.save_bookmarks_to_pdf();
-                }
-                if menu_item(ui, "파일명 변경…  (F2)", has_file, "열려 있는 파일의 이름을 바꿉니다") {
+                if menu_item(ui, "파일명 변경  (F2)", has_file, "열려 있는 파일의 이름을 바꿉니다") {
                     app.begin_rename();
                 }
                 if !app.recent_files.is_empty() {
@@ -219,7 +216,14 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
 
             // ---- 북마크
             hover_menu(ui, "bookmark", "북마크", free, MENU_WIDTH, |ui| {
-                if menu_item(ui, "CSV로 내보내기…", true, "") {
+                // 이 앱에서 손으로 저장해야 하는 것은 북마크뿐이다 — 나머지(OCR 작업, 파일명 변경,
+                // 설정)는 그때그때 파일에 쓴다. 그래서 '저장'을 파일 메뉴가 아니라 여기 둔다
+                // (2026-10-03 요청).
+                if menu_item(ui, &format!("변경사항 저장하기  ({m}+S)"), app.bookmarks_dirty, "바뀐 북마크를 PDF에 씁니다") {
+                    app.save_bookmarks_to_pdf();
+                }
+                ui.separator();
+                if menu_item(ui, "CSV로 내보내기", true, "") {
                     if let Some(path) = crate::file_dialog::Dialog::new("북마크를 저장할 CSV 파일 지정")
                         .prompt("내보내기")
                         .filter("CSV", &["csv"])
@@ -230,7 +234,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                         app.export_bookmarks_csv(path);
                     }
                 }
-                if menu_item(ui, "Excel로 내보내기…", true, "") {
+                if menu_item(ui, "Excel로 내보내기", true, "") {
                     if let Some(path) = crate::file_dialog::Dialog::new("북마크를 내보낼 엑셀 파일 지정")
                         .prompt("내보내기")
                         .filter("Excel", &["xlsx"])
@@ -242,7 +246,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     }
                 }
                 ui.separator();
-                if menu_item(ui, "CSV에서 가져오기…", true, "") {
+                if menu_item(ui, "CSV에서 가져오기", true, "") {
                     if let Some(path) = crate::file_dialog::Dialog::new("북마크를 가져올 CSV 파일 선택")
                         .prompt("가져오기")
                         .filter("CSV", &["csv"])
@@ -252,7 +256,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                         app.import_bookmarks_csv(path);
                     }
                 }
-                if menu_item(ui, "Excel에서 가져오기…", true, "") {
+                if menu_item(ui, "Excel에서 가져오기", true, "") {
                     if let Some(path) = crate::file_dialog::Dialog::new("북마크를 가져올 엑셀 파일 선택")
                         .prompt("가져오기")
                         .filter("Excel", &["xlsx"])
@@ -287,7 +291,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
 
             // ---- OCR (planning/ocr_feature_considerations.md)
             hover_menu(ui, "ocr", "OCR", free, MENU_WIDTH, |ui| {
-                if menu_item(ui, "전체 삭제…", has_file, "보이지 않는 텍스트(OCR 레이어)를 모두 지웁니다. 원본파일은 백업됩니다.") {
+                if menu_item(ui, "전체 삭제", has_file, "보이지 않는 텍스트(OCR 레이어)를 모두 지웁니다. 원본파일은 백업됩니다.") {
                     crate::ocr_dialogs::request_removal(ui.ctx(), app);
                 }
                 if menu_item(
@@ -300,14 +304,14 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     crate::ocr_dialogs::request_folder_removal(ui.ctx(), app);
                 }
                 ui.separator();
-                if menu_item(ui, "가져오기…", has_file, "hOCR 파일로부터 현재 열린 PDF로 OCR 텍스트를 가져옵니다.") {
+                if menu_item(ui, "가져오기", has_file, "hOCR 파일로부터 현재 열린 PDF로 OCR 텍스트를 가져옵니다.") {
                     crate::ocr_dialogs::request_import(ui.ctx(), app);
                 }
                 use crate::ocr_worker::ExportFormat;
-                if menu_item(ui, "hOCR로 내보내기…", has_file, "현재 열린 PDF의 OCR 정보를 hOCR 파일로 내보냅니다.") {
+                if menu_item(ui, "hOCR로 내보내기", has_file, "현재 열린 PDF의 OCR 정보를 hOCR 파일로 내보냅니다.") {
                     crate::ocr_dialogs::request_export(ui.ctx(), app, ExportFormat::Hocr);
                 }
-                if menu_item(ui, "txt로 내보내기…", has_file, "현재 열린 PDF의 각 페이지별 OCR 정보를 txt 파일로 내보냅니다.") {
+                if menu_item(ui, "txt로 내보내기", has_file, "현재 열린 PDF의 각 페이지별 OCR 정보를 txt 파일로 내보냅니다.") {
                     crate::ocr_dialogs::request_export(ui.ctx(), app, ExportFormat::Txt);
                 }
 

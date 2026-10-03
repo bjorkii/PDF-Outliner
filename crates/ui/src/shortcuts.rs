@@ -46,7 +46,6 @@ impl Category {
 /// 단축키를 붙일 수 있는 기능.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Action {
-    SaveFile,
     FocusSwitch,
     RenameFile,
     PageStep,
@@ -59,6 +58,7 @@ pub enum Action {
     AddBookmark,
     DeleteBookmark,
     RenameBookmark,
+    SaveBookmarks,
     BookmarkStep,
     Undo,
     Redo,
@@ -102,7 +102,6 @@ impl Scope {
 
 impl Action {
     pub const ALL: [Action; 18] = [
-        Action::SaveFile,
         Action::FocusSwitch,
         Action::RenameFile,
         Action::PageStep,
@@ -115,6 +114,7 @@ impl Action {
         Action::AddBookmark,
         Action::DeleteBookmark,
         Action::RenameBookmark,
+        Action::SaveBookmarks,
         Action::BookmarkStep,
         Action::Undo,
         Action::Redo,
@@ -124,7 +124,7 @@ impl Action {
 
     pub fn category(self) -> Category {
         match self {
-            Action::SaveFile | Action::FocusSwitch | Action::RenameFile => Category::General,
+            Action::FocusSwitch | Action::RenameFile => Category::General,
             Action::PageStep
             | Action::HistoryBack
             | Action::HistoryForward
@@ -135,6 +135,7 @@ impl Action {
             Action::AddBookmark
             | Action::DeleteBookmark
             | Action::RenameBookmark
+            | Action::SaveBookmarks
             | Action::BookmarkStep
             | Action::Undo
             | Action::Redo => Category::Bookmark,
@@ -154,7 +155,7 @@ impl Action {
     pub fn changeable(self) -> bool {
         !matches!(
             self,
-            Action::SaveFile
+            Action::SaveBookmarks
                 | Action::FocusSwitch
                 | Action::RenameFile
                 | Action::PageStep
@@ -172,7 +173,7 @@ impl Action {
     /// 고쳐 둔 단축키가 날아가지 않는다.
     pub fn id(self) -> &'static str {
         match self {
-            Action::SaveFile => "save_file",
+            Action::SaveBookmarks => "save_bookmarks",
             Action::FocusSwitch => "focus_switch",
             Action::RenameFile => "rename_file",
             Action::PageStep => "page_step",
@@ -195,7 +196,7 @@ impl Action {
 
     pub fn label(self) -> &'static str {
         match self {
-            Action::SaveFile => "파일 저장",
+            Action::SaveBookmarks => "북마크 저장",
             Action::FocusSwitch => "북마크-뷰어 포커스 전환",
             Action::RenameFile => "파일명 변경",
             Action::PageStep => "이전/다음 페이지",
@@ -235,7 +236,7 @@ impl Action {
         let cmd = |key| Binding { command: true, shift: false, alt: false, key };
         let plain = |key| Binding { command: false, shift: false, alt: false, key };
         match self {
-            Action::SaveFile => cmd(Key::S),
+            Action::SaveBookmarks => cmd(Key::S),
             Action::FocusSwitch => plain(Key::Tab),
             Action::RenameFile => plain(Key::F2),
             Action::PageStep => plain(Key::ArrowRight),
@@ -523,7 +524,7 @@ mod tests {
             Some(Conflict::App),
             "F2를 어디서나 듣는 기능에 주면 겹친다"
         );
-        let save = Action::SaveFile.default_binding();
+        let save = Action::SaveBookmarks.default_binding();
         assert_eq!(shortcuts.conflict(Action::RenameBookmark, save), Some(Conflict::App));
     }
 
@@ -592,7 +593,7 @@ mod tests {
         let mut shortcuts = Shortcuts::default();
 
         // 다른 기능이 쓰고 있다.
-        let save = Action::SaveFile.default_binding();
+        let save = Action::SaveBookmarks.default_binding();
         assert_eq!(shortcuts.conflict(Action::AddBookmark, save), Some(Conflict::App));
         assert_eq!(shortcuts.set(Action::AddBookmark, save), Err(Conflict::App));
 
@@ -601,7 +602,7 @@ mod tests {
         assert_eq!(shortcuts.conflict(Action::AddBookmark, esc), Some(Conflict::App));
 
         // 자기 자신과는 겹치지 않는다. 단, 고정된 기능은 그 자체로 막힌다.
-        assert_eq!(shortcuts.conflict(Action::SaveFile, save), Some(Conflict::Fixed));
+        assert_eq!(shortcuts.conflict(Action::SaveBookmarks, save), Some(Conflict::Fixed));
         let add = Action::AddBookmark.default_binding();
         assert_eq!(shortcuts.conflict(Action::AddBookmark, add), None);
     }

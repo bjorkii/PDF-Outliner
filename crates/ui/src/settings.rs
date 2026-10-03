@@ -140,8 +140,10 @@ pub const COLOR_ROWS: [ColorRow; 6] = [
     },
 ];
 
-/// 창 안을 스크롤하는 영역의 높이 상한. 버튼 줄은 늘 그 아래에 보인다.
-const BODY_MAX: f32 = 420.0;
+const DEFAULT_WIDTH: f32 = 560.0;
+const DEFAULT_HEIGHT: f32 = 520.0;
+/// 창을 아무리 줄여도 본문은 이만큼은 보인다.
+const BODY_MIN: f32 = 160.0;
 
 /// 로그 보기 탭에 싣는 줄 수. 추적에 필요한 것은 늘 끝부분이다.
 const LOG_TAIL_LINES: usize = 200;
@@ -186,9 +188,12 @@ pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
     egui::Window::new("설정")
         .collapsible(false)
         .resizable(true)
-        .default_width(520.0)
-        .pivot(egui::Align2::CENTER_CENTER)
-        .default_pos(ctx.screen_rect().center())
+        .default_width(DEFAULT_WIDTH)
+        // **pivot을 쓰지 않는다.** `CENTER_CENTER`로 두면 창이 늘 가운데를 축으로 커지고 줄어들어,
+        // 왼쪽 변을 끌면 오른쪽 변까지 따라 움직이고 위쪽 변은 아예 잡히지 않는다(2026-10-03
+        // 리포트). 기본 축(왼쪽 위)으로 두고, 처음 뜰 자리만 가운데로 계산해 준다.
+        .default_pos(ctx.screen_rect().center() - egui::vec2(DEFAULT_WIDTH, DEFAULT_HEIGHT) / 2.0)
+        .default_height(DEFAULT_HEIGHT)
         .show(ctx, |ui| {
             crate::app::window_body(ui, |ui| {
                 crate::tabs::bar(
@@ -202,7 +207,11 @@ pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
                     ],
                 );
                 ui.add_space(10.0);
-                egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(BODY_MAX).show(ui, |ui| {
+                // 창을 세로로 늘리면 본문이 그만큼 늘어난다. 아래 버튼 줄과 구분선이 차지할 몫을
+                // 빼 두어야 그 줄이 밖으로 밀리지 않는다(2026-10-03 요청).
+                let reserved = ui.spacing().interact_size.y + 34.0;
+                let body_height = (ui.available_height() - reserved).max(BODY_MIN);
+                egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(body_height).show(ui, |ui| {
                     match app.settings_tab {
                         Tab::Colors => color_tab(ui, &mut app.colors),
                         Tab::Shortcuts => shortcut_tab(ui, &mut app.shortcuts, &mut app.settings_editor),
@@ -285,6 +294,10 @@ fn shortcut_tab(
         }
     }
 
+    // **갈래마다 표를 따로 그리면 칸 너비가 제각각이 된다**(2026-10-03 리포트). 가장 긴 이름과 가장
+    // 긴 단축키를 미리 재어 모든 갈래가 같은 너비를 쓰게 한다.
+    let widths = ColumnWidths::measure(ui, shortcuts);
+
     for (index, category) in Category::ALL.iter().enumerate() {
         if index > 0 {
             ui.add_space(14.0);
@@ -300,10 +313,45 @@ fn shortcut_tab(
                 ui.set_width(ui.available_width());
                 egui::Grid::new(("shortcut_rows", index)).num_columns(3).spacing([14.0, 7.0]).show(ui, |ui| {
                     for action in Action::ALL.iter().filter(|a| a.category() == *category) {
-                        shortcut_row(ui, *action, shortcuts, editor);
+                        shortcut_row(ui, *action, shortcuts, editor, widths);
                     }
                 });
             });
+    }
+}
+
+/// 갈래가 달라도 칸이 어긋나지 않게, 가장 긴 것을 미리 재어 둔 너비.
+#[derive(Debug, Clone, Copy)]
+struct ColumnWidths {
+    label: f32,
+    binding: f32,
+}
+
+impl ColumnWidths {
+    fn measure(ui: &egui::Ui, shortcuts: &crate::shortcuts::Shortcuts) -> Self {
+        use crate::shortcuts::Action;
+        let body = egui::TextStyle::Body.resolve(ui.style());
+        let mono = egui::TextStyle::Monospace.resolve(ui.style());
+        let width = |text: String, font: egui::FontId| {
+            ui.fonts(|fonts| fonts.layout_no_wrap(text, font, egui::Color32::WHITE).size().x)
+        };
+        let label = Action::ALL
+            .iter()
+            .map(|action| width(action.label().to_string(), body.clone()))
+            .fold(0.0_f32, f32::max);
+        let binding = Action::ALL
+            .iter()
+            .map(|action| {
+                let text = action.fixed_display().map_or_else(
+                    || shortcuts.get(*action).display(),
+                    |fixed| fixed.to_string(),
+                );
+                width(text, mono.clone())
+            })
+            .fold(0.0_f32, f32::max)
+            // 고치는 중에 뜨는 안내 문구가 더 길다 — 그때 칸이 넓어졌다 좁아지지 않게 함께 잰다.
+            .max(width("새 단축키를 누르세요…".to_string(), body));
+        Self { label, binding }
     }
 }
 
@@ -312,18 +360,23 @@ fn shortcut_row(
     action: crate::shortcuts::Action,
     shortcuts: &mut crate::shortcuts::Shortcuts,
     editor: &mut ShortcutEditor,
+    widths: ColumnWidths,
 ) {
-    ui.label(action.label());
+    let row = ui.spacing().interact_size.y;
+    ui.add_sized([widths.label, row], egui::Label::new(action.label()).halign(egui::Align::LEFT));
 
     let editing = editor.editing == Some(action);
+    let cell = |ui: &mut egui::Ui, text: egui::RichText| {
+        ui.add_sized([widths.binding, row], egui::Label::new(text).halign(egui::Align::LEFT));
+    };
     if editing {
-        ui.colored_label(ui.visuals().strong_text_color(), "새 단축키를 누르세요…");
+        cell(ui, egui::RichText::new("새 단축키를 누르세요…").color(ui.visuals().strong_text_color()));
     } else if let Some(fixed) = action.fixed_display() {
-        ui.label(egui::RichText::new(fixed).monospace());
+        cell(ui, egui::RichText::new(fixed).monospace());
     } else {
         let text = egui::RichText::new(shortcuts.get(action).display()).monospace();
         let text = if shortcuts.is_default(action) { text } else { text.strong() };
-        ui.label(text);
+        cell(ui, text);
     }
 
     ui.horizontal(|ui| {
@@ -368,11 +421,7 @@ fn log_tab(ui: &mut egui::Ui) {
             // 끝에서부터 보여 준다 — 방금 일어난 일이 맨 아래에 있다.
             let tail: Vec<&str> = text.lines().rev().take(LOG_TAIL_LINES).collect();
             let shown: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
-            ui.label(
-                egui::RichText::new(format!("{} (마지막 {LOG_TAIL_LINES}줄까지)", path.display()))
-                    .color(ui.visuals().weak_text_color())
-                    .small(),
-            );
+            ui.label(egui::RichText::new(format!("{} (마지막 {LOG_TAIL_LINES}줄)", path.display())));
             ui.add_space(4.0);
             egui::Frame::none()
                 .fill(ui.visuals().extreme_bg_color)
@@ -380,7 +429,9 @@ fn log_tab(ui: &mut egui::Ui) {
                 .rounding(4.0)
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.add(egui::Label::new(egui::RichText::new(shown).monospace().small()).wrap());
+                    // 글자 크기는 툴바와 같게 — 로그는 읽으라고 띄우는 것이다.
+                    let size = egui::TextStyle::Button.resolve(ui.style()).size;
+                    ui.add(egui::Label::new(egui::RichText::new(shown).monospace().size(size)).wrap());
                 });
         }
         Ok(_) => {
