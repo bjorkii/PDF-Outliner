@@ -24,9 +24,10 @@ pub const NEXT_HIT: char = '\u{e02e}'; // arrow-circle-right
 pub const DOCKED: char = '\u{e65c}'; // push-pin-simple
 pub const FLOATING: char = '\u{e3e2}'; // push-pin
 pub const SETTINGS: char = '\u{e270}'; // gear
-/// 설정 창의 단축키 탭에서 쓴다 — 그 화면은 아직 만드는 중이다.
-#[allow(dead_code)]
 pub const EDIT_SHORTCUT: char = '\u{e3b4}'; // pencil-simple
+pub const TAB_COLORS: char = '\u{e6c8}'; // palette
+pub const TAB_SHORTCUTS: char = '\u{e2d8}'; // keyboard
+pub const TAB_LOG: char = '\u{e5d4}'; // wrench
 pub const TAB_BOOKMARKS: char = '\u{e0e4}'; // book-bookmark
 pub const TAB_THUMBNAILS: char = '\u{e0a8}'; // article
 pub const ADD: char = '\u{ed4a}'; // plus-square
@@ -61,6 +62,9 @@ const NAMED: &[(&str, char, &str)] = &[
     ("UNDO", UNDO, "arrow-arc-left"),
     ("REDO", REDO, "arrow-arc-right"),
     ("CLOSE", CLOSE, "x"),
+    ("TAB_COLORS", TAB_COLORS, "palette"),
+    ("TAB_SHORTCUTS", TAB_SHORTCUTS, "keyboard"),
+    ("TAB_LOG", TAB_LOG, "wrench"),
     ("SCROLL_MODE", SCROLL_MODE, "scroll-mode"),
 ];
 

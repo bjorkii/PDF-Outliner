@@ -503,10 +503,10 @@ fn zoom_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     // 전에는 "줌이 100%인가"로 갈랐는데, 배율이 실제 크기 기준이 되면서 100%와 폭 맞춤이
     // 더는 같은 뜻이 아니다. 수동 줌 상태에서는 쪽 맞춤으로 돌아가는 길을 권한다.
     if app.viewport.fit == FitMode::Page {
-        if crate::icons::button(ui, crate::icons::FIT_WIDTH, "폭 맞춤: 페이지 폭을 뷰어 폭에").clicked() {
+        if crate::icons::button(ui, crate::icons::FIT_WIDTH, "폭 맞춤").clicked() {
             app.viewport.fit = FitMode::Width;
         }
-    } else if crate::icons::button(ui, crate::icons::FIT_PAGE, "쪽 맞춤: 페이지 전체가 보이게").clicked() {
+    } else if crate::icons::button(ui, crate::icons::FIT_PAGE, "쪽 맞춤").clicked() {
         app.viewport.fit = FitMode::Page;
     }
 
@@ -514,9 +514,9 @@ fn zoom_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     // 위와 달리 "현재 모드"를 아이콘으로 보여준다(사용자 명세: 연속 모드에서는
     // 연속 스크롤 아이콘, 다시 누르거나 C를 누르면 쪽 단위 아이콘으로 변경).
     let mode_response = if app.continuous_scroll {
-        crate::icons::button(ui, crate::icons::SCROLL_MODE, "연속 스크롤 보기 중. 누르면 쪽 단위 (C)")
+        crate::icons::button(ui, crate::icons::SCROLL_MODE, "스크롤 보기(C)")
     } else {
-        crate::icons::button(ui, crate::icons::PAGE_MODE, "쪽 단위 보기 중. 누르면 연속 스크롤 (C)")
+        crate::icons::button(ui, crate::icons::PAGE_MODE, "페이지 단위 보기(C)")
     };
     if mode_response.clicked() {
         app.toggle_continuous_scroll();

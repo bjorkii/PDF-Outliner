@@ -2060,12 +2060,13 @@ impl PdfViewerApp {
         // 다른 텍스트 필드에 포커스가 있어도(Cmd+C/Cmd+F와 같은 이유로) 항상 동작해야
         // 하므로 게이트 밖에 둔다. 저장할 변경사항이 없으면(bookmarks_dirty == false)
         // 아무 일도 안 한다 — 툴바 "저장" 버튼의 활성/비활성 조건과 동일하게.
-        // F2 — 사이드바에 포커스가 있으면 sidebar.rs가 북마크 제목 수정으로 쓰고, 그 밖에는
-        // 파일명 변경 창을 연다(같은 키를 포커스 영역으로 나눠 쓴다).
+        // 파일명 변경 — **사이드바 밖**에서만 듣는다(`Scope::Viewer`). 사이드바가 포커스면
+        // sidebar.rs가 같은 자리에서 북마크 제목 수정(`Action::RenameBookmark`)으로 쓴다. 둘은
+        // 서로 다른 영역에서만 듣기 때문에 기본값이 같은 F2라도 겹치지 않는다.
         if !ctx.wants_keyboard_input()
             && self.focus_area != FocusArea::Sidebar
             && self.rename_input.is_none()
-            && self.shortcuts.pressed(ctx, crate::shortcuts::Action::Rename)
+            && self.shortcuts.pressed(ctx, crate::shortcuts::Action::RenameFile)
         {
             self.begin_rename();
         }

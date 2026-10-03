@@ -143,12 +143,16 @@ pub const COLOR_ROWS: [ColorRow; 6] = [
 /// 창 안을 스크롤하는 영역의 높이 상한. 버튼 줄은 늘 그 아래에 보인다.
 const BODY_MAX: f32 = 420.0;
 
+/// 로그 보기 탭에 싣는 줄 수. 추적에 필요한 것은 늘 끝부분이다.
+const LOG_TAIL_LINES: usize = 200;
+
 /// 설정 창에서 보고 있는 탭.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
     #[default]
     Colors,
     Shortcuts,
+    Log,
 }
 
 /// 단축키를 고치는 중인 기능. 그 줄의 칸이 입력을 기다리는 상태가 된다.
@@ -192,8 +196,9 @@ pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
                     "settings_tabs",
                     &mut app.settings_tab,
                     &[
-                        (Tab::Colors, crate::icons::SETTINGS, "색상 지정"),
-                        (Tab::Shortcuts, crate::icons::EDIT_SHORTCUT, "단축키"),
+                        (Tab::Colors, crate::icons::TAB_COLORS, "색상 지정"),
+                        (Tab::Shortcuts, crate::icons::TAB_SHORTCUTS, "단축키"),
+                        (Tab::Log, crate::icons::TAB_LOG, "로그 보기"),
                     ],
                 );
                 ui.add_space(10.0);
@@ -201,18 +206,27 @@ pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
                     match app.settings_tab {
                         Tab::Colors => color_tab(ui, &mut app.colors),
                         Tab::Shortcuts => shortcut_tab(ui, &mut app.shortcuts, &mut app.settings_editor),
+                        Tab::Log => log_tab(ui),
                     }
                 });
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button("로그파일 위치 열기").clicked() {
-                        open_logs = true;
-                    }
-                    if app.settings_tab == Tab::Shortcuts && ui.button("단축키 모두 되돌리기").clicked() {
-                        app.shortcuts.reset_all();
-                        app.settings_editor = ShortcutEditor::default();
+                    // 탭마다 그 탭에서만 뜻이 있는 버튼을 왼쪽에 둔다.
+                    match app.settings_tab {
+                        Tab::Shortcuts => {
+                            if ui.button("단축키 초기화").clicked() {
+                                app.shortcuts.reset_all();
+                                app.settings_editor = ShortcutEditor::default();
+                            }
+                        }
+                        Tab::Log => {
+                            if ui.button("로그파일 위치 열기").clicked() {
+                                open_logs = true;
+                            }
+                        }
+                        Tab::Colors => {}
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("닫기").clicked() {
@@ -286,8 +300,14 @@ fn shortcut_tab(
                 let tip = if editing { "그만두기 (Esc)" } else { "단축키 바꾸기" };
                 let icon = if editing { crate::icons::CLOSE } else { crate::icons::EDIT_SHORTCUT };
                 if crate::icons::button(ui, icon, tip).clicked() {
-                    editor.editing = (!editing).then_some(action);
-                    editor.rejected = None;
+                    if action.changeable() {
+                        editor.editing = (!editing).then_some(action);
+                        editor.rejected = None;
+                    } else {
+                        // 바꿀 수 없는 기능 — 입력을 받지 않고 그 자리에서 이유만 말한다.
+                        editor.editing = None;
+                        editor.rejected = Some((action, crate::shortcuts::Conflict::Fixed));
+                    }
                 }
                 // 되돌리기는 **고친 줄에만** 보인다 — 늘 두면 줄마다 아이콘이 둘씩 늘어선다.
                 if !shortcuts.is_default(action)
@@ -310,13 +330,41 @@ fn shortcut_tab(
             }
         }
     });
-    ui.add_space(8.0);
-    bullet(ui, "굵게 표시된 것이 바꾼 단축키입니다.");
-    bullet(ui, "Tab·Esc·Enter·방향키는 앱이 쓰는 키라 바꿀 수 없습니다.");
 }
 
-fn bullet(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(format!("• {text}")).color(ui.visuals().weak_text_color()));
+/// 로그 보기 탭 — 패닉 기록과 작업 진단이 함께 쌓이는 파일(`crash_log`)의 끝부분을 보여 준다.
+fn log_tab(ui: &mut egui::Ui) {
+    let Some(path) = crate::crash_log::log_path() else {
+        ui.label("로그 파일 위치를 알 수 없습니다.");
+        return;
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) if !text.trim().is_empty() => {
+            // 끝에서부터 보여 준다 — 방금 일어난 일이 맨 아래에 있다.
+            let tail: Vec<&str> = text.lines().rev().take(LOG_TAIL_LINES).collect();
+            let shown: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+            ui.label(
+                egui::RichText::new(format!("{} (마지막 {LOG_TAIL_LINES}줄까지)", path.display()))
+                    .color(ui.visuals().weak_text_color())
+                    .small(),
+            );
+            ui.add_space(4.0);
+            egui::Frame::none()
+                .fill(ui.visuals().extreme_bg_color)
+                .inner_margin(egui::Margin::same(8.0))
+                .rounding(4.0)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.add(egui::Label::new(egui::RichText::new(shown).monospace().small()).wrap());
+                });
+        }
+        Ok(_) => {
+            ui.label("아직 기록된 것이 없습니다.");
+        }
+        Err(err) => {
+            ui.label(format!("로그 파일을 읽지 못했습니다: {err}"));
+        }
+    }
 }
 
 /// 이번 프레임에 눌린 조합. 보조키만 누른 것은 아직 조합이 아니다.
