@@ -379,15 +379,6 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     app.settings_open = true;
                 }
                 ui.separator();
-                // 단축키 안내 — 툴바 맨 오른쪽(2026-09-15 요청). on_hover_ui는 egui 기본 지연
-                // (tooltip_delay 0.5초 + 마우스가 멈출 때까지 대기)이 있어 1~2초 뒤에야 떴으므로,
-                // 마우스가 올라와 있는 동안 show_tooltip_ui를 직접 불러 즉시 띄운다. 앱 전체
-                // tooltip_delay는 건드리지 않아 다른 버튼 툴팁은 그대로다.
-                let shortcuts = ui.add(egui::Label::new("단축키").sense(egui::Sense::hover()));
-                if shortcuts.hovered() {
-                    shortcuts.show_tooltip_ui(show_shortcut_help);
-                }
-                ui.separator();
                 if plan.search {
                     search_group(ui, app);
                 }
@@ -424,8 +415,8 @@ fn fit_groups(ui: &egui::Ui, app: &PdfViewerApp) -> Plan {
     let separator = separator_width(ui);
     let (zoom, pages, search) = (zoom_width(ui) + separator, page_width(ui, app), search_width(ui));
     // 단축키 라벨·설정 버튼과 그 구분선들은 항상 남긴다(작고, 접을 곳도 마땅치 않다).
-    let mut budget =
-        ui.available_width() - label_width(ui, "단축키") - button_width(ui, "설정") - separator * 2.0;
+    // 설정 아이콘과 그 구분선은 늘 남긴다(작고, 접을 곳도 마땅치 않다).
+    let mut budget = ui.available_width() - icon_button_width(ui) - separator;
     if budget >= zoom + pages + search {
         return Plan { zoom: true, pages: true, search: true };
     }
@@ -659,33 +650,6 @@ fn overflow_menu(ui: &mut egui::Ui, app: &mut PdfViewerApp, plan: Plan) {
 /// 단축키 안내 툴팁 내용. \t(tab)만으로는 실제 탭 스톱 정렬이 안 되고 각 줄의 키 텍스트
 /// 길이만큼 들쑥날쑥해진다(egui는 tab을 "고정폭만큼 더 전진"으로만 처리, 열 정렬 개념이 없음) —
 /// 표 형태 정렬은 egui::Grid로 컬럼 자체를 나눠야 나온다.
-fn show_shortcut_help(ui: &mut egui::Ui) {
-    let m = modifier_label();
-    egui::Grid::new("shortcut_help_grid")
-        .num_columns(2)
-        .spacing([16.0, 8.0])
-        .show(ui, |ui| {
-            for (key, desc) in [
-                (format!("{m}+B"), "북마크 추가"),
-                // 같은 키를 포커스 영역으로 나눠 쓴다(app.rs의 F2 처리 참고).
-                ("F2".to_string(), "북마크 수정 (사이드바) / 파일명 변경 (그 외)"),
-                ("Delete".to_string(), "북마크 삭제"),
-                (format!("{m}+S"), "북마크 저장"),
-                (format!("{m}+F"), "내용 검색"),
-                ("↑ / ↓".to_string(), "검색 결과 이동 (검색 목록 포커스 시)"),
-                (format!("{m}+["), "이전 화면"),
-                (format!("{m}+]"), "다음 화면"),
-                ("Tab".to_string(), "북마크↔뷰어 (검색 목록에서는 직전 영역으로)"),
-                ("C".to_string(), "쪽 단위/연속 스크롤 전환"),
-                ("우클릭 드래그".to_string(), "화면 이동"),
-            ] {
-                ui.label(key);
-                ui.label(desc);
-                ui.end_row();
-            }
-        });
-}
-
 /// 파일 메뉴 안의 "최근 파일" 목록 항목들. 팝업(Area)은 `hover_menu`가 이미 띄워 두었으므로
 /// 여기서는 항목만 그린다. 항목은 파일명(위 줄) + 상위 폴더 경로(아래 줄) 두 줄짜리 버튼이다 —
 /// 스타일이 다른 두 줄을 한 버튼에 넣으려면 egui::Button이 받는 WidgetText로는 안 되고

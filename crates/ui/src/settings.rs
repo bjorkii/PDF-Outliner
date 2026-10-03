@@ -140,54 +140,79 @@ pub const COLOR_ROWS: [ColorRow; 6] = [
     },
 ];
 
-/// 색 목록이 이보다 길어지면 그 안에서 스크롤한다. 버튼 줄은 늘 그 아래에 보인다.
-const COLOR_LIST_MAX: f32 = 420.0;
+/// 창 안을 스크롤하는 영역의 높이 상한. 버튼 줄은 늘 그 아래에 보인다.
+const BODY_MAX: f32 = 420.0;
+
+/// 설정 창에서 보고 있는 탭.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
+    Colors,
+    Shortcuts,
+}
+
+/// 단축키를 고치는 중인 기능. 그 줄의 칸이 입력을 기다리는 상태가 된다.
+#[derive(Debug, Clone, Default)]
+pub struct ShortcutEditor {
+    pub editing: Option<crate::shortcuts::Action>,
+    /// 방금 받아들이지 못한 조합과 그 이유 — 고치는 줄 아래에 띄운다.
+    pub rejected: Option<(crate::shortcuts::Action, crate::shortcuts::Conflict)>,
+}
 
 /// 설정 창. 다른 기능 창과 같은 규칙이다 — 끌어서 옮길 수 있고, Esc로 닫히고, 본문에 여백이 있다.
 ///
-/// **아래 버튼 줄은 스크롤과 무관하게 고정한다**(2026-09-30 요청). 색 항목이 늘어 본문이 창을
-/// 넘치면 그 줄이 화면 밖으로 밀려 누를 수 없게 된다 — 북마크 폴더 일괄 화면에서 같은 일이
-/// 있었다.
+/// **아래 버튼 줄은 스크롤과 무관하게 고정한다**(2026-09-30 요청). 항목이 늘어 본문이 창을 넘치면
+/// 그 줄이 화면 밖으로 밀려 누를 수 없게 된다 — 북마크 폴더 일괄 화면에서 같은 일이 있었다.
 pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
     if !app.settings_open {
         return;
     }
+    // 단축키를 받는 중에는 Esc도 그 입력의 하나다 — 창을 닫지 않고 고치기만 그만둔다.
     if crate::app::escape_to_close(ctx) {
-        app.settings_open = false;
-        return;
+        // 고치는 중이면 그 입력만 그만둔다. 여기서 `return`하면 창이 한 프레임 사라진다.
+        if app.settings_editor.editing.take().is_some() {
+            app.settings_editor.rejected = None;
+        } else {
+            app.settings_open = false;
+            return;
+        }
     }
     let mut close = false;
     let mut open_logs = false;
     egui::Window::new("설정")
         .collapsible(false)
         .resizable(true)
-        .default_width(460.0)
+        .default_width(520.0)
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.screen_rect().center())
         .show(ctx, |ui| {
             crate::app::window_body(ui, |ui| {
-                // 버튼 줄을 `TopBottomPanel`로 붙였더니 창 아래에 빈 자리가 크게 생겼다
-                // (2026-09-30 리포트). 스크롤 영역이 `auto_shrink`를 끈 채 남는 높이를 모두
-                // 차지하고, 패널은 그 아래 맨 끝에 놓였기 때문이다. 세로로는 내용만큼만 쓰게 하고
-                // (`max_height`로 상한만 둔다) 버튼 줄은 그냥 뒤에 그린다 — 내용이 상한을 넘으면
-                // 스크롤 영역 안에서만 넘치므로 버튼은 늘 보인다.
-                egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(COLOR_LIST_MAX).show(
+                crate::tabs::bar(
                     ui,
-                    |ui| {
-                        for (index, row) in COLOR_ROWS.iter().enumerate() {
-                            if index > 0 {
-                                ui.add_space(10.0);
-                            }
-                            color_row(ui, &mut app.colors, row);
-                        }
-                    },
+                    "settings_tabs",
+                    &mut app.settings_tab,
+                    &[
+                        (Tab::Colors, crate::icons::SETTINGS, "색상 지정"),
+                        (Tab::Shortcuts, crate::icons::EDIT_SHORTCUT, "단축키"),
+                    ],
                 );
+                ui.add_space(10.0);
+                egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(BODY_MAX).show(ui, |ui| {
+                    match app.settings_tab {
+                        Tab::Colors => color_tab(ui, &mut app.colors),
+                        Tab::Shortcuts => shortcut_tab(ui, &mut app.shortcuts, &mut app.settings_editor),
+                    }
+                });
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.button("로그파일 위치 열기").clicked() {
                         open_logs = true;
+                    }
+                    if app.settings_tab == Tab::Shortcuts && ui.button("단축키 모두 되돌리기").clicked() {
+                        app.shortcuts.reset_all();
+                        app.settings_editor = ShortcutEditor::default();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("닫기").clicked() {
@@ -210,7 +235,105 @@ pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
     }
     if close {
         app.settings_open = false;
+        app.settings_editor = ShortcutEditor::default();
     }
+}
+
+fn color_tab(ui: &mut egui::Ui, colors: &mut Colors) {
+    for (index, row) in COLOR_ROWS.iter().enumerate() {
+        if index > 0 {
+            ui.add_space(10.0);
+        }
+        color_row(ui, colors, row);
+    }
+}
+
+/// 단축키 탭 — 기능 / 단축키 / 수정 세 칸.
+fn shortcut_tab(
+    ui: &mut egui::Ui,
+    shortcuts: &mut crate::shortcuts::Shortcuts,
+    editor: &mut ShortcutEditor,
+) {
+    use crate::shortcuts::Action;
+
+    // 고치는 중이면 이번 프레임에 들어온 키를 먼저 집어 든다. 그려 놓고 받으면 한 프레임 늦는다.
+    if let Some(action) = editor.editing {
+        if let Some(binding) = pressed_combination(ui.ctx()) {
+            match shortcuts.set(action, binding) {
+                Ok(()) => {
+                    editor.editing = None;
+                    editor.rejected = None;
+                }
+                Err(conflict) => editor.rejected = Some((action, conflict)),
+            }
+        }
+    }
+
+    egui::Grid::new("shortcut_rows").num_columns(3).spacing([14.0, 8.0]).striped(true).show(ui, |ui| {
+        for action in Action::ALL {
+            ui.label(action.label()).on_hover_text(action.hint());
+
+            let editing = editor.editing == Some(action);
+            if editing {
+                ui.colored_label(ui.visuals().strong_text_color(), "새 단축키를 누르세요…");
+            } else {
+                let text = egui::RichText::new(shortcuts.get(action).display()).monospace();
+                let text = if shortcuts.is_default(action) { text } else { text.strong() };
+                ui.label(text);
+            }
+
+            ui.horizontal(|ui| {
+                let tip = if editing { "그만두기 (Esc)" } else { "단축키 바꾸기" };
+                let icon = if editing { crate::icons::CLOSE } else { crate::icons::EDIT_SHORTCUT };
+                if crate::icons::button(ui, icon, tip).clicked() {
+                    editor.editing = (!editing).then_some(action);
+                    editor.rejected = None;
+                }
+                // 되돌리기는 **고친 줄에만** 보인다 — 늘 두면 줄마다 아이콘이 둘씩 늘어선다.
+                if !shortcuts.is_default(action)
+                    && crate::icons::button(ui, crate::icons::UNDO, "기본값으로 되돌리기").clicked()
+                {
+                    shortcuts.reset(action);
+                    editor.editing = None;
+                    editor.rejected = None;
+                }
+            });
+            ui.end_row();
+
+            if let Some((rejected, conflict)) = editor.rejected {
+                if rejected == action {
+                    ui.label("");
+                    ui.colored_label(ui.visuals().error_fg_color, conflict.message());
+                    ui.label("");
+                    ui.end_row();
+                }
+            }
+        }
+    });
+    ui.add_space(8.0);
+    bullet(ui, "굵게 표시된 것이 바꾼 단축키입니다.");
+    bullet(ui, "Tab·Esc·Enter·방향키는 앱이 쓰는 키라 바꿀 수 없습니다.");
+}
+
+fn bullet(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(format!("• {text}")).color(ui.visuals().weak_text_color()));
+}
+
+/// 이번 프레임에 눌린 조합. 보조키만 누른 것은 아직 조합이 아니다.
+fn pressed_combination(ctx: &egui::Context) -> Option<crate::shortcuts::Binding> {
+    ctx.input(|i| {
+        i.events.iter().find_map(|event| match event {
+            egui::Event::Key { key, pressed: true, modifiers, repeat: false, .. } => {
+                Some(crate::shortcuts::Binding {
+                    command: modifiers.command,
+                    shift: modifiers.shift,
+                    alt: modifiers.alt,
+                    key: *key,
+                })
+            }
+            _ => None,
+        })
+    })
 }
 
 /// 항목 한 줄: 이름 + 계열 단추들 + 지금 색이 어떻게 보이는지.
