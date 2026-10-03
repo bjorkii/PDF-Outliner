@@ -146,6 +146,8 @@ const DEFAULT_HEIGHT: f32 = 520.0;
 const BODY_MIN: f32 = 160.0;
 const MIN_WIDTH: f32 = 430.0;
 const MIN_HEIGHT: f32 = 260.0;
+/// 본문 아래에 들어가는 것들이 차지하는 높이 — 띄움 10 + 구분선 6 + 띄움 6 + 여유.
+const BUTTON_ROW_EXTRA: f32 = 34.0;
 
 /// 로그 보기 탭에 싣는 줄 수. 추적에 필요한 것은 늘 끝부분이다.
 const LOG_TAIL_LINES: usize = 200;
@@ -215,18 +217,31 @@ pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
                     ],
                 );
                 ui.add_space(10.0);
-                // 창을 세로로 늘리면 본문이 그만큼 늘어난다. 아래 버튼 줄과 구분선이 차지할 몫을
-                // 빼 두어야 그 줄이 밖으로 밀리지 않는다(2026-10-03 요청).
-                let reserved = ui.spacing().interact_size.y + 34.0;
+                // **본문이 차지할 높이를 못박는다.**
+                //
+                // 내용에 맡기면 창이 내용을 따라 자란다. egui의 `Resize`는 요청받은 크기보다 내용이
+                // 크면 그만큼 커지고 그 크기를 기억하므로, 긴 탭(로그)을 한 번 열면 창이 화면 높이까지
+                // 늘어나 아래 버튼 줄이 잘리고, 탭을 바꿔도 그 크기가 남았다(2026-10-03 리포트).
+                //
+                // 자리를 먼저 정확히 잡고 그 안에서만 그리면 내용이 창을 밀지 못한다. 창을 세로로
+                // 늘리면 이 값이 커지므로 본문도 함께 늘어난다.
+                let reserved = ui.spacing().interact_size.y + BUTTON_ROW_EXTRA;
                 let body_height = (ui.available_height() - reserved).max(BODY_MIN);
+                let (body_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(ui.available_width(), body_height), egui::Sense::hover());
+                let mut body = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(body_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
                 // **스크롤은 탭마다 맡는다.** 로그 탭은 머리글(경로)을 스크롤 밖에 두어야 내려도
                 // 자리를 지킨다(2026-10-03 요청).
                 match app.settings_tab {
-                    Tab::Colors => scrolled(ui, body_height, |ui| color_tab(ui, &mut app.colors)),
-                    Tab::Shortcuts => scrolled(ui, body_height, |ui| {
+                    Tab::Colors => scrolled(&mut body, |ui| color_tab(ui, &mut app.colors)),
+                    Tab::Shortcuts => scrolled(&mut body, |ui| {
                         shortcut_tab(ui, &mut app.shortcuts, &mut app.settings_editor)
                     }),
-                    Tab::Log => log_tab(ui, body_height),
+                    Tab::Log => log_tab(&mut body),
                 }
                 ui.add_space(10.0);
                 ui.separator();
@@ -276,9 +291,10 @@ pub fn show(ctx: &egui::Context, app: &mut crate::app::PdfViewerApp) {
     }
 }
 
-/// 본문을 세로 스크롤 영역에 담는다. 내용이 짧으면 그만큼만 차지한다.
-fn scrolled(ui: &mut egui::Ui, height: f32, add: impl FnOnce(&mut egui::Ui)) {
-    egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(height).show(ui, add);
+/// 본문을 세로 스크롤 영역에 담는다. **잡아 둔 자리를 그대로 채운다** — 줄어들게 두면 내용이 짧은
+/// 탭으로 바꿀 때 창이 따라 줄었다가 다시 늘어난다.
+fn scrolled(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, add);
 }
 
 fn color_tab(ui: &mut egui::Ui, colors: &mut Colors) {
@@ -387,19 +403,22 @@ fn shortcut_row(
     widths: ColumnWidths,
 ) {
     let row = ui.spacing().interact_size.y;
-    // **칸 안에서 왼쪽으로 붙인다.** `add_sized`는 위젯을 칸 가운데에 놓으므로 그것만으로는 글자가
-    // 가운데로 몰린다(2026-10-03 리포트) — 왼쪽으로 쌓는 레이아웃을 깔고 그 안에 넣는다.
-    let left = |ui: &mut egui::Ui, width: f32, text: egui::RichText| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(width, row),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| ui.label(text),
-        );
+    // **칸을 정확히 그 폭으로 잡는다.** `allocate_ui_with_layout`은 요청한 크기가 아니라 **내용
+    // 크기만큼** 자리를 잡아서(`Ui::allocate_ui_with_layout_dyn`가 `child.min_rect()`를 할당한다),
+    // 아이콘이 없는 갈래만 좁아졌다(실측: 일반 186 대 나머지 259). `allocate_exact_size`로 자리를
+    // 먼저 못박고 그 안에 왼쪽으로 쌓는다 — `add_sized`나 `put`은 위젯을 가운데에 놓는다.
+    let cell_at = |ui: &mut egui::Ui, width: f32| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, row), egui::Sense::hover());
+        ui.new_child(
+            egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)),
+        )
     };
-    left(ui, widths.label, egui::RichText::new(action.label()));
+    cell_at(ui, widths.label).label(action.label());
 
     let editing = editor.editing == Some(action);
-    let cell = |ui: &mut egui::Ui, text: egui::RichText| left(ui, widths.binding, text);
+    let cell = |ui: &mut egui::Ui, text: egui::RichText| {
+        cell_at(ui, widths.binding).label(text);
+    };
     if editing {
         cell(ui, egui::RichText::new("새 단축키를 누르세요…").color(ui.visuals().strong_text_color()));
     } else if let Some(fixed) = action.fixed_display() {
@@ -410,11 +429,9 @@ fn shortcut_row(
         cell(ui, text);
     }
 
-    ui.allocate_ui_with_layout(
-        egui::vec2(widths.actions, row),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
+    {
         // 고정된 기능은 수정 아이콘조차 보이지 않는다(md 확정). 자리는 그대로 잡아 둔다.
+        let ui = &mut cell_at(ui, widths.actions);
         if action.changeable() {
             let tip = if editing { "그만두기 (Esc)" } else { "단축키 바꾸기" };
             let icon = if editing { crate::icons::CLOSE } else { crate::icons::EDIT_SHORTCUT };
@@ -431,8 +448,7 @@ fn shortcut_row(
                 editor.rejected = None;
             }
         }
-        },
-    );
+    }
     ui.end_row();
 
     if let Some((rejected, conflict)) = editor.rejected {
@@ -448,7 +464,7 @@ fn shortcut_row(
 /// 로그 보기 탭 — 패닉 기록과 작업 진단이 함께 쌓이는 파일(`crash_log`)의 끝부분을 보여 준다.
 ///
 /// **머리글(경로)은 스크롤 밖에 둔다** — 내려도 어느 파일을 보고 있는지 자리를 지켜야 한다.
-fn log_tab(ui: &mut egui::Ui, height: f32) {
+fn log_tab(ui: &mut egui::Ui) {
     let Some(path) = crate::crash_log::log_path() else {
         ui.label("로그 파일 위치를 알 수 없습니다.");
         return;
@@ -470,21 +486,18 @@ fn log_tab(ui: &mut egui::Ui, height: f32) {
     // 끝에서부터 보여 준다 — 방금 일어난 일이 맨 아래에 있다.
     let tail: Vec<&str> = text.lines().rev().take(LOG_TAIL_LINES).collect();
     let shown: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
-    let header = ui.spacing().interact_size.y + 10.0;
     egui::Frame::none()
         .fill(ui.visuals().extreme_bg_color)
         .inner_margin(egui::Margin::same(8.0))
         .rounding(4.0)
         .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            egui::ScrollArea::vertical().auto_shrink([false, true]).max_height((height - header).max(80.0)).show(
-                ui,
-                |ui| {
-                    // 글자 크기는 툴바와 같게 — 로그는 읽으라고 띄우는 것이다.
-                    let size = egui::TextStyle::Button.resolve(ui.style()).size;
-                    ui.add(egui::Label::new(egui::RichText::new(shown).monospace().size(size)).wrap());
-                },
-            );
+            // 머리글을 뺀 나머지를 그대로 쓴다 — 바깥에서 이미 높이를 못박아 두었다.
+            ui.set_min_size(ui.available_size());
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                // 글자 크기는 툴바와 같게 — 로그는 읽으라고 띄우는 것이다.
+                let size = egui::TextStyle::Button.resolve(ui.style()).size;
+                ui.add(egui::Label::new(egui::RichText::new(shown).monospace().size(size)).wrap());
+            });
         });
 }
 
@@ -575,6 +588,53 @@ mod tests {
                 .count();
             assert_eq!(changed, 1, "{}번째 줄이 다른 자리까지 바꾼다", index);
             *(row.pick)(&mut colors) = Palette::Slate;
+        }
+    }
+}
+
+/// 설정 창의 자리 잡기(2026-10-03 리포트).
+#[cfg(test)]
+mod layout_tests {
+    use crate::shortcuts::{Action, Category, Shortcuts};
+
+    /// 갈래마다 표를 따로 그려도 **칸 너비가 같아야** 한다. 전에는 수정 아이콘이 없는 '일반'만
+    /// 좁았다(실측 186 대 259) — `allocate_ui_with_layout`이 요청한 폭이 아니라 내용 폭만큼만
+    /// 자리를 잡기 때문이었다.
+    #[test]
+    fn every_group_uses_the_same_column_widths() {
+        let ctx = egui::Context::default();
+        crate::fonts::install_fonts(&ctx);
+        crate::fonts::install_style(&ctx);
+        let mut shortcuts = Shortcuts::default();
+        let mut editor = super::ShortcutEditor::default();
+        let mut widths: Vec<f32> = Vec::new();
+
+        // 첫 프레임은 글꼴 측정이 아직이라 두 번 돌린다.
+        for pass in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0))),
+                ..Default::default()
+            };
+            widths.clear();
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let columns = super::ColumnWidths::measure(ui, &shortcuts);
+                    for (index, category) in Category::ALL.iter().enumerate() {
+                        let before = ui.min_rect().width();
+                        egui::Grid::new(("g", index)).num_columns(3).show(ui, |ui| {
+                            for action in Action::ALL.iter().filter(|a| a.category() == *category) {
+                                super::shortcut_row(ui, *action, &mut shortcuts, &mut editor, columns);
+                            }
+                        });
+                        widths.push(ui.min_rect().width().max(before));
+                    }
+                });
+            });
+            let _ = pass;
+        }
+        let first = widths[0];
+        for (index, width) in widths.iter().enumerate() {
+            assert!((width - first).abs() < 0.5, "{index}번째 갈래의 폭이 {width}로 어긋난다(기준 {first})");
         }
     }
 }
