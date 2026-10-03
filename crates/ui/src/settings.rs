@@ -262,13 +262,13 @@ fn color_tab(ui: &mut egui::Ui, colors: &mut Colors) {
     }
 }
 
-/// 단축키 탭 — 기능 / 단축키 / 수정 세 칸.
+/// 단축키 탭 — 갈래마다 기능 / 단축키 / 수정 세 칸.
 fn shortcut_tab(
     ui: &mut egui::Ui,
     shortcuts: &mut crate::shortcuts::Shortcuts,
     editor: &mut ShortcutEditor,
 ) {
-    use crate::shortcuts::Action;
+    use crate::shortcuts::{Action, Category};
 
     // 고치는 중이면 이번 프레임에 들어온 키를 먼저 집어 든다. 그려 놓고 받으면 한 프레임 늦는다.
     if let Some(action) = editor.editing {
@@ -278,58 +278,83 @@ fn shortcut_tab(
                     editor.editing = None;
                     editor.rejected = None;
                 }
+                // **고치는 상태를 그대로 둔다** — 바로 다른 조합을 눌러 볼 수 있어야 한다
+                // (2026-10-03 요청). 받아들여지면 그때 안내가 사라진다.
                 Err(conflict) => editor.rejected = Some((action, conflict)),
             }
         }
     }
 
-    egui::Grid::new("shortcut_rows").num_columns(3).spacing([14.0, 8.0]).striped(true).show(ui, |ui| {
-        for action in Action::ALL {
-            ui.label(action.label()).on_hover_text(action.hint());
-
-            let editing = editor.editing == Some(action);
-            if editing {
-                ui.colored_label(ui.visuals().strong_text_color(), "새 단축키를 누르세요…");
-            } else {
-                let text = egui::RichText::new(shortcuts.get(action).display()).monospace();
-                let text = if shortcuts.is_default(action) { text } else { text.strong() };
-                ui.label(text);
-            }
-
-            ui.horizontal(|ui| {
-                let tip = if editing { "그만두기 (Esc)" } else { "단축키 바꾸기" };
-                let icon = if editing { crate::icons::CLOSE } else { crate::icons::EDIT_SHORTCUT };
-                if crate::icons::button(ui, icon, tip).clicked() {
-                    if action.changeable() {
-                        editor.editing = (!editing).then_some(action);
-                        editor.rejected = None;
-                    } else {
-                        // 바꿀 수 없는 기능 — 입력을 받지 않고 그 자리에서 이유만 말한다.
-                        editor.editing = None;
-                        editor.rejected = Some((action, crate::shortcuts::Conflict::Fixed));
+    for (index, category) in Category::ALL.iter().enumerate() {
+        if index > 0 {
+            ui.add_space(14.0);
+        }
+        ui.label(egui::RichText::new(category.label()).strong());
+        ui.add_space(4.0);
+        egui::Frame::none()
+            .fill(ui.visuals().faint_bg_color)
+            .rounding(6.0)
+            .stroke(egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color))
+            .inner_margin(egui::Margin::symmetric(12.0, 9.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                egui::Grid::new(("shortcut_rows", index)).num_columns(3).spacing([14.0, 7.0]).show(ui, |ui| {
+                    for action in Action::ALL.iter().filter(|a| a.category() == *category) {
+                        shortcut_row(ui, *action, shortcuts, editor);
                     }
-                }
-                // 되돌리기는 **고친 줄에만** 보인다 — 늘 두면 줄마다 아이콘이 둘씩 늘어선다.
-                if !shortcuts.is_default(action)
-                    && crate::icons::button(ui, crate::icons::UNDO, "기본값으로 되돌리기").clicked()
-                {
-                    shortcuts.reset(action);
-                    editor.editing = None;
-                    editor.rejected = None;
-                }
+                });
             });
-            ui.end_row();
+    }
+}
 
-            if let Some((rejected, conflict)) = editor.rejected {
-                if rejected == action {
-                    ui.label("");
-                    ui.colored_label(ui.visuals().error_fg_color, conflict.message());
-                    ui.label("");
-                    ui.end_row();
-                }
+fn shortcut_row(
+    ui: &mut egui::Ui,
+    action: crate::shortcuts::Action,
+    shortcuts: &mut crate::shortcuts::Shortcuts,
+    editor: &mut ShortcutEditor,
+) {
+    ui.label(action.label());
+
+    let editing = editor.editing == Some(action);
+    if editing {
+        ui.colored_label(ui.visuals().strong_text_color(), "새 단축키를 누르세요…");
+    } else if let Some(fixed) = action.fixed_display() {
+        ui.label(egui::RichText::new(fixed).monospace());
+    } else {
+        let text = egui::RichText::new(shortcuts.get(action).display()).monospace();
+        let text = if shortcuts.is_default(action) { text } else { text.strong() };
+        ui.label(text);
+    }
+
+    ui.horizontal(|ui| {
+        // 고정된 기능은 수정 아이콘조차 보이지 않는다(md 확정).
+        if action.changeable() {
+            let tip = if editing { "그만두기 (Esc)" } else { "단축키 바꾸기" };
+            let icon = if editing { crate::icons::CLOSE } else { crate::icons::EDIT_SHORTCUT };
+            if crate::icons::button(ui, icon, tip).clicked() {
+                editor.editing = (!editing).then_some(action);
+                editor.rejected = None;
+            }
+            // 되돌리기는 **고친 줄에만** 보인다 — 늘 두면 줄마다 아이콘이 둘씩 늘어선다.
+            if !shortcuts.is_default(action)
+                && crate::icons::button(ui, crate::icons::UNDO, "기본값으로 되돌리기").clicked()
+            {
+                shortcuts.reset(action);
+                editor.editing = None;
+                editor.rejected = None;
             }
         }
     });
+    ui.end_row();
+
+    if let Some((rejected, conflict)) = editor.rejected {
+        if rejected == action {
+            ui.label("");
+            ui.colored_label(ui.visuals().error_fg_color, conflict.message());
+            ui.label("");
+            ui.end_row();
+        }
+    }
 }
 
 /// 로그 보기 탭 — 패닉 기록과 작업 진단이 함께 쌓이는 파일(`crash_log`)의 끝부분을 보여 준다.

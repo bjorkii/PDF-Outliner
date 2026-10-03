@@ -1994,40 +1994,53 @@ impl PdfViewerApp {
             // C — 쪽 단위/연속 스크롤 보기 전환(2026-07-18). 다른 조합키가 전혀 없는 순수
             // "C" 키만 본다 — Cmd+C(복사)는 egui-winit이 raw Key::C 자체를 안 만들고
             // `Event::Copy`로 바꿔치기해서(위 copy_pressed 참고) 원래 안 겹치지만, Windows
-            if self.shortcuts.pressed(ctx, crate::shortcuts::Action::ToggleScrollMode) {
+            if self.shortcuts.pressed(ctx, crate::shortcuts::Action::ToggleScrollMode, self.focus_area) {
                 self.toggle_continuous_scroll();
             }
+        }
+
+        // 설정 창에서 단축키를 고치는 중이면 **아무 단축키도 발동시키지 않는다**. 그러지 않으면
+        // 새 조합으로 Cmd+S를 눌러 보는 순간 파일이 저장된다(2026-10-03).
+        if self.settings_editor.editing.is_some() {
+            return;
         }
 
         // 아래 단축키들은 **사용자가 고칠 수 있다**(`crate::shortcuts`). 보조키가 정확히 맞아야
         // 잡히므로 Cmd+Shift+Z가 Cmd+Z로 새지 않는다 — 예전에는 그 구분을 손으로 해야 했다.
         if !ctx.wants_keyboard_input() {
-            if self.shortcuts.pressed(ctx, crate::shortcuts::Action::Undo) {
+            if self.shortcuts.pressed(ctx, crate::shortcuts::Action::Undo, self.focus_area) {
                 self.undo_bookmarks();
             }
-            if self.shortcuts.pressed(ctx, crate::shortcuts::Action::Redo) {
+            if self.shortcuts.pressed(ctx, crate::shortcuts::Action::Redo, self.focus_area) {
                 self.redo_bookmarks();
             }
             // 북마크 추가의 실제 처리는 sidebar.rs가 맡는다(편집 포커스 이동까지 이어져야 해서) —
             // 여기선 요청만 세운다.
-            if self.shortcuts.pressed(ctx, crate::shortcuts::Action::AddBookmark) {
+            if self.shortcuts.pressed(ctx, crate::shortcuts::Action::AddBookmark, self.focus_area) {
                 self.request_add_bookmark = true;
             }
             // 웹브라우저 뒤로/앞으로가기처럼 페이지 이동 히스토리를 순회한다(북마크 클릭, 문서 내
             // 링크 클릭, 방향키, 페이지 번호 입력 등으로 쌓인 히스토리 — go_to_page 참고).
-            if self.shortcuts.pressed(ctx, crate::shortcuts::Action::HistoryBack) {
+            if self.shortcuts.pressed(ctx, crate::shortcuts::Action::HistoryBack, self.focus_area) {
                 self.navigate_back();
             }
-            if self.shortcuts.pressed(ctx, crate::shortcuts::Action::HistoryForward) {
+            if self.shortcuts.pressed(ctx, crate::shortcuts::Action::HistoryForward, self.focus_area) {
                 self.navigate_forward();
+            }
+            // **확대/축소는 지면에만 건다.** egui가 기본으로 들고 있는 Cmd+±는 앱 전체(글자·버튼까지)를
+            // 키우는 것이라 꺼 두었다(`fonts::install_style`).
+            if self.shortcuts.pressed(ctx, crate::shortcuts::Action::ZoomIn, self.focus_area) {
+                self.viewport.zoom_in();
+            }
+            if self.shortcuts.pressed(ctx, crate::shortcuts::Action::ZoomOut, self.focus_area) {
+                self.viewport.zoom_out();
             }
             // 북마크 삭제는 **사이드바가 포커스일 때만** 동작한다. 페이지 이동만 해도 선택이
             // 자동 동기화로 거의 항상 잡혀 있으므로(set_current_page), 뷰어를 보다가 무심코 누른
             // Delete가 엉뚱한 북마크를 지우는 사고를 막아야 한다(2026-07-17). 사이드바 텍스트
             // 편집 중에는 wants_keyboard_input()이 true라 여기까지 오지 않는다.
-            if self.focus_area == FocusArea::Sidebar
-                && self.selected_bookmark.is_some()
-                && self.shortcuts.pressed(ctx, crate::shortcuts::Action::DeleteBookmark)
+            if self.selected_bookmark.is_some()
+                && self.shortcuts.pressed(ctx, crate::shortcuts::Action::DeleteBookmark, self.focus_area)
             {
                 self.delete_selected_bookmark();
             }
@@ -2051,7 +2064,7 @@ impl PdfViewerApp {
         // Cmd+F(맥)/Ctrl+F(윈도우) — 검색창으로 포커스 이동. 어디에 포커스가 있든(예:
         // 사이드바 이름 편집 중이 아닌 한) 항상 가로채야 브라우저의 찾기 단축키처럼
         // 동작한다 — wants_keyboard_input() 게이트 밖에 둔 이유.
-        if self.shortcuts.pressed(ctx, crate::shortcuts::Action::Search) {
+        if self.shortcuts.pressed(ctx, crate::shortcuts::Action::Search, self.focus_area) {
             self.request_focus_search = true;
             self.focus_search_results();
         }
@@ -2064,21 +2077,20 @@ impl PdfViewerApp {
         // sidebar.rs가 같은 자리에서 북마크 제목 수정(`Action::RenameBookmark`)으로 쓴다. 둘은
         // 서로 다른 영역에서만 듣기 때문에 기본값이 같은 F2라도 겹치지 않는다.
         if !ctx.wants_keyboard_input()
-            && self.focus_area != FocusArea::Sidebar
             && self.rename_input.is_none()
-            && self.shortcuts.pressed(ctx, crate::shortcuts::Action::RenameFile)
+            && self.shortcuts.pressed(ctx, crate::shortcuts::Action::RenameFile, self.focus_area)
         {
             self.begin_rename();
         }
 
-        if self.bookmarks_dirty && self.shortcuts.pressed(ctx, crate::shortcuts::Action::SaveBookmarks) {
+        if self.bookmarks_dirty && self.shortcuts.pressed(ctx, crate::shortcuts::Action::SaveFile, self.focus_area) {
             self.save_bookmarks_to_pdf();
         }
 
         // F1 — OCR 표시 모드를 한 단계씩 돌린다(꺼짐 → OCR만 → 전부 → 꺼짐). 글자를 넣는 키가
         // 아니므로 입력칸에 포커스가 있어도 받는다. macOS에서 F1이 밝기 키로 먹히는 경우를
         // 대비해 OCR 메뉴에도 같은 항목을 둔다.
-        if self.shortcuts.pressed(ctx, crate::shortcuts::Action::OcrOverlay) {
+        if self.shortcuts.pressed(ctx, crate::shortcuts::Action::OcrOverlay, self.focus_area) {
             self.toggle_ocr_overlay();
         }
 

@@ -11,31 +11,62 @@
 //! `Esc`(닫기)·`Enter`(확정)·화살표(목록 이동)는 목록에도 넣지 않는다 — 어느 창에서나 같은 뜻이라
 //! 설명할 것이 없다. 다만 **다른 기능에 그 키를 주려 할 때는 막아야** 하므로 [`RESERVED`]에 둔다.
 //!
-//! **겹침은 포커스 영역(`Scope`)별로 따진다.** 사이드바에서만 듣는 키와 뷰어에서만 듣는 키는 같아도
-//! 된다 — `F2`가 그렇다(사이드바면 북마크 제목, 그 밖에서는 파일명).
+//! **겹침과 발동을 같은 기준으로 가른다.** 기능마다 "어느 포커스에서 듣는가"(`Scope`)를 적어 두고,
+//! 겹침 검사도 발동 판정도 그 하나를 본다(`Shortcuts::pressed`). 둘을 따로 적으면 설정 창은 "안
+//! 겹친다"고 하는데 실제로는 가로채는 일이 생긴다. 그래서 `F2`가 사이드바(북마크 제목)와 그 밖
+//! (파일명)으로 나뉘어 같은 키를 쓴다.
+//!
+//! **보여 주는 묶음(`Category`)은 그와 따로다.** `Cmd+F`는 어디서나 듣지만 사용자에게는 뷰어 기능으로
+//! 읽히는 식이다(2026-10-03 md 확정).
 
 use std::collections::BTreeMap;
+
+/// 단축키 목록에서 묶어 보여 줄 갈래(`planning/shortcuts.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Category {
+    General,
+    Viewer,
+    Bookmark,
+    Ocr,
+}
+
+impl Category {
+    pub const ALL: [Category; 4] = [Category::General, Category::Viewer, Category::Bookmark, Category::Ocr];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Category::General => "일반",
+            Category::Viewer => "뷰어",
+            Category::Bookmark => "북마크",
+            Category::Ocr => "OCR",
+        }
+    }
+}
 
 /// 단축키를 붙일 수 있는 기능.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Action {
+    SaveFile,
+    FocusSwitch,
+    RenameFile,
+    PageStep,
+    HistoryBack,
+    HistoryForward,
+    ZoomIn,
+    ZoomOut,
+    ToggleScrollMode,
+    Search,
     AddBookmark,
     DeleteBookmark,
     RenameBookmark,
-    RenameFile,
-    SaveBookmarks,
+    BookmarkStep,
     Undo,
     Redo,
-    Search,
-    HistoryBack,
-    HistoryForward,
-    ToggleScrollMode,
     OcrOverlay,
-    FocusSwitch,
+    OcrBoxStep,
 }
 
-/// 그 단축키가 **어느 포커스에서 듣는가**. 겹침을 따질 때 쓴다 — 서로 다른 영역에서만 듣는 둘은
-/// 같은 키를 써도 된다.
+/// 그 단축키가 **어느 포커스에서 듣는가**. 겹침을 따질 때도, 실제로 발동시킬 때도 이 하나를 본다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     /// 어디에 포커스가 있든 듣는다.
@@ -51,6 +82,15 @@ impl Scope {
         self == Scope::Global || other == Scope::Global || self == other
     }
 
+    /// 지금 포커스가 이 영역에 드는가.
+    pub fn allows(self, focus: crate::app::FocusArea) -> bool {
+        match self {
+            Scope::Global => true,
+            Scope::Sidebar => focus == crate::app::FocusArea::Sidebar,
+            Scope::Viewer => focus != crate::app::FocusArea::Sidebar,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Scope::Global => "어디서나",
@@ -61,110 +101,158 @@ impl Scope {
 }
 
 impl Action {
-    pub const ALL: [Action; 13] = [
+    pub const ALL: [Action; 18] = [
+        Action::SaveFile,
+        Action::FocusSwitch,
+        Action::RenameFile,
+        Action::PageStep,
+        Action::HistoryBack,
+        Action::HistoryForward,
+        Action::ZoomIn,
+        Action::ZoomOut,
+        Action::ToggleScrollMode,
+        Action::Search,
         Action::AddBookmark,
         Action::DeleteBookmark,
         Action::RenameBookmark,
-        Action::RenameFile,
-        Action::SaveBookmarks,
+        Action::BookmarkStep,
         Action::Undo,
         Action::Redo,
-        Action::Search,
-        Action::HistoryBack,
-        Action::HistoryForward,
-        Action::ToggleScrollMode,
         Action::OcrOverlay,
-        Action::FocusSwitch,
+        Action::OcrBoxStep,
     ];
 
-    /// 어느 포커스에서 듣는가.
+    pub fn category(self) -> Category {
+        match self {
+            Action::SaveFile | Action::FocusSwitch | Action::RenameFile => Category::General,
+            Action::PageStep
+            | Action::HistoryBack
+            | Action::HistoryForward
+            | Action::ZoomIn
+            | Action::ZoomOut
+            | Action::ToggleScrollMode
+            | Action::Search => Category::Viewer,
+            Action::AddBookmark
+            | Action::DeleteBookmark
+            | Action::RenameBookmark
+            | Action::BookmarkStep
+            | Action::Undo
+            | Action::Redo => Category::Bookmark,
+            Action::OcrOverlay | Action::OcrBoxStep => Category::Ocr,
+        }
+    }
+
     pub fn scope(self) -> Scope {
         match self {
-            Action::DeleteBookmark | Action::RenameBookmark => Scope::Sidebar,
-            Action::RenameFile => Scope::Viewer,
+            Action::DeleteBookmark | Action::RenameBookmark | Action::BookmarkStep => Scope::Sidebar,
+            Action::RenameFile | Action::PageStep | Action::OcrBoxStep => Scope::Viewer,
             _ => Scope::Global,
         }
     }
 
-    /// 바꿀 수 있는가. `Tab`은 영역 전환이라 바꾸면 키보드만으로 앱을 못 돌아다니게 된다.
+    /// 바꿀 수 있는가. md에서 `[고정]`으로 표시한 것은 수정 아이콘조차 보이지 않는다.
     pub fn changeable(self) -> bool {
-        self != Action::FocusSwitch
+        !matches!(
+            self,
+            Action::SaveFile
+                | Action::FocusSwitch
+                | Action::RenameFile
+                | Action::PageStep
+                | Action::Search
+                | Action::DeleteBookmark
+                | Action::BookmarkStep
+                | Action::Undo
+                | Action::Redo
+                | Action::OcrOverlay
+                | Action::OcrBoxStep
+        )
     }
 
     /// 저장 파일에 적는 이름. **화면에 보이는 이름과 따로 둔다** — 기능 이름을 다듬어도 사용자가
     /// 고쳐 둔 단축키가 날아가지 않는다.
     pub fn id(self) -> &'static str {
         match self {
+            Action::SaveFile => "save_file",
+            Action::FocusSwitch => "focus_switch",
+            Action::RenameFile => "rename_file",
+            Action::PageStep => "page_step",
+            Action::HistoryBack => "history_back",
+            Action::HistoryForward => "history_forward",
+            Action::ZoomIn => "zoom_in",
+            Action::ZoomOut => "zoom_out",
+            Action::ToggleScrollMode => "toggle_scroll_mode",
+            Action::Search => "search",
             Action::AddBookmark => "add_bookmark",
             Action::DeleteBookmark => "delete_bookmark",
             Action::RenameBookmark => "rename_bookmark",
-            Action::RenameFile => "rename_file",
-            Action::SaveBookmarks => "save_bookmarks",
+            Action::BookmarkStep => "bookmark_step",
             Action::Undo => "undo",
             Action::Redo => "redo",
-            Action::Search => "search",
-            Action::HistoryBack => "history_back",
-            Action::HistoryForward => "history_forward",
-            Action::ToggleScrollMode => "toggle_scroll_mode",
             Action::OcrOverlay => "ocr_overlay",
-            Action::FocusSwitch => "focus_switch",
+            Action::OcrBoxStep => "ocr_box_step",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Action::AddBookmark => "북마크 추가",
-            Action::DeleteBookmark => "북마크 삭제",
-            Action::RenameBookmark => "북마크 제목 수정",
+            Action::SaveFile => "파일 저장",
+            Action::FocusSwitch => "북마크-뷰어 포커스 전환",
             Action::RenameFile => "파일명 변경",
-            Action::SaveBookmarks => "북마크 저장",
-            Action::Undo => "실행취소",
-            Action::Redo => "다시 실행",
-            Action::Search => "내용 검색",
+            Action::PageStep => "이전/다음 페이지",
             Action::HistoryBack => "이전 화면",
             Action::HistoryForward => "다음 화면",
-            Action::ToggleScrollMode => "쪽 단위 / 연속 스크롤 전환",
-            Action::OcrOverlay => "OCR 표시 모드",
-            Action::FocusSwitch => "영역 전환",
+            Action::ZoomIn => "확대",
+            Action::ZoomOut => "축소",
+            Action::ToggleScrollMode => "페이지별 보기 - 연속 보기 전환",
+            Action::Search => "내용 검색",
+            Action::AddBookmark => "북마크 추가",
+            Action::DeleteBookmark => "북마크 삭제",
+            Action::RenameBookmark => "북마크 수정",
+            Action::BookmarkStep => "이전/다음 북마크",
+            Action::Undo => "실행취소",
+            Action::Redo => "다시실행",
+            Action::OcrOverlay => "OCR 텍스트 보기/숨김",
+            Action::OcrBoxStep => "OCR 상자 사이 이동",
         }
     }
 
-    pub fn hint(self) -> &'static str {
+    /// 키가 여럿인 것은 글자를 직접 적는다 — `Binding`은 하나만 담는다.
+    ///
+    /// 그런 기능의 `default_binding`은 **자리만 지키는 값**이다. 실제 발동은 모드까지 보고 가른다
+    /// (화살표는 OCR 표시 모드에서 상자를 고른 상태면 상자 이동, 아니면 쪽 이동). 겹침 검사에서는
+    /// 그 키를 다른 기능에 주지 못하게 막는 몫만 한다.
+    pub fn fixed_display(self) -> Option<&'static str> {
         match self {
-            Action::AddBookmark => "선택한 항목의 하위에, 선택이 없으면 최상위에 넣습니다.",
-            Action::DeleteBookmark => "사이드바에서 고른 북마크를 지웁니다.",
-            Action::RenameBookmark => "고른 북마크의 제목을 바로 고칩니다.",
-            Action::RenameFile => "열려 있는 PDF의 파일명을 바꿉니다.",
-            Action::SaveBookmarks => "바뀐 북마크를 PDF에 씁니다.",
-            Action::Undo => "북마크 편집을 되돌립니다.",
-            Action::Redo => "되돌린 북마크 편집을 다시 합니다.",
-            Action::Search => "문서 안의 글자를 찾습니다.",
-            Action::HistoryBack => "직전에 보던 자리로 돌아갑니다.",
-            Action::HistoryForward => "되돌아오기 전 자리로 다시 갑니다.",
-            Action::ToggleScrollMode => "한 쪽씩 보기와 이어서 보기를 오갑니다.",
-            Action::OcrOverlay => "보이지 않는 텍스트의 자리와 글자를 덮어 보여 줍니다.",
-            Action::FocusSwitch => "북마크 목록과 뷰어를 오갑니다. 검색 결과에서는 직전 영역으로 돌아갑니다.",
+            Action::PageStep => Some("←  →"),
+            Action::BookmarkStep => Some("↑  ↓"),
+            Action::OcrBoxStep => Some("←  ↑  →  ↓"),
+            _ => None,
         }
     }
 
     pub fn default_binding(self) -> Binding {
         use egui::Key;
-        let mod_ = |key| Binding { command: true, shift: false, alt: false, key };
+        let cmd = |key| Binding { command: true, shift: false, alt: false, key };
         let plain = |key| Binding { command: false, shift: false, alt: false, key };
         match self {
-            Action::AddBookmark => mod_(Key::B),
+            Action::SaveFile => cmd(Key::S),
+            Action::FocusSwitch => plain(Key::Tab),
+            Action::RenameFile => plain(Key::F2),
+            Action::PageStep => plain(Key::ArrowRight),
+            Action::HistoryBack => cmd(Key::OpenBracket),
+            Action::HistoryForward => cmd(Key::CloseBracket),
+            Action::ZoomIn => cmd(Key::Plus),
+            Action::ZoomOut => cmd(Key::Minus),
+            Action::ToggleScrollMode => plain(Key::C),
+            Action::Search => cmd(Key::F),
+            Action::AddBookmark => cmd(Key::B),
             Action::DeleteBookmark => plain(Key::Delete),
             Action::RenameBookmark => plain(Key::F2),
-            Action::RenameFile => plain(Key::F2),
-            Action::SaveBookmarks => mod_(Key::S),
-            Action::Undo => mod_(Key::Z),
+            Action::BookmarkStep => plain(Key::ArrowDown),
+            Action::Undo => cmd(Key::Z),
             Action::Redo => Binding { command: true, shift: true, alt: false, key: Key::Z },
-            Action::Search => mod_(Key::F),
-            Action::HistoryBack => mod_(Key::OpenBracket),
-            Action::HistoryForward => mod_(Key::CloseBracket),
-            Action::ToggleScrollMode => plain(Key::C),
             Action::OcrOverlay => plain(Key::F1),
-            Action::FocusSwitch => plain(Key::Tab),
+            Action::OcrBoxStep => plain(Key::ArrowRight),
         }
     }
 }
@@ -188,16 +276,25 @@ impl Binding {
     /// **보조키가 정확히 맞아야 한다.** 예전처럼 `command && key_pressed(Z)`로 느슨하게 보면
     /// `Cmd+Shift+Z`도 `Cmd+Z`로 잡힌다(실제로 그 버그가 있었다).
     pub fn matches(self, modifiers: &egui::Modifiers, key: egui::Key) -> bool {
+        // `+`는 자판에서 Shift+`=`이므로, 그 조합일 때만 Shift를 따지지 않는다.
+        let shift_free = self.key == egui::Key::Plus && key == egui::Key::Equals;
         self.same_key(key)
             && modifiers.command == self.command
-            && modifiers.shift == self.shift
+            && (shift_free || modifiers.shift == self.shift)
             && modifiers.alt == self.alt
     }
 
-    /// `Delete`와 `Backspace`를 한 키로 본다. macOS에서 `delete`라고 적힌 키는 `Backspace`로
-    /// 들어오고, 앞으로 지우기(fn+delete)만 `Delete`로 들어온다. 사용자에게는 둘 다 "Delete"다.
+    /// 같은 뜻으로 들어오는 다른 키까지 받아 준다.
+    ///
+    /// - `Delete` ← `Backspace`: macOS에서 `delete`라고 적힌 키는 `Backspace`로 들어오고, 앞으로
+    ///   지우기(fn+delete)만 `Delete`로 들어온다. 사용자에게는 둘 다 "Delete"다.
+    /// - `+` ← `=`: 대부분의 자판에서 `+`는 `=` 키를 Shift와 함께 누른 것이라, 눌린 키는 `Equals`로
+    ///   들어온다. 전용 `+` 키(숫자 자판)만 `Plus`다.
     fn same_key(self, key: egui::Key) -> bool {
-        key == self.key || (self.key == egui::Key::Delete && key == egui::Key::Backspace)
+        use egui::Key;
+        key == self.key
+            || (self.key == Key::Delete && key == Key::Backspace)
+            || (self.key == Key::Plus && key == Key::Equals)
     }
 
     /// 저장용 글자. **플랫폼과 무관하게** `Mod`로 적는다 — 설정 파일을 다른 OS로 옮겨도 뜻이 같다.
@@ -252,47 +349,17 @@ impl Binding {
     }
 }
 
-/// 어느 창에서나 뜻이 같아 목록에 올리지도 않는 키 — 다른 기능에 줄 수 없다. `Tab`은 여기 없다.
-/// 목록에 `Action::FocusSwitch`로 올라가 있어서 겹침 검사에 저절로 걸린다.
-const RESERVED: &[egui::Key] = &[
-    egui::Key::Escape,
-    egui::Key::Enter,
-    egui::Key::ArrowUp,
-    egui::Key::ArrowDown,
-    egui::Key::ArrowLeft,
-    egui::Key::ArrowRight,
-];
-
-/// OS가 먼저 가로채는 조합. 눌러도 앱에 오지 않으므로 받아 줘 봐야 "안 먹는 단축키"가 된다.
+/// 어느 창에서나 뜻이 같아 목록에 올리지도 않는 키 — 다른 기능에 줄 수 없다.
 ///
-/// **손으로 적은 목록이다.** 시스템이 지금 어떤 키를 쓰는지 물어보는 공개 API가 없다 — macOS는
-/// `com.apple.symbolichotkeys` 환경설정에 사용자가 바꾼 것까지 들어 있지만 문서화되지 않은
-/// 형식이고, Windows는 `RegisterHotKey`로 **잡아 봐야** 알 수 있다(잡으면 그 키를 우리가 먹는
-/// 셈이라 확인용으로 쓸 수 없다). 그래서 널리 쓰이는 것만 적어 두고, 빠진 것은 "눌러도 아무 일이
-/// 없다"로 남는다(2026-10-03 논의).
-fn taken_by_system(binding: Binding) -> bool {
-    use egui::Key;
-    if cfg!(target_os = "macos") {
-        let plain_command = binding.command && !binding.shift && !binding.alt;
-        // ⌘Q 끝내기, ⌘W 닫기, ⌘H 숨기기, ⌘M 최소화, ⌘, 환경설정, ⌘Tab 앱 전환,
-        // ⌘Space Spotlight, ⌘⌥Esc 강제 종료.
-        (plain_command && matches!(binding.key, Key::Q | Key::W | Key::H | Key::M | Key::Comma | Key::Tab | Key::Space))
-            || (binding.command && binding.alt && binding.key == Key::Escape)
-            || (binding.command && binding.shift && matches!(binding.key, Key::Num3 | Key::Num4 | Key::Num5))
-    } else {
-        // Alt+Tab(창 전환), Alt+F4(닫기), Ctrl+Shift+Esc(작업 관리자).
-        (binding.alt && matches!(binding.key, Key::Tab | Key::F4))
-            || (binding.command && binding.shift && binding.key == Key::Escape)
-    }
-}
+/// `Tab`과 화살표는 여기 없다. 목록에 `FocusSwitch`·`PageStep`·`BookmarkStep`·`OcrBoxStep`으로
+/// 올라가 있어서 겹침 검사에 저절로 걸린다.
+const RESERVED: &[egui::Key] = &[egui::Key::Escape, egui::Key::Enter];
 
 /// 단축키가 겹친 이유.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Conflict {
     /// 같은 영역에서 듣는 다른 기능이나, 목록에 없는 구조적인 키가 이미 쓰고 있다.
     App,
-    /// OS가 먼저 가져간다.
-    System,
     /// 이 기능의 단축키는 바꿀 수 없다(`Action::changeable`).
     Fixed,
 }
@@ -301,7 +368,6 @@ impl Conflict {
     pub fn message(self) -> &'static str {
         match self {
             Conflict::App => "이 단축키는 앱에서 이미 사용 중입니다.",
-            Conflict::System => "이 단축키는 시스템에서 이미 사용 중입니다.",
             Conflict::Fixed => "이 단축키는 변경할 수 없습니다.",
         }
     }
@@ -329,9 +395,6 @@ impl Shortcuts {
     pub fn conflict(&self, action: Action, binding: Binding) -> Option<Conflict> {
         if !action.changeable() {
             return Some(Conflict::Fixed);
-        }
-        if taken_by_system(binding) {
-            return Some(Conflict::System);
         }
         if RESERVED.contains(&binding.key) && !binding.command && !binding.alt {
             return Some(Conflict::App);
@@ -366,7 +429,14 @@ impl Shortcuts {
     }
 
     /// 지금 이 기능의 단축키가 눌렸는가.
-    pub fn pressed(&self, ctx: &egui::Context, action: Action) -> bool {
+    ///
+    /// **포커스 영역까지 여기서 본다.** 겹침 검사와 **같은 `Scope`**를 쓰므로, 설정 창이 "안
+    /// 겹친다"고 말한 조합이 실제로는 가로채는 일이 생기지 않는다. 부르는 쪽에서 따로 포커스를
+    /// 확인하던 것을 이리로 모았다(2026-10-03 사용자 제안).
+    pub fn pressed(&self, ctx: &egui::Context, action: Action, focus: crate::app::FocusArea) -> bool {
+        if !action.scope().allows(focus) {
+            return false;
+        }
         let binding = self.get(action);
         ctx.input(|i| {
             i.events.iter().any(|event| match event {
@@ -410,6 +480,11 @@ mod tests {
     fn no_two_defaults_collide_within_one_scope() {
         for (index, a) in Action::ALL.iter().enumerate() {
             for b in &Action::ALL[index + 1..] {
+                // 키가 여럿인 기능의 기본값은 자리만 지키는 값이라 서로 겹쳐도 된다 — 실제 발동은
+                // 모드까지 보고 가른다(`fixed_display` 주석).
+                if a.fixed_display().is_some() || b.fixed_display().is_some() {
+                    continue;
+                }
                 if !a.scope().overlaps(b.scope()) {
                     continue;
                 }
@@ -426,18 +501,29 @@ mod tests {
         }
     }
 
+    /// 키가 여럿인 기능은 모두 고정이어야 한다 — 자리만 지키는 값을 사용자가 고치게 두면 안 된다.
+    #[test]
+    fn placeholder_bindings_are_all_fixed() {
+        for action in Action::ALL.iter().filter(|a| a.fixed_display().is_some()) {
+            assert!(!action.changeable(), "{}는 키가 여럿인데 고칠 수 있다", action.label());
+        }
+    }
+
     /// 포커스가 다르면 같은 키를 나눠 쓸 수 있다. 그것이 F2를 둘로 나눈 이유다.
     #[test]
     fn different_scopes_may_share_a_key() {
         let shortcuts = Shortcuts::default();
         let f2 = Action::RenameBookmark.default_binding();
         assert_eq!(Action::RenameFile.default_binding(), f2);
-        assert_eq!(shortcuts.conflict(Action::RenameFile, f2), None);
         assert_eq!(shortcuts.conflict(Action::RenameBookmark, f2), None);
 
         // 어디서나 듣는 기능은 영역을 가리지 않고 겹친다 — 양쪽 다.
-        assert_eq!(shortcuts.conflict(Action::Search, f2), Some(Conflict::App), "F2를 어디서나 듣게 두면 겹친다");
-        let save = Action::SaveBookmarks.default_binding();
+        assert_eq!(
+            shortcuts.conflict(Action::AddBookmark, f2),
+            Some(Conflict::App),
+            "F2를 어디서나 듣는 기능에 주면 겹친다"
+        );
+        let save = Action::SaveFile.default_binding();
         assert_eq!(shortcuts.conflict(Action::RenameBookmark, save), Some(Conflict::App));
     }
 
@@ -451,9 +537,11 @@ mod tests {
         assert_eq!(shortcuts.set(Action::FocusSwitch, f7), Err(Conflict::Fixed));
         assert_eq!(shortcuts.get(Action::FocusSwitch), Action::FocusSwitch.default_binding());
 
-        // 다른 기능에 Tab을 주려 해도 막힌다 — 목록에 있으니 겹침 검사에 걸린다.
+        // 다른 기능에 Tab이나 화살표를 주려 해도 막힌다 — 목록에 있으니 겹침 검사에 걸린다.
         let tab = Binding { command: false, shift: false, alt: false, key: Key::Tab };
-        assert_eq!(shortcuts.conflict(Action::Search, tab), Some(Conflict::App));
+        assert_eq!(shortcuts.conflict(Action::AddBookmark, tab), Some(Conflict::App));
+        let right = Binding { command: false, shift: false, alt: false, key: Key::ArrowRight };
+        assert_eq!(shortcuts.conflict(Action::AddBookmark, right), Some(Conflict::App));
     }
 
     /// 기능 id는 저장 파일의 열쇠다 — 겹치면 서로 덮어쓴다.
@@ -504,29 +592,18 @@ mod tests {
         let mut shortcuts = Shortcuts::default();
 
         // 다른 기능이 쓰고 있다.
-        let save = Action::SaveBookmarks.default_binding();
-        assert_eq!(shortcuts.conflict(Action::Search, save), Some(Conflict::App));
-        assert_eq!(shortcuts.set(Action::Search, save), Err(Conflict::App));
+        let save = Action::SaveFile.default_binding();
+        assert_eq!(shortcuts.conflict(Action::AddBookmark, save), Some(Conflict::App));
+        assert_eq!(shortcuts.set(Action::AddBookmark, save), Err(Conflict::App));
 
         // 목록에 올리지 않은 구조적인 키.
         let esc = Binding { command: false, shift: false, alt: false, key: Key::Escape };
-        assert_eq!(shortcuts.conflict(Action::Search, esc), Some(Conflict::App));
+        assert_eq!(shortcuts.conflict(Action::AddBookmark, esc), Some(Conflict::App));
 
-        // 자기 자신과는 겹치지 않는다.
-        assert_eq!(shortcuts.conflict(Action::SaveBookmarks, save), None);
-    }
-
-    /// OS가 가져가는 조합은 받아 봐야 먹지 않는다.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn the_system_keeps_some_combinations() {
-        let shortcuts = Shortcuts::default();
-        assert_eq!(shortcuts.conflict(Action::Search, mod_(Key::Q)), Some(Conflict::System));
-        assert_eq!(shortcuts.conflict(Action::Search, mod_(Key::W)), Some(Conflict::System));
-        // 기본값 중에는 그런 것이 없어야 한다.
-        for action in Action::ALL {
-            assert!(!super::taken_by_system(action.default_binding()), "{}", action.label());
-        }
+        // 자기 자신과는 겹치지 않는다. 단, 고정된 기능은 그 자체로 막힌다.
+        assert_eq!(shortcuts.conflict(Action::SaveFile, save), Some(Conflict::Fixed));
+        let add = Action::AddBookmark.default_binding();
+        assert_eq!(shortcuts.conflict(Action::AddBookmark, add), None);
     }
 
     /// 기본값으로 되돌리면 저장할 것이 없다 — 나중에 기본값이 바뀌면 그대로 따라간다.
@@ -536,17 +613,17 @@ mod tests {
         assert!(shortcuts.to_storage().is_empty());
 
         let f7 = Binding { command: false, shift: false, alt: false, key: Key::F7 };
-        shortcuts.set(Action::Search, f7).unwrap();
+        shortcuts.set(Action::AddBookmark, f7).unwrap();
         assert_eq!(shortcuts.to_storage().len(), 1);
-        assert_eq!(shortcuts.get(Action::Search), f7);
-        assert!(!shortcuts.is_default(Action::Search));
+        assert_eq!(shortcuts.get(Action::AddBookmark), f7);
+        assert!(!shortcuts.is_default(Action::AddBookmark));
 
         // 되읽어도 같다.
         let restored = Shortcuts::from_storage(&shortcuts.to_storage());
         assert_eq!(restored, shortcuts);
 
-        shortcuts.set(Action::Search, Action::Search.default_binding()).unwrap();
+        shortcuts.set(Action::AddBookmark, Action::AddBookmark.default_binding()).unwrap();
         assert!(shortcuts.to_storage().is_empty());
-        assert!(shortcuts.is_default(Action::Search));
+        assert!(shortcuts.is_default(Action::AddBookmark));
     }
 }

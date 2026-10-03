@@ -27,6 +27,10 @@ pub fn install_style(ctx: &egui::Context) {
         // 창 안의 줄 사이를 조금 벌린다 — 기본값(4)은 문장이 여러 줄 이어질 때 답답하다.
         style.spacing.item_spacing.y = 6.0;
     });
+    // **egui가 기본으로 들고 있는 Cmd+± 전체 확대를 끈다**(2026-10-03 요청). 그 기능은 글자·버튼까지
+    // 함께 키워 앱 전체가 커진다. 같은 키를 지면 확대/축소에 쓰고 싶으므로 여기서 비켜 준다
+    // (`shortcuts::Action::ZoomIn`/`ZoomOut`).
+    ctx.options_mut(|options| options.zoom_with_keyboard = false);
 }
 
 /// 아이콘 글리프를 담은 폰트 가족 이름. `crate::icons`가 이 이름으로 글자를 그린다.

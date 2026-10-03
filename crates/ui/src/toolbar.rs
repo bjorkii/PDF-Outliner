@@ -514,7 +514,7 @@ fn zoom_group(ui: &mut egui::Ui, app: &mut PdfViewerApp) {
     // 위와 달리 "현재 모드"를 아이콘으로 보여준다(사용자 명세: 연속 모드에서는
     // 연속 스크롤 아이콘, 다시 누르거나 C를 누르면 쪽 단위 아이콘으로 변경).
     let mode_response = if app.continuous_scroll {
-        crate::icons::button(ui, crate::icons::SCROLL_MODE, "스크롤 보기(C)")
+        crate::icons::button(ui, crate::icons::SCROLL_MODE, "연속 보기(C)")
     } else {
         crate::icons::button(ui, crate::icons::PAGE_MODE, "페이지 단위 보기(C)")
     };

@@ -269,7 +269,7 @@ pub fn show(ctx: &egui::Context, app: &mut PdfViewerApp) {
                     // 선택된 항목을 곧바로 이름 편집 모드로. 더블클릭/재클릭과 같은 진입점이지만
                     // 키보드만으로 닿게 하는 것이 목적이다. 사이드바에서만 듣는 단축키라
                     // (`Scope::Sidebar`) 파일명 변경과 기본값이 같아도 겹치지 않는다.
-                    if app.shortcuts.pressed(ctx, crate::shortcuts::Action::RenameBookmark) {
+                    if app.shortcuts.pressed(ctx, crate::shortcuts::Action::RenameBookmark, app.focus_area) {
                         if let Some(title) = find_title(&app.bookmarks, selected) {
                             drag_state.editing = Some((selected, title));
                             drag_state.focus_editing = true;
